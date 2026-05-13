@@ -258,29 +258,60 @@ def handle_voice(message):
         bot.send_message(chat_id, "⚠️ Не удалось расшифровать голосовое. Попробуй ещё раз.")
 
 
+def build_location_markup(lat, lon, is_live=False):
+    maps_link = f"https://maps.google.com/?q={lat},{lon}"
+    toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+    label = "🔴 Живое гео" if is_live else "📍 Моё гео"
+    sms_text = f"{label} Руслана: {maps_link}"
+    sms_link = f"sms:{toha_number}?body={sms_text}"
+
+    markup = types.InlineKeyboardMarkup()
+    markup.row(types.InlineKeyboardButton("🗺️ Открыть в Google картах", url=maps_link))
+    markup.row(types.InlineKeyboardButton("📱 Отправить SMS Тохе со своего телефона", url=sms_link))
+    markup.row(types.InlineKeyboardButton("🚕 Отправить через Twilio", callback_data="send_geo_toha"))
+    return markup, maps_link
+
+
 @bot.message_handler(content_types=['location'])
 def handle_location(message):
     chat_id = message.chat.id
     lat = message.location.latitude
     lon = message.location.longitude
+    is_live = bool(message.location.live_period)
 
-    # Сохраняем последнюю геопозицию
+    last_location[chat_id] = (lat, lon)
+    markup, maps_link = build_location_markup(lat, lon, is_live)
+
+    if is_live:
+        mins = message.location.live_period // 60
+        bot.send_message(
+            chat_id,
+            f"🔴 *Живая геолокация запущена!*\nТранслируется {mins} минут\n\n"
+            f"Координаты обновляются автоматически.\n📍 {maps_link}",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            f"📍 Геопозиция сохранена!\nШирота: {lat}\nДолгота: {lon}",
+            reply_markup=markup
+        )
+
+
+@bot.edited_message_handler(content_types=['location'])
+def handle_live_location_update(message):
+    """Обновления живой геолокации"""
+    chat_id = message.chat.id
+    if message.location is None:
+        return
+
+    lat = message.location.latitude
+    lon = message.location.longitude
     last_location[chat_id] = (lat, lon)
 
-    maps_link = f"https://maps.google.com/?q={lat},{lon}"
-    toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-    sms_text = f"📍 Руслан ждёт тебя здесь: {maps_link}"
-    # Ссылка открывает SMS приложение с заполненным номером и текстом
-    sms_link = f"sms:{toha_number}?body={sms_text}"
-
-    markup = types.InlineKeyboardMarkup()
-    markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
-    markup.row(types.InlineKeyboardButton("📱 Отправить SMS Тохе со своего телефона", url=sms_link))
-    markup.row(types.InlineKeyboardButton("🚕 Отправить через Twilio", callback_data="send_geo_toha"))
-
-    bot.send_message(chat_id,
-                     f"📍 Геопозиция сохранена!\nШирота: {lat}\nДолгота: {lon}",
-                     reply_markup=markup)
+    # Тихо обновляем координаты, без спама сообщениями
+    print(f"📍 Обновление live location от {chat_id}: {lat}, {lon}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "send_geo_toha")
