@@ -12,6 +12,7 @@ from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet,
 from roles import get_role, set_role, list_roles
 from calls import make_call
 from grok import ask_grok
+from memory import get_facts, add_fact, delete_fact, clear_facts, facts_for_prompt
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -346,6 +347,38 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         bot.send_message(chat_id, f"✅ @{username} назначен как *{role_labels.get(role, role)}*.",
                          parse_mode="Markdown")
 
+    elif action_type == "remember":
+        fact = action_param or ""
+        if fact:
+            added = add_fact(fact)
+            if added:
+                bot.send_message(chat_id, f"🧠 Запомнил: «{fact}»")
+        # Если fact пустой или дубликат — молчим, это фоновое действие
+
+    elif action_type == "recall":
+        facts = get_facts()
+        if not facts:
+            bot.send_message(chat_id, "🧠 Пока ничего не запомнено. Скажи мне что запомнить!")
+        else:
+            lines = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(facts))
+            bot.send_message(chat_id, f"🧠 *Запомненные факты:*\n\n{lines}", parse_mode="Markdown")
+
+    elif action_type == "forget_fact":
+        try:
+            idx = int(action_param or "0") - 1
+            removed = delete_fact(idx)
+            if removed:
+                bot.send_message(chat_id, f"🗑️ Забыл: «{removed}»")
+            else:
+                facts = get_facts()
+                bot.send_message(chat_id, f"⚠️ Нет факта с номером {(idx + 1)}. Всего запомнено: {len(facts)}.")
+        except (ValueError, TypeError):
+            bot.send_message(chat_id, "⚠️ Укажи номер факта. Например: забудь факт 2")
+
+    elif action_type == "forget_all_facts":
+        clear_facts()
+        bot.send_message(chat_id, "🗑️ Вся долгосрочная память очищена.")
+
     elif action_type == "forget":
         grok_history.pop(chat_id, None)
         _save_grok_history()
@@ -354,32 +387,44 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
 
 def _ask_grok_and_route(chat_id: int, text: str):
     """Отправляет сообщение в Grok, разбирает ACTION-теги, показывает ответ."""
+    import re
     history = grok_history.get(chat_id, [])
+    memory_facts = get_facts()
     bot.send_chat_action(chat_id, "typing")
-    reply = ask_grok(text, history)
+    reply = ask_grok(text, history, memory_facts=memory_facts if memory_facts else None)
 
-    # Сохраняем в историю (полный ответ с тегом для контекста модели не нужен — сохраняем чистый)
-    action_type, action_param, clean_reply = _parse_action(reply)
+    # Вытаскиваем ВСЕ [ACTION:remember:...] теги из любого места ответа (проактивная память)
+    remember_matches = re.findall(r"\[ACTION:remember:([^\]]+)\]", reply)
+    # Убираем remember-теги из текста (они служебные, не для показа)
+    reply_no_remember = re.sub(r"\[ACTION:remember:[^\]]+\]\s*", "", reply).strip()
+
+    # Теперь парсим основное действие (из начала очищенного текста)
+    action_type, action_param, clean_reply = _parse_action(reply_no_remember)
+
+    # Сохраняем в историю (чистый текст без тегов)
     history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": clean_reply or reply})
+    history.append({"role": "assistant", "content": clean_reply or reply_no_remember})
     grok_history[chat_id] = history
     _save_grok_history()
+
+    # Фоново сохраняем все remember-факты (тихо — без уведомления пользователя)
+    for fact in remember_matches:
+        add_fact(fact.strip())
 
     # Проверяем — пришёл ли запрос голосом (для TTS-ответа)
     is_voice = chat_id in voice_request_chats
     if is_voice:
         voice_request_chats.discard(chat_id)
 
-    # Сначала выполняем действие (если есть)
-    if action_type and action_type != "forget":
-        _handle_grok_action(chat_id, action_type, action_param)
-    elif action_type == "forget":
+    # Выполняем основное действие (если есть)
+    if action_type == "forget":
         _handle_grok_action(chat_id, action_type, action_param)
         return  # forget сам выводит сообщение
+    if action_type:
+        _handle_grok_action(chat_id, action_type, action_param)
 
-    # Потом показываем текстовый ответ Grok (если не пустой)
+    # Показываем текстовый ответ Grok (если не пустой)
     if clean_reply and clean_reply.strip():
-        # Голосовой запрос → сначала голосовой ответ, потом текст
         if is_voice:
             _tts_send_voice(chat_id, clean_reply)
         safe_send(chat_id, clean_reply, main_menu())
@@ -664,6 +709,22 @@ def cmd_forget(message):
     grok_history.pop(chat_id, None)
     _save_grok_history()
     bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с нуля!", reply_markup=main_menu())
+
+
+@bot.message_handler(commands=['memory'])
+def cmd_memory(message):
+    chat_id = message.chat.id
+    if not is_allowed(chat_id):
+        return
+    facts = get_facts()
+    if not facts:
+        bot.send_message(chat_id, "🧠 Долгосрочная память пуста.\n\nСкажи мне что запомнить — например: «запомни, Тоха работает по вторникам»")
+    else:
+        lines = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(facts))
+        bot.send_message(chat_id,
+                         f"🧠 *Запомнено навсегда ({len(facts)} фактов):*\n\n{lines}\n\n"
+                         f"Чтобы удалить факт — скажи «забудь факт 2»",
+                         parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['start'])
