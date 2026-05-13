@@ -73,11 +73,28 @@ waiting_for_call_msg = {}
 # Состояние звонка владельца: {chat_id: {"step": "number"} | {"step": "message", "number": "..."}}
 waiting_for_owner_call = {}
 
-# История чата с Grok: {chat_id: [{"role": "user"/"assistant", "content": "..."}]}
-grok_history = {}
-
 # Режим чата с Grok: {chat_id: True} — пока активен, все сообщения идут в Grok
 grok_mode = {}
+
+# История чата с Grok — сохраняется на диск
+GROK_HISTORY_FILE = "grok_history.json"
+
+def _load_grok_history() -> dict:
+    if os.path.exists(GROK_HISTORY_FILE):
+        try:
+            import json
+            with open(GROK_HISTORY_FILE) as f:
+                return {int(k): v for k, v in json.load(f).items()}
+        except Exception:
+            pass
+    return {}
+
+def _save_grok_history():
+    import json
+    with open(GROK_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump({str(k): v for k, v in grok_history.items()}, f, ensure_ascii=False, indent=2)
+
+grok_history: dict = _load_grok_history()
 
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
@@ -166,17 +183,17 @@ def process_text(chat_id, text):
 
     # ── Режим чата с Grok ────────────────────────────────────────────────────
     if grok_mode.get(chat_id):
-        if t.strip() in ["стоп", "выход", "exit", "хватит", "🔙 назад", "назад"]:
+        if t.strip() in ["стоп", "выход", "exit", "хватит", "🔙 выйти из grok", "назад"]:
             grok_mode.pop(chat_id, None)
-            grok_history.pop(chat_id, None)
-            bot.send_message(chat_id, "✅ Вышел из режима Grok.", reply_markup=main_menu())
+            bot.send_message(chat_id, "✅ Вышел из Grok. История сохранена.", reply_markup=main_menu())
             return
         history = grok_history.get(chat_id, [])
         bot.send_chat_action(chat_id, "typing")
         reply = ask_grok(text, history)
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": reply})
-        grok_history[chat_id] = history[-20:]  # храним последние 20 сообщений
+        grok_history[chat_id] = history  # полная история без обрезки
+        _save_grok_history()
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add("🔙 Выйти из Grok")
         bot.send_message(chat_id, reply, reply_markup=markup)
@@ -185,12 +202,14 @@ def process_text(chat_id, text):
     # ── Кнопка «🤖 Спросить Grok» ────────────────────────────────────────────
     if "grok" in t or "🤖" in t or "спросить grok" in t:
         grok_mode[chat_id] = True
-        grok_history[chat_id] = []
+        # историю НЕ сбрасываем — помним всё
+        history = grok_history.get(chat_id, [])
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add("🔙 Выйти из Grok")
-        bot.send_message(chat_id,
-                         "🤖 *Grok активирован!*\n\nПиши или говори — отвечу на любой вопрос.\nЧтобы выйти напиши «стоп».",
-                         parse_mode="Markdown", reply_markup=markup)
+        msg = "🤖 *Grok активирован!*\n\nПиши или говори — отвечу на любой вопрос.\nЧтобы выйти напиши «стоп»."
+        if history:
+            msg += f"\n\n_Помню нашу историю — {len(history) // 2} сообщений._"
+        bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=markup)
         return
 
     # ── Состояние: ожидаем номер для звонка ──────────────────────────────────
