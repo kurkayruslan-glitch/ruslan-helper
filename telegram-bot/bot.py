@@ -268,10 +268,15 @@ def handle_location(message):
     last_location[chat_id] = (lat, lon)
 
     maps_link = f"https://maps.google.com/?q={lat},{lon}"
+    toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+    sms_text = f"📍 Руслан ждёт тебя здесь: {maps_link}"
+    # Ссылка открывает SMS приложение с заполненным номером и текстом
+    sms_link = f"sms:{toha_number}?body={sms_text}"
 
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
-    markup.add(types.InlineKeyboardButton("🚕 Отправить Тохе SMS", callback_data="send_geo_toha"))
+    markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+    markup.row(types.InlineKeyboardButton("📱 Отправить SMS Тохе со своего телефона", url=sms_link))
+    markup.row(types.InlineKeyboardButton("🚕 Отправить через Twilio", callback_data="send_geo_toha"))
 
     bot.send_message(chat_id,
                      f"📍 Геопозиция сохранена!\nШирота: {lat}\nДолгота: {lon}",
