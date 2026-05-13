@@ -196,9 +196,13 @@ def _parse_action(reply: str) -> tuple[str | None, str | None, str]:
     Примеры тегов: [ACTION:call_toha], [ACTION:usdt:TAddr...], [ACTION:forget]
     """
     import re
-    match = re.match(r"^\[ACTION:([^\]]+)\]\s*", reply)
+    # Устойчиво к ведущим пробелам/переносам строки перед тегом
+    stripped = reply.lstrip()
+    match = re.match(r"^\[ACTION:([^\]]+)\]\s*", stripped)
     if not match:
         return None, None, reply
+    # Возвращаем оригинальный текст без тега, сохраняя его начало
+    reply = stripped
     tag_content = match.group(1)
     text_after = reply[match.end():]
     parts = tag_content.split(":", 1)
@@ -225,7 +229,11 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
     elif action_type == "sms_toha":
         toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
         msg = action_param or ""
-        if toha_number and msg:
+        if not toha_number:
+            bot.send_message(chat_id, "⚠️ Номер Тохи не настроен в системе.")
+        elif not msg:
+            bot.send_message(chat_id, "⚠️ Текст SMS не указан — напиши что передать Тохе.")
+        else:
             sms_link = make_sms_link(toha_number, msg)
             markup = types.InlineKeyboardMarkup()
             markup.row(types.InlineKeyboardButton("📱 Открыть SMS для Тохи", url=sms_link))
@@ -279,6 +287,38 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
         text = "📗 *Мои таблицы:*" if saved else "📗 Пока нет таблиц."
         bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
+    elif action_type == "list_users":
+        roles_data = list_roles()
+        if not known_users:
+            bot.send_message(chat_id, "👥 Пока никто не запускал бота.")
+        else:
+            role_names = {"owner": "Владелец", "driver": "Водитель", "worker": "Работник", "guest": "Гость"}
+            lines = [f"• @{u} — {role_names.get(roles_data.get(str(uid), 'guest'), 'Гость')}"
+                     for u, uid in known_users.items()]
+            bot.send_message(chat_id, "👥 *Пользователи бота:*\n\n" + "\n".join(lines),
+                             parse_mode="Markdown")
+
+    elif action_type == "assign_role":
+        if not action_param or ":" not in action_param:
+            bot.send_message(chat_id, "⚠️ Укажи @username и роль. Пример: назначь @toha водителем")
+            return
+        username_raw, role = action_param.split(":", 1)
+        username = username_raw.lstrip("@").lower().strip()
+        role = role.strip()
+        valid_roles = {"driver", "worker", "guest", "owner"}
+        if role not in valid_roles:
+            bot.send_message(chat_id, f"⚠️ Неверная роль «{role}». Допустимые: driver, worker, guest.")
+            return
+        if username not in known_users:
+            bot.send_message(chat_id, f"⚠️ @{username} ещё не запускал бота. Попроси его написать /start.")
+            return
+        target_id = known_users[username]
+        grant_access(target_id)
+        set_role(target_id, role)
+        role_labels = {"driver": "Водитель", "worker": "Работник", "guest": "Гость", "owner": "Владелец"}
+        bot.send_message(chat_id, f"✅ @{username} назначен как *{role_labels.get(role, role)}*.",
+                         parse_mode="Markdown")
 
     elif action_type == "forget":
         grok_history.pop(chat_id, None)
