@@ -76,26 +76,29 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
 
 
 def _tts_send_voice(chat_id: int, text: str):
-    """Конвертирует текст в голос через OpenAI TTS и отправляет как голосовое сообщение."""
-    import re
+    """Конвертирует текст в голос через gpt-audio-mini и отправляет как голосовое сообщение."""
+    import re, base64
     try:
-        # Убираем markdown-разметку и ACTION-теги перед озвучкой
         clean = re.sub(r"\[ACTION:[^\]]*\]", "", text)
-        clean = re.sub(r"[*_`]", "", clean).strip()
+        clean = re.sub(r"[*_`#>]", "", clean).strip()
         if not clean:
             return
-        response = openai_client.audio.speech.create(
-            model="tts-1",
-            voice="onyx",
-            input=clean,
-            response_format="opus",
+        response = openai_client.chat.completions.create(
+            model="gpt-audio-mini",
+            modalities=["text", "audio"],
+            audio={"voice": "onyx", "format": "opus"},
+            messages=[
+                {"role": "system", "content": "Прочитай текст вслух естественно и живо, по-русски."},
+                {"role": "user", "content": clean},
+            ],
         )
-        audio_bytes = io.BytesIO(response.content)
+        audio_data = base64.b64decode(response.choices[0].message.audio.data)
+        audio_bytes = io.BytesIO(audio_data)
         audio_bytes.name = "reply.opus"
         bot.send_voice(chat_id, audio_bytes)
     except Exception as e:
         print(f"TTS ошибка: {e}")
-        # Graceful fallback — текстовый ответ уже отправлен, просто молчим
+        # Graceful fallback — текстовый ответ уже будет отправлен
 
 # Последняя геопозиция пользователя
 last_location = {}
