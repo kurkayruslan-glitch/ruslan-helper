@@ -13,6 +13,7 @@ from roles import get_role, set_role, list_roles
 from calls import make_call
 from grok import ask_grok
 from memory import get_facts, add_fact, delete_fact, clear_facts, facts_for_prompt
+from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -366,6 +367,30 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
             lines = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(facts))
             bot.send_message(chat_id, f"🧠 *Запомненные факты:*\n\n{lines}", parse_mode="Markdown")
 
+    elif action_type == "zona_search":
+        name = action_param or ""
+        if not name:
+            bot.send_message(chat_id, "⚠️ Укажи фамилию для поиска. Пример: найди Иванов Иван")
+            return
+        if not index_exists():
+            bot.send_message(chat_id, "⏳ База 200.zona.media не загружена. Напиши /zona_build чтобы загрузить (~2 мин).")
+            return
+        bot.send_chat_action(chat_id, "typing")
+        result = zona_search(name)
+        safe_send(chat_id, result, main_menu())
+
+    elif action_type == "zona_detail":
+        name = action_param or ""
+        if not name:
+            bot.send_message(chat_id, "⚠️ Укажи фамилию и имя.")
+            return
+        if not index_exists():
+            bot.send_message(chat_id, "⏳ База 200.zona.media не загружена. Напиши /zona_build чтобы загрузить (~2 мин).")
+            return
+        bot.send_chat_action(chat_id, "typing")
+        result, _ = zona_detail(name)
+        safe_send(chat_id, result, main_menu())
+
     elif action_type == "forget_fact":
         try:
             idx = int(action_param or "0") - 1
@@ -712,6 +737,31 @@ def cmd_forget(message):
     grok_history.pop(chat_id, None)
     _save_grok_history()
     bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с нуля!", reply_markup=main_menu())
+
+
+@bot.message_handler(commands=['zona_build'])
+def cmd_zona_build(message):
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+    if index_exists():
+        n = index_size()
+        bot.send_message(chat_id, f"📊 База уже загружена: *{n:,}* записей.\n\nДля перезагрузки подожди и запусти снова.", parse_mode="Markdown")
+        return
+    bot.send_message(chat_id, "⏳ Загружаю индекс базы 200.zona.media... (~2-3 минуты, 220,000+ записей)")
+
+    def _build():
+        try:
+            def progress(i, total, count):
+                if i % 5 == 0:
+                    bot.send_message(chat_id, f"📥 Загружено {i}/{total} файлов, {count:,} записей...")
+            total = build_index(progress_cb=progress)
+            bot.send_message(chat_id, f"✅ Индекс готов! *{total:,}* записей загружено.\n\nТеперь можешь искать: «найди Иванов Иван»", parse_mode="Markdown")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ Ошибка загрузки: {e}")
+
+    import threading
+    threading.Thread(target=_build, daemon=True).start()
 
 
 @bot.message_handler(commands=['memory'])
