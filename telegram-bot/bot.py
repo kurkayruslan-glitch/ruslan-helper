@@ -88,9 +88,6 @@ waiting_for_owner_call = {}
 # Ожидание адреса TRC20 кошелька
 waiting_for_wallet = set()
 
-# Режим чата с Grok: {chat_id: True} — пока активен, все сообщения идут в Grok
-grok_mode = {}
-
 # История чата с Grok — сохраняется на диск
 GROK_HISTORY_FILE = "grok_history.json"
 
@@ -134,10 +131,10 @@ known_users: dict = _load_known_users()
 
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("🤖 Grok",        "📞 Позвонить")
-    markup.add("🚕 Тоха",        "📍 Геопозиция")
-    markup.add("📊 Я Тигр",      "📋 ФОП")
-    markup.add("📗 Таблицы",     "💰 USDT крипто")
+    markup.add("📞 Позвонить",   "🚕 Тоха")
+    markup.add("📍 Геопозиция",  "📗 Таблицы")
+    markup.add("💰 USDT крипто", "📊 Я Тигр")
+    markup.add("📋 ФОП",         "🗑️ Забыть")
     markup.add("🛣️ Маршрут")
     return markup
 
@@ -192,39 +189,137 @@ def is_toha_geo_command(text: str) -> bool:
     return any(k in t for k in keywords)
 
 
+def _parse_action(reply: str) -> tuple[str | None, str | None, str]:
+    """
+    Извлекает ACTION-тег из начала ответа Grok.
+    Возвращает (action_type, action_param, cleaned_text).
+    Примеры тегов: [ACTION:call_toha], [ACTION:usdt:TAddr...], [ACTION:forget]
+    """
+    import re
+    match = re.match(r"^\[ACTION:([^\]]+)\]\s*", reply)
+    if not match:
+        return None, None, reply
+    tag_content = match.group(1)
+    text_after = reply[match.end():]
+    parts = tag_content.split(":", 1)
+    action_type = parts[0].strip()
+    action_param = parts[1].strip() if len(parts) > 1 else None
+    return action_type, action_param, text_after
+
+
+def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None):
+    """Выполняет действие из ACTION-тега Grok."""
+    if action_type == "call_toha":
+        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+        if not toha_number:
+            bot.send_message(chat_id, "⚠️ Номер Тохи не настроен.")
+            return
+        msg = action_param or "Руслан звонит тебе!"
+        bot.send_message(chat_id, f"📞 Звоню Тохе...")
+        ok, info = make_call(toha_number, msg)
+        if ok:
+            bot.send_message(chat_id, f"✅ Позвонил Тохе! Скажет: «{msg}»")
+        else:
+            bot.send_message(chat_id, f"❌ Ошибка звонка: {info}")
+
+    elif action_type == "sms_toha":
+        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+        msg = action_param or ""
+        if toha_number and msg:
+            sms_link = make_sms_link(toha_number, msg)
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("📱 Открыть SMS для Тохи", url=sms_link))
+            bot.send_message(chat_id, f"💬 Нажми — откроется SMS с текстом:\n«{msg}»", reply_markup=markup)
+
+    elif action_type == "usdt":
+        address = action_param or ""
+        if not (address.startswith("T") and len(address) == 34):
+            bot.send_message(chat_id, "⚠️ Некорректный TRC20 адрес в запросе.")
+            return
+        bot.send_message(chat_id, f"🔍 Ищу USDT транзакции для `{address}`...", parse_mode="Markdown")
+        ok, txs, err = get_usdt_transactions(address, limit=50)
+        if not ok:
+            bot.send_message(chat_id, f"❌ TronScan: {err}")
+            return
+        if not txs:
+            bot.send_message(chat_id, "📭 Транзакции USDT TRC20 не найдены.")
+            return
+        balance = get_account_balance(address)
+        summary, _, _ = build_tx_summary(address, txs)
+        bot.send_message(chat_id, f"💹 Баланс: *{balance}* | {len(txs)} транзакций — анализирую...",
+                         parse_mode="Markdown")
+        prompt = (
+            f"Проанализируй транзакции USDT TRC20 кошелька, дай бизнес-аналитику на русском.\n\n"
+            f"{summary}\n\n"
+            f"1. Резюме активности\n2. Топ контрагентов\n3. Паттерны по времени\n4. Риски\n5. Итог"
+        )
+        analysis = ask_grok(prompt, [])
+        safe_send(chat_id, f"💰 *Аналитика USDT TRC20*\n\n{analysis}", main_menu())
+
+    elif action_type == "sheet_analytics":
+        name = action_param or ""
+        sheet_id = find_sheet_id(name.lower())
+        if not sheet_id:
+            saved = list_sheets()
+            names = "\n".join([f"• {n}" for n in saved.keys()]) if saved else "нет"
+            bot.send_message(chat_id, f"⚠️ Таблица «{name}» не найдена.\n\nДоступные:\n{names}")
+            return
+        bot.send_message(chat_id, f"🤖 Анализирую «{name}»...")
+        bot.send_chat_action(chat_id, "typing")
+        result = analyze_sheet_with_ai(sheet_id)
+        safe_send(chat_id, result, reply_markup=main_menu())
+
+    elif action_type == "sheets_list":
+        saved = list_sheets()
+        inline = types.InlineKeyboardMarkup(row_width=1)
+        if saved:
+            for name, sid in saved.items():
+                url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                inline.add(types.InlineKeyboardButton(f"📄 {name.title()}", url=url))
+        inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
+        text = "📗 *Мои таблицы:*" if saved else "📗 Пока нет таблиц."
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
+    elif action_type == "forget":
+        grok_history.pop(chat_id, None)
+        _save_grok_history()
+        bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с чистого листа!", reply_markup=main_menu())
+
+
+def _ask_grok_and_route(chat_id: int, text: str):
+    """Отправляет сообщение в Grok, разбирает ACTION-теги, показывает ответ."""
+    history = grok_history.get(chat_id, [])
+    bot.send_chat_action(chat_id, "typing")
+    reply = ask_grok(text, history)
+
+    # Сохраняем в историю (полный ответ с тегом для контекста модели не нужен — сохраняем чистый)
+    action_type, action_param, clean_reply = _parse_action(reply)
+    history.append({"role": "user", "content": text})
+    history.append({"role": "assistant", "content": clean_reply or reply})
+    grok_history[chat_id] = history
+    _save_grok_history()
+
+    # Сначала выполняем действие (если есть)
+    if action_type and action_type != "forget":
+        _handle_grok_action(chat_id, action_type, action_param)
+    elif action_type == "forget":
+        _handle_grok_action(chat_id, action_type, action_param)
+        return  # forget сам выводит сообщение
+
+    # Потом показываем текстовый ответ Grok (если не пустой)
+    if clean_reply and clean_reply.strip():
+        safe_send(chat_id, clean_reply, main_menu())
+
+
 def process_text(chat_id, text):
     import re
     t = text.lower()
 
-    # ── Режим чата с Grok ────────────────────────────────────────────────────
-    if grok_mode.get(chat_id):
-        if t.strip() in ["стоп", "выход", "exit", "хватит", "🔙 выйти из grok", "назад"]:
-            grok_mode.pop(chat_id, None)
-            bot.send_message(chat_id, "✅ Вышел из Grok. История сохранена.", reply_markup=main_menu())
-            return
-        history = grok_history.get(chat_id, [])
-        bot.send_chat_action(chat_id, "typing")
-        reply = ask_grok(text, history)
-        history.append({"role": "user", "content": text})
-        history.append({"role": "assistant", "content": reply})
-        grok_history[chat_id] = history  # полная история без обрезки
+    # ── Кнопка «🗑️ Забыть» — сброс истории ─────────────────────────────────
+    if "забыть" in t or "🗑️" in t or "/forget" in t:
+        grok_history.pop(chat_id, None)
         _save_grok_history()
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("🔙 Выйти из Grok")
-        safe_send(chat_id, reply, reply_markup=markup)
-        return
-
-    # ── Кнопка «🤖 Спросить Grok» ────────────────────────────────────────────
-    if "grok" in t or "🤖" in t or "спросить grok" in t:
-        grok_mode[chat_id] = True
-        # историю НЕ сбрасываем — помним всё
-        history = grok_history.get(chat_id, [])
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("🔙 Выйти из Grok")
-        msg = "🤖 *Grok активирован!*\n\nПиши или говори — отвечу на любой вопрос.\nЧтобы выйти напиши «стоп»."
-        if history:
-            msg += f"\n\n_Помню нашу историю — {len(history) // 2} сообщений._"
-        bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(chat_id, "🗑️ Готово — я забыл нашу историю. Начинаем с нуля!", reply_markup=main_menu())
         return
 
     # ── Состояние: ожидаем номер для звонка ──────────────────────────────────
@@ -549,9 +644,8 @@ def process_text(chat_id, text):
             else:
                 handle_sheet_command(chat_id, text, mode)
         else:
-            bot.send_message(chat_id,
-                             f"✅ Принял: «{text}»\n\nЧто нужно сделать дальше?",
-                             reply_markup=main_menu())
+            # Любой не распознанный текст → Grok
+            _ask_grok_and_route(chat_id, text)
 
 
 def handle_sheet_command(chat_id, text, mode):
@@ -621,6 +715,16 @@ def handle_sheet_command(chat_id, text, mode):
         bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}", reply_markup=main_menu())
 
 
+@bot.message_handler(commands=['forget'])
+def cmd_forget(message):
+    chat_id = message.chat.id
+    if not is_allowed(chat_id):
+        return
+    grok_history.pop(chat_id, None)
+    _save_grok_history()
+    bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с нуля!", reply_markup=main_menu())
+
+
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
@@ -635,7 +739,16 @@ def start(message):
     role = get_role(chat_id)
     if chat_id == OWNER_ID:
         set_role(chat_id, "owner")
-        bot.send_message(chat_id, "👋 Привет, Руслан! Я твой личный помощник 🔥", reply_markup=main_menu())
+        history = grok_history.get(chat_id, [])
+        mem_note = f"\n_Помню {len(history) // 2} сообщений из прошлого разговора._" if history else ""
+        bot.send_message(
+            chat_id,
+            f"👋 Привет, Руслан! Я твой личный AI-ассистент 🔥\n\n"
+            f"Пиши или говори что нужно — позвоню, проанализирую, найду транзакции, "
+            f"открою таблицу. Просто скажи.{mem_note}",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
     elif role == "driver":
         bot.send_message(chat_id, "👋 Привет! Нажми кнопку чтобы узнать где Руслан.", reply_markup=driver_menu())
     elif role == "worker":
