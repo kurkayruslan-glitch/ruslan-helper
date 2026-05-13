@@ -73,6 +73,31 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
             except Exception as e2:
                 bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
 
+
+def _tts_send_voice(chat_id: int, text: str):
+    """Конвертирует текст в голос через OpenAI TTS и отправляет как голосовое сообщение."""
+    import re
+    try:
+        # Убираем markdown-разметку и ACTION-теги перед озвучкой
+        clean = re.sub(r"\[ACTION:[^\]]*\]", "", text)
+        clean = re.sub(r"[*_`]", "", clean).strip()
+        if not clean:
+            return
+        # Ограничиваем длину (TTS лучше работает до ~4096 символов)
+        clean = clean[:4096]
+        response = openai_client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=clean,
+            response_format="opus",
+        )
+        audio_bytes = io.BytesIO(response.content)
+        audio_bytes.name = "reply.opus"
+        bot.send_voice(chat_id, audio_bytes)
+    except Exception as e:
+        print(f"TTS ошибка: {e}")
+        # Graceful fallback — текстовый ответ уже отправлен, просто молчим
+
 # Последняя геопозиция пользователя
 last_location = {}
 
@@ -87,6 +112,9 @@ waiting_for_owner_call = {}
 
 # Ожидание адреса TRC20 кошелька
 waiting_for_wallet = set()
+
+# Чаты, ожидающие голосового ответа (запрос пришёл голосом)
+voice_request_chats: set = set()
 
 # История чата с Grok — сохраняется на диск
 GROK_HISTORY_FILE = "grok_history.json"
@@ -339,6 +367,11 @@ def _ask_grok_and_route(chat_id: int, text: str):
     grok_history[chat_id] = history
     _save_grok_history()
 
+    # Проверяем — пришёл ли запрос голосом (для TTS-ответа)
+    is_voice = chat_id in voice_request_chats
+    if is_voice:
+        voice_request_chats.discard(chat_id)
+
     # Сначала выполняем действие (если есть)
     if action_type and action_type != "forget":
         _handle_grok_action(chat_id, action_type, action_param)
@@ -348,6 +381,9 @@ def _ask_grok_and_route(chat_id: int, text: str):
 
     # Потом показываем текстовый ответ Grok (если не пустой)
     if clean_reply and clean_reply.strip():
+        # Голосовой запрос → сначала голосовой ответ, потом текст
+        if is_voice:
+            _tts_send_voice(chat_id, clean_reply)
         safe_send(chat_id, clean_reply, main_menu())
 
 
@@ -683,7 +719,11 @@ def handle_voice(message):
         )
         text = transcript.text
         bot.send_message(chat_id, f"🗣️ Ты сказал: «{text}»")
-        process_text(chat_id, text)
+        voice_request_chats.add(chat_id)
+        try:
+            process_text(chat_id, text)
+        finally:
+            voice_request_chats.discard(chat_id)
     except Exception as e:
         print(f"Ошибка расшифровки: {e}")
         bot.send_message(chat_id, "⚠️ Не удалось расшифровать голосовое. Попробуй ещё раз.")
