@@ -83,8 +83,6 @@ def _tts_send_voice(chat_id: int, text: str):
         clean = re.sub(r"[*_`]", "", clean).strip()
         if not clean:
             return
-        # Ограничиваем длину (TTS лучше работает до ~4096 символов)
-        clean = clean[:4096]
         response = openai_client.audio.speech.create(
             model="tts-1",
             voice="onyx",
