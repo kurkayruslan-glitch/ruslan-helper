@@ -70,7 +70,14 @@ def process_text(chat_id, text):
     t = text.lower()
 
     # Голосовая команда — отправить Серёже пароль
-    if any(phrase in t for phrase in ["отправь серёже", "отправь сереже", "серёже пароль", "сереже пароль"]):
+    if any(phrase in t for phrase in [
+        "отправь серёже", "отправь сереже",
+        "серёже пароль", "сереже пароль",
+        "отправь пароль серёже", "отправь пароль сереже",
+        "пароль серёже", "пароль сереже",
+        "скинь серёже", "скинь сереже",
+        "отправь серёжке", "серёжке пароль",
+    ]):
         seryozha_id = known_users.get("yebash1")
         target = seryozha_id if seryozha_id else "@yebash1"
         try:
