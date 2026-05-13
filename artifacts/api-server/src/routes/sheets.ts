@@ -5,9 +5,11 @@ const router = Router();
 const connectors = new ReplitConnectors();
 
 // GET /api/sheets/:spreadsheetId/values/:range
+// range is URL-encoded by the Python client so slashes in sheet names are safe
 router.get("/sheets/:spreadsheetId/values/:range", async (req, res) => {
   try {
-    const { spreadsheetId, range } = req.params;
+    const { spreadsheetId } = req.params;
+    const range = decodeURIComponent(req.params.range);
     const response = await connectors.proxy(
       "google-sheet",
       `/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
@@ -24,7 +26,8 @@ router.get("/sheets/:spreadsheetId/values/:range", async (req, res) => {
 // POST /api/sheets/:spreadsheetId/values/:range/append
 router.post("/sheets/:spreadsheetId/values/:range/append", async (req, res) => {
   try {
-    const { spreadsheetId, range } = req.params;
+    const { spreadsheetId } = req.params;
+    const range = decodeURIComponent(req.params.range);
     const response = await connectors.proxy(
       "google-sheet",
       `/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,

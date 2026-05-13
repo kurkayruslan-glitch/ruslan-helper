@@ -1,12 +1,18 @@
 import requests
+from urllib.parse import quote
 
 # API сервер доступен локально
 API_BASE = "http://localhost:80/api"
 
 
+def _encode_range(range_name: str) -> str:
+    """Экранирует имя диапазона для безопасной передачи в URL."""
+    return quote(range_name, safe="!")
+
+
 def get_values(spreadsheet_id: str, range_name: str) -> list:
     """Получить данные из таблицы"""
-    url = f"{API_BASE}/sheets/{spreadsheet_id}/values/{range_name}"
+    url = f"{API_BASE}/sheets/{spreadsheet_id}/values/{_encode_range(range_name)}"
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
     data = resp.json()
@@ -15,7 +21,7 @@ def get_values(spreadsheet_id: str, range_name: str) -> list:
 
 def append_values(spreadsheet_id: str, range_name: str, values: list) -> dict:
     """Добавить строку в таблицу"""
-    url = f"{API_BASE}/sheets/{spreadsheet_id}/values/{range_name}/append"
+    url = f"{API_BASE}/sheets/{spreadsheet_id}/values/{_encode_range(range_name)}/append"
     body = {"values": values}
     resp = requests.post(url, json=body, timeout=10)
     resp.raise_for_status()
