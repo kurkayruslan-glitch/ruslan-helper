@@ -2,15 +2,12 @@ import telebot
 from telebot import types
 import os
 import time
-from keep_alive import keep_alive
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+TOKEN = "8658399482:AAFnghjaCp-4JGZa9vWzI1_l_p3l4yD7jo8"
 
 bot = telebot.TeleBot(TOKEN)
 
-
+# Главное меню
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("📊 Статистика Я Тигр", "🛣️ Маршрут")
@@ -18,48 +15,35 @@ def main_menu():
     markup.add("🚕 Тоха", "❓ Что ты можешь?")
     return markup
 
-
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id,
+    bot.send_message(message.chat.id, 
                      "👋 Привет, Руслан! Я твой личный помощник.\n\n"
-                     "Чем могу помочь сегодня?",
+                     "Чем могу помочь сегодня?", 
                      reply_markup=main_menu())
 
-
-@bot.message_handler(content_types=["location"])
-def handle_location(message):
-    lat = message.location.latitude
-    lon = message.location.longitude
-    bot.send_message(
-        message.chat.id,
-        f"📍 Геопозиция получена:\nШирота: `{lat}`\nДолгота: `{lon}`",
-        parse_mode="Markdown",
-        reply_markup=main_menu(),
-    )
-
-
+# Основной обработчик — делает бота разговорчивым
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     text = message.text.lower()
     chat_id = message.chat.id
 
+    # Приветствия и общение
     if any(word in text for word in ["привет", "здравствуй", "эй", "hi", "hello"]):
         bot.send_message(chat_id, "Привет, Руслан! 😊 Как дела? Чем помочь?", reply_markup=main_menu())
 
     elif "как дела" in text or "как ты" in text:
         bot.send_message(chat_id, "Отлично! Готов помогать 24/7 🔥 А у тебя как? Что нужно сделать?")
 
-    elif "что можешь" in text or "что ты умеешь" in text or "❓" in text:
-        bot.send_message(chat_id,
-                         "Я могу очень много:\n"
-                         "• Статистику по Я Тигр\n"
-                         "• Отчёты по ФОП\n"
-                         "• Маршруты и отели\n"
-                         "• Работать с Тохой (гео, время забора)\n"
-                         "• И многое другое\n\nЧто сейчас нужно?",
-                         reply_markup=main_menu())
+    elif "что можешь" in text or "что ты умеешь" in text:
+        bot.send_message(chat_id, "Я могу очень много:\n"
+                                  "• Статистику по Я Тигр\n"
+                                  "• Отчёты по ФОП\n"
+                                  "• Маршруты и отели\n"
+                                  "• Работать с Тохой (гео, время забора)\n"
+                                  "• И многое другое\n\nЧто сейчас нужно?", reply_markup=main_menu())
 
+    # Уже существующие кнопки
     elif "тигр" in text or "статистика" in text:
         bot.send_message(chat_id, "📊 Делаю статистику по Я Тигр за 2026 год...\n(Скоро подключу твои таблицы)")
 
@@ -69,7 +53,7 @@ def handle_message(message):
     elif "фоп" in text:
         bot.send_message(chat_id, "📋 Готовлю отчёт по ФОП 3 группы. Что именно нужно?")
 
-    elif "гео" in text or "где я" in text or "геопозиция" in text:
+    elif "гео" in text or "где я" in text:
         bot.send_message(chat_id, "📍 Отправь свою геопозицию — я её сохраню и смогу использовать.")
 
     elif "тоха" in text or "водитель" in text:
@@ -79,17 +63,9 @@ def handle_message(message):
         bot.send_message(chat_id, "Пожалуйста! Рад помочь 😊")
 
     else:
-        bot.send_message(chat_id,
-                         f"Принял: «{message.text}»\n\nЧто именно нужно сделать? Можешь говорить обычными словами.",
+        # Универсальный ответ
+        bot.send_message(chat_id, f"Принял: «{message.text}»\n\nЧто именно нужно сделать? Можешь говорить обычными словами.", 
                          reply_markup=main_menu())
 
-
-if __name__ == "__main__":
-    keep_alive()
-    print("🚀 Ruslan Personal Helper запущен и стал разговорчивым!")
-    while True:
-        try:
-            bot.infinity_polling(timeout=10, long_polling_timeout=5)
-        except Exception as e:
-            print(f"Ошибка polling: {e}. Перезапуск через 5 секунд...")
-            time.sleep(5)
+print("🚀 Ruslan Personal Helper запущен и стал разговорчивым!")
+bot.infinity_polling()
