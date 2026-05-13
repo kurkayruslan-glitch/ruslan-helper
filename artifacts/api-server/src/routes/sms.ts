@@ -2,7 +2,7 @@ import { Router } from "express";
 
 const smsRouter = Router();
 
-smsRouter.get("/api/sms", (req, res) => {
+smsRouter.get("/sms", (req, res) => {
   const to = String(req.query.to ?? "").replace(/\s|-/g, "");
   const body = String(req.query.body ?? "");
   const smsUri = `sms:${to}?body=${encodeURIComponent(body)}`;
