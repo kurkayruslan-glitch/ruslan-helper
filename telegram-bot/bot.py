@@ -65,8 +65,25 @@ last_location = {}
 # Состояние ожидания ID таблицы
 waiting_for_sheet_id = {}
 
-# Известные пользователи: username (без @) → chat_id
-known_users = {}
+# Известные пользователи: username (без @) → chat_id (сохраняем на диск)
+KNOWN_USERS_FILE = "known_users.json"
+
+def _load_known_users() -> dict:
+    if os.path.exists(KNOWN_USERS_FILE):
+        try:
+            import json
+            with open(KNOWN_USERS_FILE) as f:
+                return {k: int(v) for k, v in json.load(f).items()}
+        except Exception:
+            pass
+    return {}
+
+def _save_known_users():
+    import json
+    with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(known_users, f, ensure_ascii=False, indent=2)
+
+known_users: dict = _load_known_users()
 
 
 def main_menu():
@@ -418,6 +435,7 @@ def start(message):
     chat_id = message.chat.id
     if message.from_user and message.from_user.username:
         known_users[message.from_user.username.lower()] = chat_id
+        _save_known_users()
         print(f"✅ Запомнил пользователя @{message.from_user.username} → {chat_id}")
     if not is_allowed(chat_id):
         bot.send_message(chat_id, "🔒 Введи секретный код для доступа:")
