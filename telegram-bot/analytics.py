@@ -36,90 +36,101 @@ def list_sheets() -> dict:
 
 
 def _try_number(val: str):
-    """Попытка распарсить как число (поддержка запятой как разделителя)"""
     try:
         return float(str(val).replace(",", ".").replace(" ", "").replace("\u00a0", ""))
     except (ValueError, TypeError):
         return None
 
 
-def analyze_sheet_data(spreadsheet_id: str, sheet_name: str = None) -> str:
-    """Читает таблицу и возвращает текстовую аналитику"""
-    try:
-        info = get_sheet_info(spreadsheet_id)
-        title = info.get("properties", {}).get("title", "Без названия")
-        sheets = info.get("sheets", [])
-        sheet_names = [s["properties"]["title"] for s in sheets]
-
-        target_sheet = sheet_name or sheet_names[0]
-        range_name = f"{target_sheet}!A1:ZZ10000"
-        values = get_values(spreadsheet_id, range_name)
-
-        if not values:
-            return f"📊 Таблица «{title}» пуста или нет данных."
-
-        headers = values[0] if values else []
-        data_rows = values[1:] if len(values) > 1 else []
-
-        total_rows = len(data_rows)
-        total_cols = len(headers)
-
-        lines = [
-            f"📊 *Аналитика таблицы: {title}*",
-            f"📄 Лист: {target_sheet}",
-            f"📏 Строк данных: {total_rows}",
-            f"📐 Столбцов: {total_cols}",
-            "",
-        ]
-
-        if sheet_names and len(sheet_names) > 1:
-            lines.append(f"📑 Все листы: {', '.join(sheet_names)}")
-            lines.append("")
-
-        # Анализ по столбцам
-        col_stats = []
-        for col_idx, header in enumerate(headers):
-            nums = []
-            text_vals = []
-            for row in data_rows:
-                if col_idx < len(row):
-                    cell = str(row[col_idx]).strip()
-                    if cell:
-                        n = _try_number(cell)
-                        if n is not None:
-                            nums.append(n)
-                        else:
-                            text_vals.append(cell)
-
-            if nums:
-                total = sum(nums)
-                avg = total / len(nums)
-                col_stats.append(
-                    f"*{header}* — "
-                    f"Сумма: {_fmt(total)} | "
-                    f"Среднее: {_fmt(avg)} | "
-                    f"Макс: {_fmt(max(nums))} | "
-                    f"Мин: {_fmt(min(nums))} | "
-                    f"Записей: {len(nums)}"
-                )
-            elif text_vals:
-                unique = list(dict.fromkeys(text_vals))
-                top = unique[:5]
-                preview = ", ".join(top) + ("..." if len(unique) > 5 else "")
-                col_stats.append(f"*{header}* — Текст, {len(text_vals)} значений. Топ: {preview}")
-
-        if col_stats:
-            lines.append("📈 *Статистика по столбцам:*")
-            lines.extend(col_stats)
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        return f"⚠️ Ошибка при анализе таблицы: {e}"
-
-
 def _fmt(n: float) -> str:
-    """Красивый формат числа"""
     if n == int(n):
         return f"{int(n):,}".replace(",", " ")
     return f"{n:,.2f}".replace(",", " ").replace(".", ",")
+
+
+def get_raw_data(spreadsheet_id: str, sheet_name: str = None) -> tuple:
+    """
+    Возвращает (title, headers, data_rows, sheet_names) или бросает Exception.
+    """
+    info = get_sheet_info(spreadsheet_id)
+    title = info.get("properties", {}).get("title", "Без названия")
+    sheets = info.get("sheets", [])
+    sheet_names = [s["properties"]["title"] for s in sheets]
+
+    target_sheet = sheet_name or sheet_names[0]
+    range_name = f"{target_sheet}!A1:ZZ10000"
+    values = get_values(spreadsheet_id, range_name)
+
+    headers = values[0] if values else []
+    data_rows = values[1:] if len(values) > 1 else []
+    return title, headers, data_rows, sheet_names, target_sheet
+
+
+def build_raw_stats(headers: list, data_rows: list) -> str:
+    """Базовая статистика по столбцам (без AI)."""
+    stats = []
+    for col_idx, header in enumerate(headers):
+        nums, text_vals = [], []
+        for row in data_rows:
+            if col_idx < len(row):
+                cell = str(row[col_idx]).strip()
+                if cell:
+                    n = _try_number(cell)
+                    if n is not None:
+                        nums.append(n)
+                    else:
+                        text_vals.append(cell)
+        if nums:
+            stats.append(
+                f"{header}: сумма={_fmt(sum(nums))}, "
+                f"среднее={_fmt(sum(nums)/len(nums))}, "
+                f"макс={_fmt(max(nums))}, мин={_fmt(min(nums))}, "
+                f"записей={len(nums)}"
+            )
+        elif text_vals:
+            unique = list(dict.fromkeys(text_vals))
+            stats.append(f"{header}: {len(text_vals)} значений, топ: {', '.join(unique[:5])}")
+    return "\n".join(stats) if stats else "нет числовых данных"
+
+
+def analyze_sheet_data(spreadsheet_id: str, sheet_name: str = None) -> str:
+    """Базовая текстовая аналитика (без AI) — используется как fallback."""
+    try:
+        title, headers, data_rows, sheet_names, target_sheet = get_raw_data(spreadsheet_id, sheet_name)
+
+        if not headers:
+            return f"📊 Таблица «{title}» пуста или нет данных."
+
+        lines = [
+            f"📊 *{title}* — {target_sheet}",
+            f"Строк: {len(data_rows)}, Столбцов: {len(headers)}",
+            "",
+            "📈 *Статистика:*",
+            build_raw_stats(headers, data_rows),
+        ]
+        if len(sheet_names) > 1:
+            lines.append(f"\n📑 Листы: {', '.join(sheet_names)}")
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"⚠️ Ошибка при анализе: {e}"
+
+
+def analyze_sheet_with_ai(spreadsheet_id: str, sheet_name: str = None) -> str:
+    """
+    Умный анализ через Grok — возвращает бизнес-разбор с выводами.
+    Импортируем grok здесь чтобы избежать циклических импортов.
+    """
+    try:
+        from grok import analyze_sheet_with_grok
+
+        title, headers, data_rows, sheet_names, target_sheet = get_raw_data(spreadsheet_id, sheet_name)
+
+        if not headers:
+            return f"📊 Таблица «{title}» пуста."
+
+        raw_stats = build_raw_stats(headers, data_rows)
+        return analyze_sheet_with_grok(f"{title} / {target_sheet}", headers, data_rows, raw_stats)
+
+    except Exception as e:
+        return f"⚠️ Ошибка при анализе: {e}"

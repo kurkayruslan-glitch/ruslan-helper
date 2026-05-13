@@ -8,7 +8,7 @@ from openai import OpenAI
 from keep_alive import keep_alive
 from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha
-from analytics import analyze_sheet_data, register_sheet, find_sheet_id, list_sheets
+from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets
 from roles import get_role, set_role, list_roles
 from calls import make_call
 from grok import ask_grok
@@ -553,12 +553,11 @@ def handle_sheet_command(chat_id, text, mode):
                                  f"⚠️ Таблица «{text.strip()}» не найдена.\n\nДоступные:\n{names}",
                                  reply_markup=sheets_menu())
                 return
-            bot.send_message(chat_id, f"⏳ Анализирую таблицу «{text.strip()}»...")
-            result = analyze_sheet_data(sheet_id)
-            # Разбиваем на части если текст слишком длинный
+            bot.send_message(chat_id, f"🤖 Grok анализирует «{text.strip()}»... Это займёт 10-20 секунд.")
+            bot.send_chat_action(chat_id, "typing")
+            result = analyze_sheet_with_ai(sheet_id)
             if len(result) > 4000:
-                chunks = [result[i:i+4000] for i in range(0, len(result), 4000)]
-                for chunk in chunks:
+                for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
                     bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=sheets_menu())
             else:
                 bot.send_message(chat_id, result, parse_mode="Markdown", reply_markup=sheets_menu())
@@ -758,8 +757,9 @@ def process_worker(chat_id: int, text: str):
             bot.send_message(chat_id, f"⚠️ Таблица «{text.strip()}» не найдена.\n\nДоступные:\n{names}",
                              reply_markup=worker_menu())
             return
-        bot.send_message(chat_id, f"⏳ Анализирую «{text.strip()}»...")
-        result = analyze_sheet_data(sheet_id)
+        bot.send_message(chat_id, f"🤖 Grok анализирует «{text.strip()}»... Подожди 10-20 секунд.")
+        bot.send_chat_action(chat_id, "typing")
+        result = analyze_sheet_with_ai(sheet_id)
         if len(result) > 4000:
             for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
                 bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=worker_menu())
