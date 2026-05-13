@@ -8,6 +8,7 @@ from openai import OpenAI
 from keep_alive import keep_alive
 from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha
+from analytics import analyze_sheet_data, register_sheet, find_sheet_id, list_sheets
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -78,8 +79,10 @@ def main_menu():
 
 def sheets_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("📊 Аналитика таблицы", "📋 Мои таблицы")
     markup.add("📖 Читать таблицу", "✏️ Записать в таблицу")
-    markup.add("ℹ️ Инфо о таблице", "🔙 Назад")
+    markup.add("➕ Сохранить таблицу", "ℹ️ Инфо о таблице")
+    markup.add("🔙 Назад")
     return markup
 
 
@@ -197,6 +200,37 @@ def process_text(chat_id, text):
         bot.send_message(chat_id, "📗 *Google Таблицы*\n\nЧто хочешь сделать?",
                          parse_mode="Markdown", reply_markup=sheets_menu())
 
+    elif "аналитика таблицы" in t or "📊 аналитика" in t or "статистика таблиц" in t or "аналитику таблиц" in t or "сводку" in t:
+        saved = list_sheets()
+        if not saved:
+            bot.send_message(chat_id,
+                             "📊 Пока нет сохранённых таблиц.\n\nНажми *➕ Сохранить таблицу* и добавь свою таблицу по ID.",
+                             parse_mode="Markdown", reply_markup=sheets_menu())
+        else:
+            names = "\n".join([f"• {name}" for name in saved.keys()])
+            bot.send_message(chat_id,
+                             f"📊 Напиши название таблицы для анализа:\n\n{names}",
+                             parse_mode="Markdown")
+            waiting_for_sheet_id[chat_id] = "analytics"
+
+    elif "мои таблицы" in t or "📋 мои" in t or "список таблиц" in t:
+        saved = list_sheets()
+        if not saved:
+            bot.send_message(chat_id, "Нет сохранённых таблиц. Нажми *➕ Сохранить таблицу*.",
+                             parse_mode="Markdown", reply_markup=sheets_menu())
+        else:
+            names = "\n".join([f"• *{name}*" for name in saved.keys()])
+            bot.send_message(chat_id, f"📋 *Твои таблицы:*\n\n{names}",
+                             parse_mode="Markdown", reply_markup=sheets_menu())
+
+    elif "сохранить таблицу" in t or "➕ сохранить" in t or "добавить таблицу" in t:
+        bot.send_message(chat_id,
+                         "➕ Отправь название и ID таблицы через пробел:\n\n"
+                         "Пример: `Продажи 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`\n\n"
+                         "ID таблицы — это часть ссылки Google Sheets после /d/",
+                         parse_mode="Markdown")
+        waiting_for_sheet_id[chat_id] = "save_sheet"
+
     elif "читать таблицу" in t or "📖" in t:
         bot.send_message(chat_id,
                          "📖 Отправь ID таблицы и диапазон через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1:E10`",
@@ -288,6 +322,37 @@ def handle_sheet_command(chat_id, text, mode):
                              f"*Листов:* {len(sheets)}\n"
                              f"*Листы:* {', '.join(sheet_names)}",
                              parse_mode="Markdown", reply_markup=sheets_menu())
+
+        elif mode == "save_sheet":
+            if len(parts) < 2:
+                bot.send_message(chat_id, "⚠️ Нужно: название и ID через пробел.\nПример: `Продажи 1BxiMVs0XRA5n...`",
+                                 parse_mode="Markdown")
+                return
+            name, sheet_id = parts[0], parts[1]
+            register_sheet(name, sheet_id)
+            bot.send_message(chat_id,
+                             f"✅ Таблица *{name}* сохранена!\n\nТеперь скажи «Аналитика таблицы» и выбери *{name}*.",
+                             parse_mode="Markdown", reply_markup=sheets_menu())
+
+        elif mode == "analytics":
+            name = text.strip().lower()
+            sheet_id = find_sheet_id(name)
+            if not sheet_id:
+                saved = list_sheets()
+                names = "\n".join([f"• {n}" for n in saved.keys()]) if saved else "нет сохранённых"
+                bot.send_message(chat_id,
+                                 f"⚠️ Таблица «{text.strip()}» не найдена.\n\nДоступные:\n{names}",
+                                 reply_markup=sheets_menu())
+                return
+            bot.send_message(chat_id, f"⏳ Анализирую таблицу «{text.strip()}»...")
+            result = analyze_sheet_data(sheet_id)
+            # Разбиваем на части если текст слишком длинный
+            if len(result) > 4000:
+                chunks = [result[i:i+4000] for i in range(0, len(result), 4000)]
+                for chunk in chunks:
+                    bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=sheets_menu())
+            else:
+                bot.send_message(chat_id, result, parse_mode="Markdown", reply_markup=sheets_menu())
 
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}", reply_markup=main_menu())
