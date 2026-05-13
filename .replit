@@ -58,3 +58,8 @@ externalPort = 3000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+RUSLAN_PHONE_NUMBER = "+380933129999"
