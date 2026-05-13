@@ -23,6 +23,40 @@ openai_client = OpenAI(
 
 bot = telebot.TeleBot(TOKEN)
 
+# ──────────────────────────────────────────────
+# БЕЗОПАСНОСТЬ — белый список
+# ──────────────────────────────────────────────
+OWNER_ID = 7959647798          # Руслан — всегда имеет доступ
+SECRET_CODE = "ruslan2024vip"  # Секретный пароль для новых пользователей
+WHITELIST_FILE = "whitelist.json"
+
+def _load_whitelist() -> set:
+    if os.path.exists(WHITELIST_FILE):
+        try:
+            import json
+            with open(WHITELIST_FILE) as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return {OWNER_ID}
+
+def _save_whitelist():
+    import json
+    with open(WHITELIST_FILE, "w") as f:
+        json.dump(list(allowed_users), f)
+
+allowed_users: set = _load_whitelist()
+allowed_users.add(OWNER_ID)
+
+def is_allowed(chat_id: int) -> bool:
+    return chat_id in allowed_users
+
+def grant_access(chat_id: int):
+    allowed_users.add(chat_id)
+    _save_whitelist()
+
+# ──────────────────────────────────────────────
+
 # Последняя геопозиция пользователя
 last_location = {}
 
@@ -261,18 +295,22 @@ def handle_sheet_command(chat_id, text, mode):
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    chat_id = message.chat.id
     # Запоминаем chat_id по username
     if message.from_user and message.from_user.username:
-        known_users[message.from_user.username.lower()] = message.chat.id
-        print(f"✅ Запомнил пользователя @{message.from_user.username} → {message.chat.id}")
-    bot.send_message(message.chat.id,
-                     "👋 Привет! Я личный помощник Руслана.",
-                     reply_markup=main_menu())
+        known_users[message.from_user.username.lower()] = chat_id
+        print(f"✅ Запомнил пользователя @{message.from_user.username} → {chat_id}")
+    if is_allowed(chat_id):
+        bot.send_message(chat_id, "👋 Привет, Руслан! Я твой личный помощник 🔥", reply_markup=main_menu())
+    else:
+        bot.send_message(chat_id, "🔒 Введи секретный код для доступа:")
 
 
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     chat_id = message.chat.id
+    if not is_allowed(chat_id):
+        return
     bot.send_message(chat_id, "🎤 Расшифровываю...")
     try:
         file_info = bot.get_file(message.voice.file_id)
@@ -316,6 +354,8 @@ def build_location_markup(lat, lon, is_live=False):
 @bot.message_handler(content_types=['location'])
 def handle_location(message):
     chat_id = message.chat.id
+    if not is_allowed(chat_id):
+        return
     lat = message.location.latitude
     lon = message.location.longitude
     is_live = bool(message.location.live_period)
@@ -376,7 +416,17 @@ def callback_send_geo(call):
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    process_text(message.chat.id, message.text)
+    chat_id = message.chat.id
+    text = message.text or ""
+    # Проверка секретного кода для незарегистрированных
+    if not is_allowed(chat_id):
+        if text.strip() == SECRET_CODE:
+            grant_access(chat_id)
+            bot.send_message(chat_id, "✅ Доступ открыт! Добро пожаловать.", reply_markup=main_menu())
+        else:
+            bot.send_message(chat_id, "🔒 Нет доступа.")
+        return
+    process_text(chat_id, text)
 
 
 if __name__ == "__main__":
