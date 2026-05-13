@@ -3,6 +3,7 @@ from telebot import types
 import os
 import time
 import io
+from urllib.parse import quote
 from openai import OpenAI
 from keep_alive import keep_alive
 from sheets import get_values, append_values, get_sheet_info, format_table
@@ -108,8 +109,7 @@ def process_text(chat_id, text):
             lat, lon = last_location[chat_id]
             maps_link = f"https://maps.google.com/?q={lat},{lon}"
             toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-            sms_text = f"📍 Гео Руслана: {maps_link}"
-            sms_link = f"sms:{toha_number}?body={sms_text}"
+            sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
             markup = types.InlineKeyboardMarkup()
             markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
             markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
@@ -176,7 +176,7 @@ def process_text(chat_id, text):
             mode = waiting_for_sheet_id.pop(chat_id)
             if mode == "toha_sms":
                 toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-                sms_link = f"sms:{toha_number}?body={text}"
+                sms_link = make_sms_link(toha_number, text)
                 markup = types.InlineKeyboardMarkup()
                 markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
                 bot.send_message(chat_id,
@@ -262,16 +262,22 @@ def handle_voice(message):
         bot.send_message(chat_id, "⚠️ Не удалось расшифровать голосовое. Попробуй ещё раз.")
 
 
+def make_sms_link(phone: str, text: str) -> str:
+    """Создать корректную sms: ссылку с URL-кодированием"""
+    clean_phone = phone.replace(" ", "").replace("-", "")
+    return f"sms:{clean_phone}?body={quote(text)}"
+
+
 def build_location_markup(lat, lon, is_live=False):
     maps_link = f"https://maps.google.com/?q={lat},{lon}"
     toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-    label = "🔴 Живое гео" if is_live else "📍 Моё гео"
+    label = "Живое гео" if is_live else "Гео"
     sms_text = f"{label} Руслана: {maps_link}"
-    sms_link = f"sms:{toha_number}?body={sms_text}"
+    sms_link = make_sms_link(toha_number, sms_text)
 
     markup = types.InlineKeyboardMarkup()
     markup.row(types.InlineKeyboardButton("🗺️ Открыть в Google картах", url=maps_link))
-    markup.row(types.InlineKeyboardButton("📱 Отправить SMS Тохе со своего телефона", url=sms_link))
+    markup.row(types.InlineKeyboardButton("📱 Отправить SMS Тохе", url=sms_link))
     markup.row(types.InlineKeyboardButton("🚕 Отправить через Twilio", callback_data="send_geo_toha"))
     return markup, maps_link
 
@@ -326,8 +332,7 @@ def callback_send_geo(call):
         lat, lon = last_location[chat_id]
         maps_link = f"https://maps.google.com/?q={lat},{lon}"
         toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-        sms_text = f"📍 Гео Руслана: {maps_link}"
-        sms_link = f"sms:{toha_number}?body={sms_text}"
+        sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
         markup = types.InlineKeyboardMarkup()
         markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
         markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
