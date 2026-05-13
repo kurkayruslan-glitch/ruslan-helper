@@ -70,16 +70,15 @@ def process_text(chat_id, text):
     if is_toha_geo_command(t):
         if chat_id in last_location:
             lat, lon = last_location[chat_id]
-            bot.send_message(chat_id, "📤 Отправляю твою геопозицию Тохе по SMS...")
-            ok = send_geo_to_toha(lat, lon)
-            if ok:
-                maps_link = f"https://maps.google.com/?q={lat},{lon}"
-                bot.send_message(chat_id,
-                                 f"✅ SMS отправлено Тохе!\n📍 {maps_link}",
-                                 reply_markup=main_menu())
-            else:
-                bot.send_message(chat_id, "⚠️ Не удалось отправить SMS. Проверь настройки Twilio.",
-                                 reply_markup=main_menu())
+            maps_link = f"https://maps.google.com/?q={lat},{lon}"
+            toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+            sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
+            markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+            bot.send_message(chat_id,
+                             f"📍 Нажми кнопку — откроется SMS с геопозицией:\n{maps_link}",
+                             reply_markup=markup)
         else:
             bot.send_message(chat_id,
                              "📍 Сначала отправь мне свою геопозицию — нажми скрепку 📎 → Геопозиция.\n"
