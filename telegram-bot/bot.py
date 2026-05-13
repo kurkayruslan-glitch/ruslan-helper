@@ -262,9 +262,10 @@ def handle_voice(message):
 
 
 def make_sms_link(phone: str, text: str) -> str:
-    """Создать корректную sms: ссылку с URL-кодированием"""
+    """Создать https ссылку на страницу-редирект которая откроет SMS приложение"""
+    domain = os.environ.get("REPLIT_DEV_DOMAIN", "localhost")
     clean_phone = phone.replace(" ", "").replace("-", "")
-    return f"sms:{clean_phone}?body={quote(text)}"
+    return f"https://{domain}/api/sms?to={quote(clean_phone)}&body={quote(text)}"
 
 
 def build_location_markup(lat, lon, is_live=False):
