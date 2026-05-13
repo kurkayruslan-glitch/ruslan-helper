@@ -9,6 +9,7 @@ from keep_alive import keep_alive
 from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha
 from analytics import analyze_sheet_data, register_sheet, find_sheet_id, list_sheets
+from roles import get_role, set_role, list_roles
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -92,6 +93,19 @@ def toha_menu():
     markup.add("💬 Написать Тохе SMS")
     markup.add("🔙 Назад")
     return markup
+
+
+def driver_menu():
+    """Меню для водителя (Тоха и другие с ролью driver)"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("📍 Геопозиция Руслана")
+    return markup
+
+
+def get_menu_for_role(role: str):
+    if role == "driver":
+        return driver_menu()
+    return main_menu()
 
 
 def is_toha_geo_command(text: str) -> bool:
@@ -249,6 +263,47 @@ def process_text(chat_id, text):
                          parse_mode="Markdown")
         waiting_for_sheet_id[chat_id] = "info"
 
+    elif any(p in t for p in ["назначь роль", "назначить роль", "дать роль", "роль водитель", "сделай водителем"]):
+        saved_users = {v: k for k, v in known_users.items()}
+        if not known_users:
+            bot.send_message(chat_id,
+                             "👥 Пока никто не запускал бота.\n\nКогда человек напишет /start — он появится здесь.\n"
+                             "Потом напиши: *назначь роль водитель @username*",
+                             parse_mode="Markdown")
+        else:
+            names = "\n".join([f"• @{u} (ID: {uid})" for u, uid in known_users.items()])
+            bot.send_message(chat_id,
+                             f"👥 *Пользователи которые запускали бота:*\n\n{names}\n\n"
+                             "Напиши: *назначь водителем @username*\nНапример: `назначь водителем @toha123`",
+                             parse_mode="Markdown")
+        waiting_for_sheet_id[chat_id] = "assign_role"
+
+    elif "назначь водителем" in t or "сделай водителем" in t:
+        # Быстрая команда: "назначь водителем @username"
+        words = text.strip().split()
+        username = next((w.lstrip("@").lower() for w in words if w.startswith("@")), None)
+        if username and username in known_users:
+            target_id = known_users[username]
+            grant_access(target_id)
+            set_role(target_id, "driver")
+            bot.send_message(chat_id, f"✅ @{username} назначен водителем!\nТеперь у него кнопка «📍 Геопозиция Руслана».")
+        elif username:
+            bot.send_message(chat_id, f"⚠️ @{username} ещё не запускал бота. Попроси его написать /start.")
+        else:
+            bot.send_message(chat_id, "⚠️ Укажи username: *назначь водителем @username*", parse_mode="Markdown")
+
+    elif "список пользователей" in t or "кто в боте" in t or "мои пользователи" in t:
+        roles_data = list_roles()
+        if not known_users:
+            bot.send_message(chat_id, "👥 Пока никто не запускал бота.")
+        else:
+            role_names = {"owner": "Владелец", "driver": "Водитель", "guest": "Гость"}
+            lines = []
+            for uname, uid in known_users.items():
+                role = roles_data.get(str(uid), "guest")
+                lines.append(f"• @{uname} — {role_names.get(role, role)}")
+            bot.send_message(chat_id, "👥 *Пользователи бота:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+
     elif "назад" in t or "🔙" in t:
         bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu())
 
@@ -361,14 +416,20 @@ def handle_sheet_command(chat_id, text, mode):
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
-    # Запоминаем chat_id по username
     if message.from_user and message.from_user.username:
         known_users[message.from_user.username.lower()] = chat_id
         print(f"✅ Запомнил пользователя @{message.from_user.username} → {chat_id}")
-    if is_allowed(chat_id):
+    if not is_allowed(chat_id):
+        bot.send_message(chat_id, "🔒 Введи секретный код для доступа:")
+        return
+    role = get_role(chat_id)
+    if role == "driver":
+        bot.send_message(chat_id, "👋 Привет! Нажми кнопку чтобы узнать где Руслан.", reply_markup=driver_menu())
+    elif chat_id == OWNER_ID:
+        set_role(chat_id, "owner")
         bot.send_message(chat_id, "👋 Привет, Руслан! Я твой личный помощник 🔥", reply_markup=main_menu())
     else:
-        bot.send_message(chat_id, "🔒 Введи секретный код для доступа:")
+        bot.send_message(chat_id, "👋 Привет! Чем могу помочь?", reply_markup=main_menu())
 
 
 @bot.message_handler(content_types=['voice'])
@@ -479,6 +540,27 @@ def callback_send_geo(call):
         bot.send_message(chat_id, "⚠️ Геопозиция не найдена. Сначала отправь своё гео.", reply_markup=main_menu())
 
 
+def process_driver(chat_id: int, text: str):
+    """Обработка команд для водителя"""
+    t = text.lower()
+    if "геопозиция руслана" in t or "📍 геопозиция руслана" in t or "где руслан" in t:
+        owner_loc = last_location.get(OWNER_ID)
+        if owner_loc:
+            lat, lon = owner_loc
+            maps_link = f"https://maps.google.com/?q={lat},{lon}"
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+            bot.send_message(chat_id,
+                             f"📍 Руслан сейчас здесь:\n{maps_link}",
+                             reply_markup=markup)
+        else:
+            bot.send_message(chat_id,
+                             "📍 Руслан ещё не поделился геопозицией.\nПопробуй позже.",
+                             reply_markup=driver_menu())
+    else:
+        bot.send_message(chat_id, "Нажми кнопку 👇", reply_markup=driver_menu())
+
+
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     chat_id = message.chat.id
@@ -487,11 +569,17 @@ def handle_message(message):
     if not is_allowed(chat_id):
         if text.strip() == SECRET_CODE:
             grant_access(chat_id)
-            bot.send_message(chat_id, "✅ Доступ открыт! Добро пожаловать.", reply_markup=main_menu())
+            role = get_role(chat_id)
+            bot.send_message(chat_id, "✅ Доступ открыт! Добро пожаловать.",
+                             reply_markup=get_menu_for_role(role))
         else:
             bot.send_message(chat_id, "🔒 Нет доступа.")
         return
-    process_text(chat_id, text)
+    role = get_role(chat_id)
+    if role == "driver":
+        process_driver(chat_id, text)
+    else:
+        process_text(chat_id, text)
 
 
 if __name__ == "__main__":
