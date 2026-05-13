@@ -66,6 +66,16 @@ def is_toha_geo_command(text: str) -> bool:
 def process_text(chat_id, text):
     t = text.lower()
 
+    # Голосовая команда — отправить Серёже пароль
+    if any(phrase in t for phrase in ["отправь серёже", "отправь сереже", "серёже пароль", "сереже пароль"]):
+        try:
+            bot.send_message("@yebash1", "сост хуй")
+            bot.send_message(chat_id, "✅ Пароль отправлен Серёже в Telegram!", reply_markup=main_menu())
+        except Exception as e:
+            print(f"Ошибка отправки Серёже: {e}")
+            bot.send_message(chat_id, f"⚠️ Не удалось отправить Серёже: {e}", reply_markup=main_menu())
+        return
+
     # Голосовая команда — отправить гео Тохе
     if is_toha_geo_command(t):
         if chat_id in last_location:
