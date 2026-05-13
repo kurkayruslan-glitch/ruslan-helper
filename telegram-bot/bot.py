@@ -11,6 +11,7 @@ from sms import send_geo_to_toha, send_sms_to_toha
 from analytics import analyze_sheet_data, register_sheet, find_sheet_id, list_sheets
 from roles import get_role, set_role, list_roles
 from calls import make_call
+from grok import ask_grok
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -72,6 +73,12 @@ waiting_for_call_msg = {}
 # Состояние звонка владельца: {chat_id: {"step": "number"} | {"step": "message", "number": "..."}}
 waiting_for_owner_call = {}
 
+# История чата с Grok: {chat_id: [{"role": "user"/"assistant", "content": "..."}]}
+grok_history = {}
+
+# Режим чата с Grok: {chat_id: True} — пока активен, все сообщения идут в Grok
+grok_mode = {}
+
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
 
@@ -98,7 +105,8 @@ def main_menu():
     markup.add("📊 Статистика Я Тигр", "🛣️ Маршрут")
     markup.add("📋 ФОП Отчёт", "📍 Геопозиция")
     markup.add("🚕 Тоха", "📞 Позвонить")
-    markup.add("📗 Google Таблицы", "❓ Что ты можешь?")
+    markup.add("🤖 Спросить Grok", "📗 Google Таблицы")
+    markup.add("❓ Что ты можешь?")
     return markup
 
 
@@ -155,6 +163,35 @@ def is_toha_geo_command(text: str) -> bool:
 def process_text(chat_id, text):
     import re
     t = text.lower()
+
+    # ── Режим чата с Grok ────────────────────────────────────────────────────
+    if grok_mode.get(chat_id):
+        if t.strip() in ["стоп", "выход", "exit", "хватит", "🔙 назад", "назад"]:
+            grok_mode.pop(chat_id, None)
+            grok_history.pop(chat_id, None)
+            bot.send_message(chat_id, "✅ Вышел из режима Grok.", reply_markup=main_menu())
+            return
+        history = grok_history.get(chat_id, [])
+        bot.send_chat_action(chat_id, "typing")
+        reply = ask_grok(text, history)
+        history.append({"role": "user", "content": text})
+        history.append({"role": "assistant", "content": reply})
+        grok_history[chat_id] = history[-20:]  # храним последние 20 сообщений
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("🔙 Выйти из Grok")
+        bot.send_message(chat_id, reply, reply_markup=markup)
+        return
+
+    # ── Кнопка «🤖 Спросить Grok» ────────────────────────────────────────────
+    if "grok" in t or "🤖" in t or "спросить grok" in t:
+        grok_mode[chat_id] = True
+        grok_history[chat_id] = []
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("🔙 Выйти из Grok")
+        bot.send_message(chat_id,
+                         "🤖 *Grok активирован!*\n\nПиши или говори — отвечу на любой вопрос.\nЧтобы выйти напиши «стоп».",
+                         parse_mode="Markdown", reply_markup=markup)
+        return
 
     # ── Состояние: ожидаем номер для звонка ──────────────────────────────────
     if chat_id in waiting_for_owner_call:
