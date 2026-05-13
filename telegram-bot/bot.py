@@ -119,11 +119,10 @@ known_users: dict = _load_known_users()
 
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("📊 Статистика Я Тигр", "🛣️ Маршрут")
-    markup.add("📋 ФОП Отчёт", "📍 Геопозиция")
-    markup.add("🚕 Тоха", "📞 Позвонить")
-    markup.add("🤖 Спросить Grok", "📗 Google Таблицы")
-    markup.add("❓ Что ты можешь?")
+    markup.add("🤖 Grok",        "📞 Позвонить")
+    markup.add("🚕 Тоха",        "📍 Геопозиция")
+    markup.add("📊 Я Тигр",      "📋 ФОП")
+    markup.add("📗 Таблицы",     "🛣️ Маршрут")
     return markup
 
 
