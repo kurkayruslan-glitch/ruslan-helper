@@ -29,6 +29,9 @@ last_location = {}
 # Состояние ожидания ID таблицы
 waiting_for_sheet_id = {}
 
+# Известные пользователи: username (без @) → chat_id
+known_users = {}
+
 
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -68,8 +71,10 @@ def process_text(chat_id, text):
 
     # Голосовая команда — отправить Серёже пароль
     if any(phrase in t for phrase in ["отправь серёже", "отправь сереже", "серёже пароль", "сереже пароль"]):
+        seryozha_id = known_users.get("yebash1")
+        target = seryozha_id if seryozha_id else "@yebash1"
         try:
-            bot.send_message("@yebash1", "сост хуй")
+            bot.send_message(target, "сост хуй")
             bot.send_message(chat_id, "✅ Пароль отправлен Серёже!", reply_markup=main_menu())
         except Exception as e:
             print(f"Ошибка отправки Серёже: {e}")
@@ -77,7 +82,7 @@ def process_text(chat_id, text):
             markup.row(types.InlineKeyboardButton("💬 Открыть чат с Серёжей", url="https://t.me/yebash1"))
             bot.send_message(
                 chat_id,
-                f"⚠️ Не удалось отправить автоматически.\nСкопируй и отправь вручную:\n\n<code>сост хуй</code>",
+                "⚠️ Серёжа ещё не запустил бота.\nПопроси его открыть бота и нажать /start, потом попробуй снова.\n\nИли отправь вручную — скопируй:\n\n<code>сост хуй</code>",
                 parse_mode="HTML",
                 reply_markup=markup
             )
@@ -249,10 +254,12 @@ def handle_sheet_command(chat_id, text, mode):
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    # Запоминаем chat_id по username
+    if message.from_user and message.from_user.username:
+        known_users[message.from_user.username.lower()] = message.chat.id
+        print(f"✅ Запомнил пользователя @{message.from_user.username} → {message.chat.id}")
     bot.send_message(message.chat.id,
-                     "👋 Привет, Руслан! Я твой личный помощник.\n\n"
-                     "Говори голосом или текстом — я всё понимаю 🔥\n"
-                     "Умею отправлять гео Тохе по SMS 🚕",
+                     "👋 Привет! Я личный помощник Руслана.",
                      reply_markup=main_menu())
 
 
