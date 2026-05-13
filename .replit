@@ -34,6 +34,7 @@ args = "cd telegram-bot && python bot.py"
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
+integrations = ["google-sheet:1.0.0"]
 
 [postMerge]
 path = "scripts/post-merge.sh"
