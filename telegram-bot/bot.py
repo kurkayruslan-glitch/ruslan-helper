@@ -61,6 +61,17 @@ def grant_access(chat_id: int):
 
 # ──────────────────────────────────────────────
 
+def safe_send(chat_id: int, text: str, reply_markup=None):
+    """Отправляет сообщение — сначала с Markdown, при ошибке — без форматирования."""
+    for chunk in [text[i:i+4000] for i in range(0, max(len(text), 1), 4000)]:
+        try:
+            bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception:
+            try:
+                bot.send_message(chat_id, chunk, reply_markup=reply_markup)
+            except Exception as e2:
+                bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
+
 # Последняя геопозиция пользователя
 last_location = {}
 
@@ -195,7 +206,7 @@ def process_text(chat_id, text):
         _save_grok_history()
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add("🔙 Выйти из Grok")
-        bot.send_message(chat_id, reply, reply_markup=markup)
+        safe_send(chat_id, reply, reply_markup=markup)
         return
 
     # ── Кнопка «🤖 Спросить Grok» ────────────────────────────────────────────
@@ -556,11 +567,7 @@ def handle_sheet_command(chat_id, text, mode):
             bot.send_message(chat_id, f"🤖 Grok анализирует «{text.strip()}»... Это займёт 10-20 секунд.")
             bot.send_chat_action(chat_id, "typing")
             result = analyze_sheet_with_ai(sheet_id)
-            if len(result) > 4000:
-                for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
-                    bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=sheets_menu())
-            else:
-                bot.send_message(chat_id, result, parse_mode="Markdown", reply_markup=sheets_menu())
+            safe_send(chat_id, result, reply_markup=sheets_menu())
 
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}", reply_markup=main_menu())
@@ -760,11 +767,7 @@ def process_worker(chat_id: int, text: str):
         bot.send_message(chat_id, f"🤖 Grok анализирует «{text.strip()}»... Подожди 10-20 секунд.")
         bot.send_chat_action(chat_id, "typing")
         result = analyze_sheet_with_ai(sheet_id)
-        if len(result) > 4000:
-            for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
-                bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=worker_menu())
-        else:
-            bot.send_message(chat_id, result, parse_mode="Markdown", reply_markup=worker_menu())
+        safe_send(chat_id, result, reply_markup=worker_menu())
     else:
         bot.send_message(chat_id, "Нажми кнопку 👇", reply_markup=worker_menu())
 
