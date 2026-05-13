@@ -12,6 +12,7 @@ from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet,
 from roles import get_role, set_role, list_roles
 from calls import make_call
 from grok import ask_grok
+from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -84,6 +85,9 @@ waiting_for_call_msg = {}
 # Состояние звонка владельца: {chat_id: {"step": "number"} | {"step": "message", "number": "..."}}
 waiting_for_owner_call = {}
 
+# Ожидание адреса TRC20 кошелька
+waiting_for_wallet = set()
+
 # Режим чата с Grok: {chat_id: True} — пока активен, все сообщения идут в Grok
 grok_mode = {}
 
@@ -133,7 +137,8 @@ def main_menu():
     markup.add("🤖 Grok",        "📞 Позвонить")
     markup.add("🚕 Тоха",        "📍 Геопозиция")
     markup.add("📊 Я Тигр",      "📋 ФОП")
-    markup.add("📗 Таблицы",     "🛣️ Маршрут")
+    markup.add("📗 Таблицы",     "💰 USDT крипто")
+    markup.add("🛣️ Маршрут")
     return markup
 
 
@@ -469,6 +474,13 @@ def process_text(chat_id, text):
                 lines.append(f"• @{uname} — {role_names.get(role, role)}")
             bot.send_message(chat_id, "👥 *Пользователи бота:*\n\n" + "\n".join(lines), parse_mode="Markdown")
 
+    elif "usdt" in t or "крипто" in t or "💰" in t or "trc20" in t or "кошелёк" in t or "кошелек" in t:
+        waiting_for_wallet.add(chat_id)
+        bot.send_message(chat_id,
+                         "💰 *USDT TRC20 Аналитика*\n\n"
+                         "Отправь адрес кошелька TRC20 — найду все транзакции и сделаю анализ через Grok:",
+                         parse_mode="Markdown")
+
     elif "назад" in t or "🔙" in t:
         bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu())
 
@@ -488,7 +500,43 @@ def process_text(chat_id, text):
         bot.send_message(chat_id, "Пожалуйста! Рад помочь 😊")
 
     else:
-        if chat_id in waiting_for_sheet_id:
+        if chat_id in waiting_for_wallet:
+            waiting_for_wallet.discard(chat_id)
+            address = text.strip()
+            # Базовая валидация адреса TRC20 (начинается с T, 34 символа)
+            if not (address.startswith("T") and len(address) == 34):
+                bot.send_message(chat_id,
+                                 "⚠️ Это не похоже на TRC20 адрес.\n"
+                                 "Адрес должен начинаться с *T* и содержать 34 символа.\n\n"
+                                 "Попробуй ещё раз — нажми «💰 USDT крипто».",
+                                 parse_mode="Markdown")
+                return
+            bot.send_message(chat_id, f"🔍 Ищу транзакции для `{address}`...", parse_mode="Markdown")
+            ok, txs, err = get_usdt_transactions(address, limit=50)
+            if not ok:
+                bot.send_message(chat_id, f"❌ Ошибка TronScan: {err}")
+                return
+            if not txs:
+                bot.send_message(chat_id, "📭 Транзакции USDT TRC20 не найдены для этого адреса.")
+                return
+            balance = get_account_balance(address)
+            summary, total_in, total_out = build_tx_summary(address, txs)
+            bot.send_message(chat_id, f"💹 Баланс: *{balance}*\nНашёл *{len(txs)}* транзакций — анализирую через Grok...",
+                             parse_mode="Markdown")
+            prompt = (
+                f"Проанализируй транзакции USDT TRC20 кошелька и дай бизнес-аналитику на русском языке.\n\n"
+                f"{summary}\n\n"
+                f"Сделай:\n"
+                f"1. Краткое резюме активности кошелька\n"
+                f"2. Топ контрагентов (кто платит/кому платят)\n"
+                f"3. Паттерны по времени (когда активен)\n"
+                f"4. Риски и необычные транзакции\n"
+                f"5. Итог и выводы"
+            )
+            reply = ask_grok(chat_id, prompt)
+            safe_send(chat_id, f"💰 *Аналитика USDT TRC20*\n\n{reply}", main_menu())
+
+        elif chat_id in waiting_for_sheet_id:
             mode = waiting_for_sheet_id.pop(chat_id)
             if mode == "toha_sms":
                 toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
