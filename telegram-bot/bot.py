@@ -10,6 +10,7 @@ from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha
 from analytics import analyze_sheet_data, register_sheet, find_sheet_id, list_sheets
 from roles import get_role, set_role, list_roles
+from calls import make_call
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -64,6 +65,9 @@ last_location = {}
 
 # Состояние ожидания ID таблицы
 waiting_for_sheet_id = {}
+
+# Состояние ожидания текста для звонка
+waiting_for_call_msg = {}
 
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
@@ -120,8 +124,9 @@ def driver_menu():
 
 
 def worker_menu():
-    """Меню для рабочего — только аналитика"""
+    """Меню для рабочего — аналитика + звонок Руслану"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("📞 Позвонить Руслану")
     markup.add("📊 Аналитика таблицы")
     markup.add("📋 Мои таблицы")
     return markup
@@ -573,8 +578,38 @@ def callback_send_geo(call):
 
 
 def process_worker(chat_id: int, text: str):
-    """Обработка команд для рабочего — только аналитика"""
+    """Обработка команд для рабочего — аналитика + звонок Руслану"""
     t = text.lower()
+    # ── Ожидаем текст для звонка ──────────────────────
+    if chat_id in waiting_for_call_msg:
+        waiting_for_call_msg.pop(chat_id)
+        owner_phone = os.environ.get("RUSLAN_PHONE_NUMBER", "")
+        if not owner_phone:
+            bot.send_message(chat_id, "⚠️ Номер Руслана не настроен. Обратись напрямую.", reply_markup=worker_menu())
+            return
+        username = ""
+        for u, cid in known_users.items():
+            if cid == chat_id:
+                username = u
+                break
+        say_text = f"Привет Руслан, твой рабочий {username} говорит: {text}"
+        bot.send_message(chat_id, "📞 Звоню Руслану...")
+        ok, info = make_call(owner_phone, say_text)
+        if ok:
+            bot.send_message(chat_id, "✅ Позвонил! Руслан услышит твоё сообщение.", reply_markup=worker_menu())
+            # Уведомление Руслану в Telegram
+            bot.send_message(OWNER_ID,
+                             f"📞 *Рабочий @{username} звонит тебе!*\n\nСообщение: _{text}_",
+                             parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, f"❌ Не удалось позвонить: {info}", reply_markup=worker_menu())
+        return
+    # ── Кнопка звонка ────────────────────────────────
+    if "позвонить руслану" in t or "📞" in t:
+        bot.send_message(chat_id, "✍️ Напиши сообщение — я позвоню Руслану и скажу его голосом:")
+        waiting_for_call_msg[chat_id] = True
+        return
+    # ── Аналитика ────────────────────────────────────
     if "аналитика" in t or "📊" in t or "статистика таблиц" in t or "сводк" in t:
         saved = list_sheets()
         if not saved:
