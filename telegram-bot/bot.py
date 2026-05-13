@@ -68,15 +68,19 @@ def process_text(chat_id, text):
 
     # Голосовая команда — отправить Серёже пароль
     if any(phrase in t for phrase in ["отправь серёже", "отправь сереже", "серёже пароль", "сереже пароль"]):
-        password_text = "сост хуй"
-        markup = types.InlineKeyboardMarkup()
-        markup.row(types.InlineKeyboardButton("💬 Открыть чат с Серёжей", url="https://t.me/yebash1"))
-        bot.send_message(
-            chat_id,
-            f"📋 Скопируй и отправь Серёже:\n\n<code>{password_text}</code>\n\nНажми кнопку — откроется чат:",
-            parse_mode="HTML",
-            reply_markup=markup
-        )
+        try:
+            bot.send_message("@yebash1", "сост хуй")
+            bot.send_message(chat_id, "✅ Пароль отправлен Серёже!", reply_markup=main_menu())
+        except Exception as e:
+            print(f"Ошибка отправки Серёже: {e}")
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("💬 Открыть чат с Серёжей", url="https://t.me/yebash1"))
+            bot.send_message(
+                chat_id,
+                f"⚠️ Не удалось отправить автоматически.\nСкопируй и отправь вручную:\n\n<code>сост хуй</code>",
+                parse_mode="HTML",
+                reply_markup=markup
+            )
         return
 
     # Голосовая команда — отправить гео Тохе
