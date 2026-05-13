@@ -533,7 +533,7 @@ def process_text(chat_id, text):
                 f"4. Риски и необычные транзакции\n"
                 f"5. Итог и выводы"
             )
-            reply = ask_grok(chat_id, prompt)
+            reply = ask_grok(prompt, [])
             safe_send(chat_id, f"💰 *Аналитика USDT TRC20*\n\n{reply}", main_menu())
 
         elif chat_id in waiting_for_sheet_id:
