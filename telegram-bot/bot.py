@@ -97,4 +97,10 @@ def handle_other(message):
 if __name__ == "__main__":
     keep_alive()
     print("Bot is starting...")
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    while True:
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except Exception as e:
+            print(f"Polling error: {e}. Restarting in 5 seconds...")
+            import time
+            time.sleep(5)
