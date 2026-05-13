@@ -66,8 +66,11 @@ last_location = {}
 # Состояние ожидания ID таблицы
 waiting_for_sheet_id = {}
 
-# Состояние ожидания текста для звонка
+# Состояние ожидания текста для звонка (worker)
 waiting_for_call_msg = {}
+
+# Состояние звонка владельца: {chat_id: {"step": "number"} | {"step": "message", "number": "..."}}
+waiting_for_owner_call = {}
 
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
@@ -94,8 +97,8 @@ def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("📊 Статистика Я Тигр", "🛣️ Маршрут")
     markup.add("📋 ФОП Отчёт", "📍 Геопозиция")
-    markup.add("🚕 Тоха", "❓ Что ты можешь?")
-    markup.add("📗 Google Таблицы")
+    markup.add("🚕 Тоха", "📞 Позвонить")
+    markup.add("📗 Google Таблицы", "❓ Что ты можешь?")
     return markup
 
 
@@ -150,7 +153,62 @@ def is_toha_geo_command(text: str) -> bool:
 
 
 def process_text(chat_id, text):
+    import re
     t = text.lower()
+
+    # ── Состояние: ожидаем номер для звонка ──────────────────────────────────
+    if chat_id in waiting_for_owner_call:
+        state = waiting_for_owner_call[chat_id]
+        if state["step"] == "number":
+            # Убираем пробелы/дефисы, принимаем любой формат
+            number = re.sub(r"[\s\-\(\)]", "", text.strip())
+            if not re.match(r"^\+?\d{7,15}$", number):
+                bot.send_message(chat_id, "⚠️ Не похоже на номер. Напиши в формате +380XXXXXXXXX:")
+                return
+            waiting_for_owner_call[chat_id] = {"step": "message", "number": number}
+            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nТеперь напиши что сказать голосом:",
+                             parse_mode="Markdown")
+            return
+        elif state["step"] == "message":
+            number = state["number"]
+            waiting_for_owner_call.pop(chat_id)
+            bot.send_message(chat_id, f"📞 Звоню на {number}...")
+            ok, info = make_call(number, text)
+            if ok:
+                bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{text}_",
+                                 parse_mode="Markdown", reply_markup=main_menu())
+            else:
+                bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
+            return
+
+    # ── Кнопка «📞 Позвонить» ─────────────────────────────────────────────────
+    if "📞 позвонить" in t or t.strip() == "📞":
+        bot.send_message(chat_id, "📞 *Звонок*\n\nНа какой номер позвонить? Напиши в формате +380XXXXXXXXX:",
+                         parse_mode="Markdown")
+        waiting_for_owner_call[chat_id] = {"step": "number"}
+        return
+
+    # ── Inline: «позвони +380XXXXXXXXX скажи [текст]» ────────────────────────
+    inline_call = re.match(
+        r"позвони\s*(\+?\d[\d\s\-]{6,14})\s*(?:и\s*)?(?:скажи|сказать|передай)?\s*(.+)?",
+        t, re.IGNORECASE
+    )
+    if inline_call:
+        number = re.sub(r"[\s\-]", "", inline_call.group(1))
+        message = inline_call.group(2) or ""
+        if not message:
+            waiting_for_owner_call[chat_id] = {"step": "message", "number": number}
+            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nЧто сказать голосом?",
+                             parse_mode="Markdown")
+            return
+        bot.send_message(chat_id, f"📞 Звоню на {number}...")
+        ok, info = make_call(number, message)
+        if ok:
+            bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{message}_",
+                             parse_mode="Markdown", reply_markup=main_menu())
+        else:
+            bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
+        return
 
     # Голосовая команда — отправить Серёже пароль
     if any(phrase in t for phrase in [
