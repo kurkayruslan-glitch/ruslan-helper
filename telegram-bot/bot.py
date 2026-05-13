@@ -438,16 +438,19 @@ def start(message):
         _save_known_users()
         print(f"✅ Запомнил пользователя @{message.from_user.username} → {chat_id}")
     if not is_allowed(chat_id):
-        bot.send_message(chat_id, "🔒 Введи секретный код для доступа:")
+        bot.send_message(chat_id, "🔒 Введи секретный код для доступа:",
+                         reply_markup=types.ReplyKeyboardRemove())
         return
     role = get_role(chat_id)
-    if role == "driver":
-        bot.send_message(chat_id, "👋 Привет! Нажми кнопку чтобы узнать где Руслан.", reply_markup=driver_menu())
-    elif chat_id == OWNER_ID:
+    if chat_id == OWNER_ID:
         set_role(chat_id, "owner")
         bot.send_message(chat_id, "👋 Привет, Руслан! Я твой личный помощник 🔥", reply_markup=main_menu())
+    elif role == "driver":
+        bot.send_message(chat_id, "👋 Привет! Нажми кнопку чтобы узнать где Руслан.", reply_markup=driver_menu())
     else:
-        bot.send_message(chat_id, "👋 Привет! Чем могу помочь?", reply_markup=main_menu())
+        # Нет роли — ждёт назначения
+        bot.send_message(chat_id, "✅ Ты уже в системе. Ожидай — Руслан назначит тебе доступ.",
+                         reply_markup=types.ReplyKeyboardRemove())
 
 
 @bot.message_handler(content_types=['voice'])
@@ -587,15 +590,22 @@ def handle_message(message):
     if not is_allowed(chat_id):
         if text.strip() == SECRET_CODE:
             grant_access(chat_id)
-            role = get_role(chat_id)
-            bot.send_message(chat_id, "✅ Доступ открыт! Добро пожаловать.",
-                             reply_markup=get_menu_for_role(role))
+            bot.send_message(chat_id,
+                             "✅ Код принят. Ожидай — Руслан назначит тебе доступ.",
+                             reply_markup=types.ReplyKeyboardRemove())
         else:
             bot.send_message(chat_id, "🔒 Нет доступа.")
         return
     role = get_role(chat_id)
     if role == "driver":
         process_driver(chat_id, text)
+    elif role == "owner" or role == "guest":
+        if role == "guest" and chat_id != OWNER_ID:
+            bot.send_message(chat_id,
+                             "⏳ Ожидай — Руслан ещё не назначил тебе роль.",
+                             reply_markup=types.ReplyKeyboardRemove())
+            return
+        process_text(chat_id, text)
     else:
         process_text(chat_id, text)
 
