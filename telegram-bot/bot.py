@@ -356,8 +356,17 @@ def process_text(chat_id, text):
         bot.send_message(chat_id, "📋 Готовлю отчёт по ФОП 3 группы.\n\nОтправь ID таблицы с данными ФОП.")
 
     elif "google" in t or "таблиц" in t or "гугл" in t:
-        bot.send_message(chat_id, "📗 *Google Таблицы*\n\nЧто хочешь сделать?",
-                         parse_mode="Markdown", reply_markup=sheets_menu())
+        saved = list_sheets()
+        # Inline-кнопки: каждая таблица открывается в приложении Гугл Таблицы
+        inline = types.InlineKeyboardMarkup(row_width=1)
+        if saved:
+            for name, sheet_id in saved.items():
+                url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+                inline.add(types.InlineKeyboardButton(f"📄 {name.title()}", url=url))
+        inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
+        inline.add(types.InlineKeyboardButton("📊 Аналитика", callback_data="analytics_menu"))
+        text = "📗 *Мои таблицы*\n\nНажми — откроется в приложении:" if saved else "📗 *Таблицы*\n\nПока нет сохранённых таблиц."
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
 
     elif "аналитика таблицы" in t or "📊 аналитика" in t or "статистика таблиц" in t or "аналитику таблиц" in t or "сводку" in t:
         saved = list_sheets()
@@ -806,6 +815,37 @@ def handle_message(message):
                          reply_markup=types.ReplyKeyboardRemove())
     else:
         process_text(chat_id, text)
+
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+
+    if call.data == "add_sheet":
+        bot.send_message(chat_id,
+                         "➕ Отправь название и ID таблицы через пробел:\n\n"
+                         "Пример: `Продажи 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`\n\n"
+                         "ID — часть ссылки после /d/ в адресе таблицы",
+                         parse_mode="Markdown")
+        waiting_for_sheet_id[chat_id] = "save_sheet"
+
+    elif call.data == "analytics_menu":
+        saved = list_sheets()
+        if not saved:
+            bot.send_message(chat_id, "📊 Нет таблиц. Сначала добавь таблицу.")
+            return
+        names = "\n".join([f"• {name}" for name in saved.keys()])
+        bot.send_message(chat_id, f"📊 Напиши название таблицы для анализа:\n\n{names}",
+                         parse_mode="Markdown")
+        waiting_for_sheet_id[chat_id] = "analytics"
+
+    elif call.data.startswith("open_sheet:"):
+        sheet_id = call.data.split(":", 1)[1]
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📄 Открыть таблицу", url=url))
+        bot.send_message(chat_id, "Нажми чтобы открыть:", reply_markup=markup)
 
 
 if __name__ == "__main__":
