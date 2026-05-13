@@ -313,339 +313,206 @@ def _ask_grok_and_route(chat_id: int, text: str):
 
 def process_text(chat_id, text):
     import re
-    t = text.lower()
+    t = text.strip()
+    tl = t.lower()
 
-    # ── Кнопка «🗑️ Забыть» — сброс истории ─────────────────────────────────
-    if "забыть" in t or "🗑️" in t or "/forget" in t:
-        grok_history.pop(chat_id, None)
-        _save_grok_history()
-        bot.send_message(chat_id, "🗑️ Готово — я забыл нашу историю. Начинаем с нуля!", reply_markup=main_menu())
-        return
+    # ══════════════════════════════════════════════════════════════════
+    # 1. СОСТОЯНИЯ ОЖИДАНИЯ — всегда первые (мультишаговые диалоги)
+    # ══════════════════════════════════════════════════════════════════
 
-    # ── Состояние: ожидаем номер для звонка ──────────────────────────────────
+    # Ожидаем номер / текст для звонка
     if chat_id in waiting_for_owner_call:
         state = waiting_for_owner_call[chat_id]
         if state["step"] == "number":
-            # Убираем пробелы/дефисы, принимаем любой формат
-            number = re.sub(r"[\s\-\(\)]", "", text.strip())
+            number = re.sub(r"[\s\-\(\)]", "", t)
             if not re.match(r"^\+?\d{7,15}$", number):
                 bot.send_message(chat_id, "⚠️ Не похоже на номер. Напиши в формате +380XXXXXXXXX:")
                 return
             waiting_for_owner_call[chat_id] = {"step": "message", "number": number}
-            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nТеперь напиши что сказать голосом:",
+            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nЧто сказать голосом?",
                              parse_mode="Markdown")
             return
         elif state["step"] == "message":
             number = state["number"]
             waiting_for_owner_call.pop(chat_id)
             bot.send_message(chat_id, f"📞 Звоню на {number}...")
-            ok, info = make_call(number, text)
+            ok, info = make_call(number, t)
             if ok:
-                bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{text}_",
+                bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{t}_",
                                  parse_mode="Markdown", reply_markup=main_menu())
             else:
                 bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
             return
 
-    # ── Кнопка «📞 Позвонить» ─────────────────────────────────────────────────
-    if "📞 позвонить" in t or t.strip() == "📞":
-        bot.send_message(chat_id, "📞 *Звонок*\n\nНа какой номер позвонить? Напиши в формате +380XXXXXXXXX:",
-                         parse_mode="Markdown")
-        waiting_for_owner_call[chat_id] = {"step": "number"}
+    # Ожидаем ввод для таблиц / SMS Тохе / роли
+    if chat_id in waiting_for_sheet_id:
+        mode = waiting_for_sheet_id.pop(chat_id)
+        if mode == "toha_sms":
+            toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+            sms_link = make_sms_link(toha_number, t)
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
+            bot.send_message(chat_id, f"💬 Нажми — откроется SMS с текстом для Тохи:\n«{t}»",
+                             reply_markup=markup)
+        else:
+            handle_sheet_command(chat_id, t, mode)
         return
 
-    # ── Inline: «позвони +380XXXXXXXXX скажи [текст]» ────────────────────────
-    inline_call = re.match(
-        r"позвони\s*(\+?\d[\d\s\-]{6,14})\s*(?:и\s*)?(?:скажи|сказать|передай)?\s*(.+)?",
-        t, re.IGNORECASE
-    )
-    if inline_call:
-        number = re.sub(r"[\s\-]", "", inline_call.group(1))
-        message = inline_call.group(2) or ""
-        if not message:
-            waiting_for_owner_call[chat_id] = {"step": "message", "number": number}
-            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nЧто сказать голосом?",
+    # Ожидаем TRC20-адрес кошелька
+    if chat_id in waiting_for_wallet:
+        waiting_for_wallet.discard(chat_id)
+        address = t
+        if not (address.startswith("T") and len(address) == 34):
+            bot.send_message(chat_id,
+                             "⚠️ Некорректный TRC20 адрес (должен начинаться с T, 34 символа).\n"
+                             "Нажми *💰 USDT крипто* и попробуй снова.",
                              parse_mode="Markdown")
             return
-        bot.send_message(chat_id, f"📞 Звоню на {number}...")
-        ok, info = make_call(number, message)
-        if ok:
-            bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{message}_",
-                             parse_mode="Markdown", reply_markup=main_menu())
-        else:
-            bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
+        _handle_grok_action(chat_id, "usdt", address)
         return
 
-    # Голосовая команда — отправить Серёже пароль
-    if any(phrase in t for phrase in [
-        "отправь серёже", "отправь сереже",
-        "серёже пароль", "сереже пароль",
-        "отправь пароль серёже", "отправь пароль сереже",
-        "пароль серёже", "пароль сереже",
-        "скинь серёже", "скинь сереже",
-        "отправь серёжке", "серёжке пароль",
-    ]):
-        seryozha_id = known_users.get("yebash1")
-        target = seryozha_id if seryozha_id else "@yebash1"
-        try:
-            bot.send_message(target, "сост хуй")
-            bot.send_message(chat_id, "✅ Пароль отправлен Серёже!", reply_markup=main_menu())
-        except Exception as e:
-            print(f"Ошибка отправки Серёже: {e}")
-            markup = types.InlineKeyboardMarkup()
-            markup.row(types.InlineKeyboardButton("💬 Открыть чат с Серёжей", url="https://t.me/yebash1"))
-            bot.send_message(
-                chat_id,
-                "⚠️ Серёжа ещё не запустил бота.\nПопроси его открыть бота и нажать /start, потом попробуй снова.\n\nИли отправь вручную — скопируй:\n\n<code>сост хуй</code>",
-                parse_mode="HTML",
-                reply_markup=markup
-            )
+    # ══════════════════════════════════════════════════════════════════
+    # 2. ТОЧНЫЕ МЕТКИ КНОПОК МЕНЮ — только для UI-навигации
+    # ══════════════════════════════════════════════════════════════════
+
+    BUTTON_LABELS = {
+        "📞 позвонить": lambda: _btn_call(chat_id),
+        "🚕 тоха": lambda: bot.send_message(chat_id, "🚕 Что делаем с Тохой?", reply_markup=toha_menu()),
+        "📍 геопозиция": lambda: bot.send_message(chat_id, "📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция"),
+        "📗 таблицы": lambda: _btn_sheets(chat_id),
+        "💰 usdt крипто": lambda: _btn_usdt(chat_id),
+        "📊 я тигр": lambda: _ask_grok_and_route(chat_id, "Сделай полную статистику по бизнесу Я Тигр"),
+        "📋 фоп": lambda: _ask_grok_and_route(chat_id, "Расскажи что нужно знать о ФОП 3 группы в Украине"),
+        "🗑️ забыть": lambda: _btn_forget(chat_id),
+        "🛣️ маршрут": lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
+        # Toha sub-menu
+        "📍 отправить гео тохе": lambda: _btn_geo_toha(chat_id),
+        "💬 написать тохе sms": lambda: _btn_sms_toha(chat_id),
+        # Sheets sub-menu
+        "📊 аналитика таблицы": lambda: _btn_analytics(chat_id),
+        "📋 мои таблицы": lambda: _btn_my_sheets(chat_id),
+        "➕ сохранить таблицу": lambda: _btn_save_sheet(chat_id),
+        "📖 читать таблицу": lambda: _btn_read_sheet(chat_id),
+        "✏️ записать в таблицу": lambda: _btn_write_sheet(chat_id),
+        "ℹ️ инфо о таблице": lambda: _btn_info_sheet(chat_id),
+        "🔙 назад": lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
+    }
+
+    label_key = tl.strip()
+    if label_key in BUTTON_LABELS:
+        BUTTON_LABELS[label_key]()
         return
 
-    # Голосовая команда — отправить гео Тохе
-    if is_toha_geo_command(t):
-        if chat_id in last_location:
-            lat, lon = last_location[chat_id]
-            maps_link = f"https://maps.google.com/?q={lat},{lon}"
-            toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-            sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
-            markup = types.InlineKeyboardMarkup()
-            markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
-            markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
-            bot.send_message(chat_id,
-                             f"📍 Нажми кнопку — откроется SMS с геопозицией:\n{maps_link}",
-                             reply_markup=markup)
-        else:
-            bot.send_message(chat_id,
-                             "📍 Сначала отправь мне свою геопозицию — нажми скрепку 📎 → Геопозиция.\n"
-                             "Потом скажи «Отправь Тохе гео»",
-                             reply_markup=main_menu())
-        return
+    # ══════════════════════════════════════════════════════════════════
+    # 3. ВСЁ ОСТАЛЬНОЕ → GROK (основной AI-мозг)
+    # ══════════════════════════════════════════════════════════════════
+    _ask_grok_and_route(chat_id, t)
 
-    if any(word in t for word in ["привет", "здравствуй", "эй", "hi"]):
-        bot.send_message(chat_id, "Привет, Руслан! 😊 Как дела? Чем помочь?", reply_markup=main_menu())
 
-    elif "как дела" in t:
-        bot.send_message(chat_id, "Отлично! Готов помогать 24/7. А у тебя как? 🚀")
+# ── Вспомогательные функции для кнопок ───────────────────────────────────────
 
-    elif "тигр" in t or "статистика" in t:
-        bot.send_message(chat_id, "📊 Делаю полную статистику по Я Тигр...\n\nОтправь ID Google таблицы с данными.", reply_markup=main_menu())
+def _btn_call(chat_id):
+    bot.send_message(chat_id, "📞 *Звонок*\n\nНа какой номер? Напиши в формате +380XXXXXXXXX:",
+                     parse_mode="Markdown")
+    waiting_for_owner_call[chat_id] = {"step": "number"}
 
-    elif "маршрут" in t or "лубны" in t or "куда" in t:
-        bot.send_message(chat_id, "🛣️ Отправь геопозицию или напиши куда ехать — построю маршрут через Google Maps")
 
-    elif "тоха" in t or "водитель" in t:
+def _btn_usdt(chat_id):
+    waiting_for_wallet.add(chat_id)
+    bot.send_message(chat_id,
+                     "💰 *USDT TRC20 Аналитика*\n\n"
+                     "Отправь адрес TRC20 кошелька (начинается с T, 34 символа):",
+                     parse_mode="Markdown")
+
+
+def _btn_forget(chat_id):
+    grok_history.pop(chat_id, None)
+    _save_grok_history()
+    bot.send_message(chat_id, "🗑️ Готово — забыл нашу историю. Начинаем с нуля!", reply_markup=main_menu())
+
+
+def _btn_sheets(chat_id):
+    saved = list_sheets()
+    inline = types.InlineKeyboardMarkup(row_width=1)
+    if saved:
+        for name, sheet_id in saved.items():
+            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+            inline.add(types.InlineKeyboardButton(f"📄 {name.title()}", url=url))
+    inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
+    inline.add(types.InlineKeyboardButton("📊 Аналитика", callback_data="analytics_menu"))
+    text = "📗 *Мои таблицы*\n\nНажми — откроется в приложении:" if saved else "📗 *Таблицы*\n\nПока нет сохранённых."
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
+
+def _btn_geo_toha(chat_id):
+    if chat_id in last_location:
+        lat, lon = last_location[chat_id]
+        maps_link = f"https://maps.google.com/?q={lat},{lon}"
+        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+        sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
+        markup = types.InlineKeyboardMarkup()
+        markup.row(types.InlineKeyboardButton("📱 Открыть SMS для Тохи", url=sms_link))
+        markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+        bot.send_message(chat_id, f"📍 Нажми — откроется SMS с геопозицией:\n{maps_link}", reply_markup=markup)
+    else:
         bot.send_message(chat_id,
-                         "🚕 Что делаем с Тохой?",
+                         "📍 Сначала отправь геопозицию — скрепка 📎 → Геопозиция.",
                          reply_markup=toha_menu())
 
-    elif "отправить гео тохе" in t or "📍 отправить гео тохе" in t:
-        if chat_id in last_location:
-            lat, lon = last_location[chat_id]
-            maps_link = f"https://maps.google.com/?q={lat},{lon}"
-            toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-            sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
-            markup = types.InlineKeyboardMarkup()
-            markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
-            markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
-            bot.send_message(chat_id,
-                             f"📍 Нажми кнопку — откроется SMS с геопозицией для Тохи:\n{maps_link}",
-                             reply_markup=markup)
-        else:
-            bot.send_message(chat_id,
-                             "📍 Сначала отправь мне геопозицию через скрепку 📎 → Геопозиция.",
-                             reply_markup=toha_menu())
 
-    elif "написать тохе sms" in t or "💬 написать тохе sms" in t:
-        bot.send_message(chat_id, "💬 Напиши текст SMS для Тохи:")
-        waiting_for_sheet_id[chat_id] = "toha_sms"
+def _btn_sms_toha(chat_id):
+    bot.send_message(chat_id, "💬 Напиши текст SMS для Тохи:")
+    waiting_for_sheet_id[chat_id] = "toha_sms"
 
-    elif "гео" in t or "где я" in t or "геопозиция" in t:
-        bot.send_message(chat_id, "📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция")
 
-    elif "фоп" in t:
-        bot.send_message(chat_id, "📋 Готовлю отчёт по ФОП 3 группы.\n\nОтправь ID таблицы с данными ФОП.")
-
-    elif "google" in t or "таблиц" in t or "гугл" in t:
-        saved = list_sheets()
-        # Inline-кнопки: каждая таблица открывается в приложении Гугл Таблицы
-        inline = types.InlineKeyboardMarkup(row_width=1)
-        if saved:
-            for name, sheet_id in saved.items():
-                url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                inline.add(types.InlineKeyboardButton(f"📄 {name.title()}", url=url))
-        inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
-        inline.add(types.InlineKeyboardButton("📊 Аналитика", callback_data="analytics_menu"))
-        text = "📗 *Мои таблицы*\n\nНажми — откроется в приложении:" if saved else "📗 *Таблицы*\n\nПока нет сохранённых таблиц."
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
-
-    elif "аналитика таблицы" in t or "📊 аналитика" in t or "статистика таблиц" in t or "аналитику таблиц" in t or "сводку" in t:
-        saved = list_sheets()
-        if not saved:
-            bot.send_message(chat_id,
-                             "📊 Пока нет сохранённых таблиц.\n\nНажми *➕ Сохранить таблицу* и добавь свою таблицу по ID.",
-                             parse_mode="Markdown", reply_markup=sheets_menu())
-        else:
-            names = "\n".join([f"• {name}" for name in saved.keys()])
-            bot.send_message(chat_id,
-                             f"📊 Напиши название таблицы для анализа:\n\n{names}",
-                             parse_mode="Markdown")
-            waiting_for_sheet_id[chat_id] = "analytics"
-
-    elif "мои таблицы" in t or "📋 мои" in t or "список таблиц" in t:
-        saved = list_sheets()
-        if not saved:
-            bot.send_message(chat_id, "Нет сохранённых таблиц. Нажми *➕ Сохранить таблицу*.",
-                             parse_mode="Markdown", reply_markup=sheets_menu())
-        else:
-            names = "\n".join([f"• *{name}*" for name in saved.keys()])
-            bot.send_message(chat_id, f"📋 *Твои таблицы:*\n\n{names}",
-                             parse_mode="Markdown", reply_markup=sheets_menu())
-
-    elif "сохранить таблицу" in t or "➕ сохранить" in t or "добавить таблицу" in t:
-        bot.send_message(chat_id,
-                         "➕ Отправь название и ID таблицы через пробел:\n\n"
-                         "Пример: `Продажи 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`\n\n"
-                         "ID таблицы — это часть ссылки Google Sheets после /d/",
-                         parse_mode="Markdown")
-        waiting_for_sheet_id[chat_id] = "save_sheet"
-
-    elif "читать таблицу" in t or "📖" in t:
-        bot.send_message(chat_id,
-                         "📖 Отправь ID таблицы и диапазон через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1:E10`",
-                         parse_mode="Markdown")
-        waiting_for_sheet_id[chat_id] = "read"
-
-    elif "записать в таблицу" in t or "✏️" in t:
-        bot.send_message(chat_id,
-                         "✏️ Отправь ID таблицы, диапазон и данные через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1 Данные`",
-                         parse_mode="Markdown")
-        waiting_for_sheet_id[chat_id] = "write"
-
-    elif "инфо о таблице" in t or "ℹ️" in t:
-        bot.send_message(chat_id,
-                         "ℹ️ Отправь ID таблицы.\n\nПример:\n`ID_ТАБЛИЦЫ`",
-                         parse_mode="Markdown")
-        waiting_for_sheet_id[chat_id] = "info"
-
-    elif any(p in t for p in ["назначь роль", "назначить роль", "дать роль", "роль водитель", "сделай водителем"]):
-        saved_users = {v: k for k, v in known_users.items()}
-        if not known_users:
-            bot.send_message(chat_id,
-                             "👥 Пока никто не запускал бота.\n\nКогда человек напишет /start — он появится здесь.\n"
-                             "Потом напиши: *назначь роль водитель @username*",
-                             parse_mode="Markdown")
-        else:
-            names = "\n".join([f"• @{u} (ID: {uid})" for u, uid in known_users.items()])
-            bot.send_message(chat_id,
-                             f"👥 *Пользователи которые запускали бота:*\n\n{names}\n\n"
-                             "Напиши: *назначь водителем @username*\nНапример: `назначь водителем @toha123`",
-                             parse_mode="Markdown")
-        waiting_for_sheet_id[chat_id] = "assign_role"
-
-    elif "назначь водителем" in t or "сделай водителем" in t:
-        # Быстрая команда: "назначь водителем @username"
-        words = text.strip().split()
-        username = next((w.lstrip("@").lower() for w in words if w.startswith("@")), None)
-        if username and username in known_users:
-            target_id = known_users[username]
-            grant_access(target_id)
-            set_role(target_id, "driver")
-            bot.send_message(chat_id, f"✅ @{username} назначен водителем!\nТеперь у него кнопка «📍 Геопозиция Руслана».")
-        elif username:
-            bot.send_message(chat_id, f"⚠️ @{username} ещё не запускал бота. Попроси его написать /start.")
-        else:
-            bot.send_message(chat_id, "⚠️ Укажи username: *назначь водителем @username*", parse_mode="Markdown")
-
-    elif "список пользователей" in t or "кто в боте" in t or "мои пользователи" in t:
-        roles_data = list_roles()
-        if not known_users:
-            bot.send_message(chat_id, "👥 Пока никто не запускал бота.")
-        else:
-            role_names = {"owner": "Владелец", "driver": "Водитель", "guest": "Гость"}
-            lines = []
-            for uname, uid in known_users.items():
-                role = roles_data.get(str(uid), "guest")
-                lines.append(f"• @{uname} — {role_names.get(role, role)}")
-            bot.send_message(chat_id, "👥 *Пользователи бота:*\n\n" + "\n".join(lines), parse_mode="Markdown")
-
-    elif "usdt" in t or "крипто" in t or "💰" in t or "trc20" in t or "кошелёк" in t or "кошелек" in t:
-        waiting_for_wallet.add(chat_id)
-        bot.send_message(chat_id,
-                         "💰 *USDT TRC20 Аналитика*\n\n"
-                         "Отправь адрес кошелька TRC20 — найду все транзакции и сделаю анализ через Grok:",
-                         parse_mode="Markdown")
-
-    elif "назад" in t or "🔙" in t:
-        bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu())
-
-    elif "что можешь" in t or "что ты умеешь" in t or "❓" in t:
-        bot.send_message(chat_id,
-                         "Я могу очень много:\n"
-                         "• Статистику по Я Тигр 📊\n"
-                         "• Отчёты по ФОП 📋\n"
-                         "• Маршруты 🛣️\n"
-                         "• Отправить гео Тохе по SMS 🚕\n"
-                         "• Принимать голосовые 🎤\n"
-                         "• Читать и писать в Google Таблицы 📗\n"
-                         "• И многое другое!\n\nЧто сейчас нужно?",
-                         reply_markup=main_menu())
-
-    elif "спасибо" in t or "благодарю" in t:
-        bot.send_message(chat_id, "Пожалуйста! Рад помочь 😊")
-
+def _btn_analytics(chat_id):
+    saved = list_sheets()
+    if not saved:
+        bot.send_message(chat_id, "📊 Нет таблиц. Нажми *➕ Сохранить таблицу*.",
+                         parse_mode="Markdown", reply_markup=sheets_menu())
     else:
-        if chat_id in waiting_for_wallet:
-            waiting_for_wallet.discard(chat_id)
-            address = text.strip()
-            # Базовая валидация адреса TRC20 (начинается с T, 34 символа)
-            if not (address.startswith("T") and len(address) == 34):
-                bot.send_message(chat_id,
-                                 "⚠️ Это не похоже на TRC20 адрес.\n"
-                                 "Адрес должен начинаться с *T* и содержать 34 символа.\n\n"
-                                 "Попробуй ещё раз — нажми «💰 USDT крипто».",
-                                 parse_mode="Markdown")
-                return
-            bot.send_message(chat_id, f"🔍 Ищу транзакции для `{address}`...", parse_mode="Markdown")
-            ok, txs, err = get_usdt_transactions(address, limit=50)
-            if not ok:
-                bot.send_message(chat_id, f"❌ Ошибка TronScan: {err}")
-                return
-            if not txs:
-                bot.send_message(chat_id, "📭 Транзакции USDT TRC20 не найдены для этого адреса.")
-                return
-            balance = get_account_balance(address)
-            summary, total_in, total_out = build_tx_summary(address, txs)
-            bot.send_message(chat_id, f"💹 Баланс: *{balance}*\nНашёл *{len(txs)}* транзакций — анализирую через Grok...",
-                             parse_mode="Markdown")
-            prompt = (
-                f"Проанализируй транзакции USDT TRC20 кошелька и дай бизнес-аналитику на русском языке.\n\n"
-                f"{summary}\n\n"
-                f"Сделай:\n"
-                f"1. Краткое резюме активности кошелька\n"
-                f"2. Топ контрагентов (кто платит/кому платят)\n"
-                f"3. Паттерны по времени (когда активен)\n"
-                f"4. Риски и необычные транзакции\n"
-                f"5. Итог и выводы"
-            )
-            reply = ask_grok(prompt, [])
-            safe_send(chat_id, f"💰 *Аналитика USDT TRC20*\n\n{reply}", main_menu())
+        names = "\n".join([f"• {name}" for name in saved.keys()])
+        bot.send_message(chat_id, f"📊 Напиши название таблицы для анализа:\n\n{names}",
+                         parse_mode="Markdown")
+        waiting_for_sheet_id[chat_id] = "analytics"
 
-        elif chat_id in waiting_for_sheet_id:
-            mode = waiting_for_sheet_id.pop(chat_id)
-            if mode == "toha_sms":
-                toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-                sms_link = make_sms_link(toha_number, text)
-                markup = types.InlineKeyboardMarkup()
-                markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
-                bot.send_message(chat_id,
-                                 f"💬 Нажми кнопку — откроется SMS с текстом для Тохи:\n«{text}»",
-                                 reply_markup=markup)
-            else:
-                handle_sheet_command(chat_id, text, mode)
-        else:
-            # Любой не распознанный текст → Grok
-            _ask_grok_and_route(chat_id, text)
+
+def _btn_my_sheets(chat_id):
+    saved = list_sheets()
+    if not saved:
+        bot.send_message(chat_id, "Нет таблиц. Нажми *➕ Сохранить таблицу*.",
+                         parse_mode="Markdown", reply_markup=sheets_menu())
+    else:
+        names = "\n".join([f"• *{name}*" for name in saved.keys()])
+        bot.send_message(chat_id, f"📋 *Твои таблицы:*\n\n{names}",
+                         parse_mode="Markdown", reply_markup=sheets_menu())
+
+
+def _btn_save_sheet(chat_id):
+    bot.send_message(chat_id,
+                     "➕ Отправь название и ID таблицы через пробел:\n\n"
+                     "Пример: `Продажи 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`",
+                     parse_mode="Markdown")
+    waiting_for_sheet_id[chat_id] = "save_sheet"
+
+
+def _btn_read_sheet(chat_id):
+    bot.send_message(chat_id,
+                     "📖 Отправь ID таблицы и диапазон через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1:E10`",
+                     parse_mode="Markdown")
+    waiting_for_sheet_id[chat_id] = "read"
+
+
+def _btn_write_sheet(chat_id):
+    bot.send_message(chat_id,
+                     "✏️ Отправь ID таблицы, диапазон и данные через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1 Данные`",
+                     parse_mode="Markdown")
+    waiting_for_sheet_id[chat_id] = "write"
+
+
+def _btn_info_sheet(chat_id):
+    bot.send_message(chat_id, "ℹ️ Отправь ID таблицы:", parse_mode="Markdown")
+    waiting_for_sheet_id[chat_id] = "info"
 
 
 def handle_sheet_command(chat_id, text, mode):
