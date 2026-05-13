@@ -9,4 +9,5 @@ dependencies = [
     "openai>=2.36.0",
     "pytelegrambotapi>=4.33.0",
     "requests>=2.34.0",
+    "twilio>=9.10.9",
 ]

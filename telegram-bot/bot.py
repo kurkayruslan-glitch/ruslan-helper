@@ -5,7 +5,8 @@ import time
 import io
 from openai import OpenAI
 from keep_alive import keep_alive
-from sheets import get_values, append_values, format_table
+from sheets import get_values, append_values, get_sheet_info, format_table
+from sms import send_geo_to_toha, send_sms_to_toha
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
@@ -20,6 +21,9 @@ openai_client = OpenAI(
 )
 
 bot = telebot.TeleBot(TOKEN)
+
+# Последняя геопозиция пользователя
+last_location = {}
 
 # Состояние ожидания ID таблицы
 waiting_for_sheet_id = {}
@@ -41,8 +45,46 @@ def sheets_menu():
     return markup
 
 
+def toha_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("📍 Отправить гео Тохе")
+    markup.add("💬 Написать Тохе SMS")
+    markup.add("🔙 Назад")
+    return markup
+
+
+def is_toha_geo_command(text: str) -> bool:
+    """Распознать голосовую команду отправки гео Тохе"""
+    t = text.lower()
+    keywords = ["отправь тоше", "отправь тохе", "скинь тоше", "скинь тохе",
+                "пошли тоше", "пошли тохе", "отправь гео тох", "скинь гео тох",
+                "тоха гео", "тоше гео", "тохе гео"]
+    return any(k in t for k in keywords)
+
+
 def process_text(chat_id, text):
     t = text.lower()
+
+    # Голосовая команда — отправить гео Тохе
+    if is_toha_geo_command(t):
+        if chat_id in last_location:
+            lat, lon = last_location[chat_id]
+            bot.send_message(chat_id, "📤 Отправляю твою геопозицию Тохе по SMS...")
+            ok = send_geo_to_toha(lat, lon)
+            if ok:
+                maps_link = f"https://maps.google.com/?q={lat},{lon}"
+                bot.send_message(chat_id,
+                                 f"✅ SMS отправлено Тохе!\n📍 {maps_link}",
+                                 reply_markup=main_menu())
+            else:
+                bot.send_message(chat_id, "⚠️ Не удалось отправить SMS. Проверь настройки Twilio.",
+                                 reply_markup=main_menu())
+        else:
+            bot.send_message(chat_id,
+                             "📍 Сначала отправь мне свою геопозицию — нажми скрепку 📎 → Геопозиция.\n"
+                             "Потом скажи «Отправь Тохе гео»",
+                             reply_markup=main_menu())
+        return
 
     if any(word in t for word in ["привет", "здравствуй", "эй", "hi"]):
         bot.send_message(chat_id, "Привет, Руслан! 😊 Как дела? Чем помочь?", reply_markup=main_menu())
@@ -51,38 +93,60 @@ def process_text(chat_id, text):
         bot.send_message(chat_id, "Отлично! Готов помогать 24/7. А у тебя как? 🚀")
 
     elif "тигр" in t or "статистика" in t:
-        bot.send_message(chat_id, "📊 Делаю полную статистику по Я Тигр...\n\nОтправь мне ID Google таблицы с данными, и я покажу статистику.", reply_markup=main_menu())
+        bot.send_message(chat_id, "📊 Делаю полную статистику по Я Тигр...\n\nОтправь ID Google таблицы с данными.", reply_markup=main_menu())
 
     elif "маршрут" in t or "лубны" in t or "куда" in t:
         bot.send_message(chat_id, "🛣️ Отправь геопозицию или напиши куда ехать — построю маршрут через Google Maps")
 
     elif "тоха" in t or "водитель" in t:
-        bot.send_message(chat_id, "🚕 Что сказать Тохе? Пример:\n«Тоха забери меня в 8:00 дома»")
+        bot.send_message(chat_id,
+                         "🚕 Что делаем с Тохой?",
+                         reply_markup=toha_menu())
+
+    elif "отправить гео тохе" in t or "📍 отправить гео тохе" in t:
+        if chat_id in last_location:
+            lat, lon = last_location[chat_id]
+            bot.send_message(chat_id, "📤 Отправляю геопозицию Тохе по SMS...")
+            ok = send_geo_to_toha(lat, lon)
+            if ok:
+                maps_link = f"https://maps.google.com/?q={lat},{lon}"
+                bot.send_message(chat_id, f"✅ SMS отправлено Тохе!\n📍 {maps_link}", reply_markup=toha_menu())
+            else:
+                bot.send_message(chat_id, "⚠️ Не удалось отправить SMS.", reply_markup=toha_menu())
+        else:
+            bot.send_message(chat_id,
+                             "📍 Сначала отправь мне геопозицию через скрепку 📎 → Геопозиция.",
+                             reply_markup=toha_menu())
+
+    elif "написать тохе sms" in t or "💬 написать тохе sms" in t:
+        bot.send_message(chat_id, "💬 Напиши текст SMS для Тохи — я отправлю:")
+        waiting_for_sheet_id[chat_id] = "toha_sms"
 
     elif "гео" in t or "где я" in t or "геопозиция" in t:
-        bot.send_message(chat_id, "📍 Отправь геопозицию — я сохраню и покажу маршрут")
+        bot.send_message(chat_id, "📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция")
 
     elif "фоп" in t:
         bot.send_message(chat_id, "📋 Готовлю отчёт по ФОП 3 группы.\n\nОтправь ID таблицы с данными ФОП.")
 
     elif "google" in t or "таблиц" in t or "гугл" in t:
-        bot.send_message(chat_id,
-                         "📗 *Google Таблицы*\n\nЯ подключён к твоему Google аккаунту!\n\nЧто хочешь сделать?",
-                         parse_mode="Markdown",
-                         reply_markup=sheets_menu())
+        bot.send_message(chat_id, "📗 *Google Таблицы*\n\nЧто хочешь сделать?",
+                         parse_mode="Markdown", reply_markup=sheets_menu())
 
     elif "читать таблицу" in t or "📖" in t:
-        bot.send_message(chat_id, "📖 Отправь ID таблицы и диапазон через пробел.\n\nПример:\n`1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms Лист1!A1:E10`",
+        bot.send_message(chat_id,
+                         "📖 Отправь ID таблицы и диапазон через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1:E10`",
                          parse_mode="Markdown")
         waiting_for_sheet_id[chat_id] = "read"
 
     elif "записать в таблицу" in t or "✏️" in t:
-        bot.send_message(chat_id, "✏️ Отправь ID таблицы, диапазон и данные через пробел.\n\nПример:\n`1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms Лист1!A1 Данные`",
+        bot.send_message(chat_id,
+                         "✏️ Отправь ID таблицы, диапазон и данные через пробел.\n\nПример:\n`ID_ТАБЛИЦЫ Лист1!A1 Данные`",
                          parse_mode="Markdown")
         waiting_for_sheet_id[chat_id] = "write"
 
     elif "инфо о таблице" in t or "ℹ️" in t:
-        bot.send_message(chat_id, "ℹ️ Отправь ID таблицы.\n\nПример:\n`1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`",
+        bot.send_message(chat_id,
+                         "ℹ️ Отправь ID таблицы.\n\nПример:\n`ID_ТАБЛИЦЫ`",
                          parse_mode="Markdown")
         waiting_for_sheet_id[chat_id] = "info"
 
@@ -94,9 +158,9 @@ def process_text(chat_id, text):
                          "Я могу очень много:\n"
                          "• Статистику по Я Тигр 📊\n"
                          "• Отчёты по ФОП 📋\n"
-                         "• Маршруты через Google Maps 🛣️\n"
-                         "• Работать с Тохой 🚕\n"
-                         "• Принимать и расшифровывать голосовые 🎤\n"
+                         "• Маршруты 🛣️\n"
+                         "• Отправить гео Тохе по SMS 🚕\n"
+                         "• Принимать голосовые 🎤\n"
                          "• Читать и писать в Google Таблицы 📗\n"
                          "• И многое другое!\n\nЧто сейчас нужно?",
                          reply_markup=main_menu())
@@ -105,9 +169,17 @@ def process_text(chat_id, text):
         bot.send_message(chat_id, "Пожалуйста! Рад помочь 😊")
 
     else:
-        # Проверяем, ожидаем ли ID таблицы
         if chat_id in waiting_for_sheet_id:
-            handle_sheet_command(chat_id, text, waiting_for_sheet_id.pop(chat_id))
+            mode = waiting_for_sheet_id.pop(chat_id)
+            if mode == "toha_sms":
+                bot.send_message(chat_id, f"📤 Отправляю SMS Тохе: «{text}»...")
+                ok = send_sms_to_toha(text)
+                if ok:
+                    bot.send_message(chat_id, "✅ SMS отправлено Тохе!", reply_markup=toha_menu())
+                else:
+                    bot.send_message(chat_id, "⚠️ Не удалось отправить SMS.", reply_markup=toha_menu())
+            else:
+                handle_sheet_command(chat_id, text, mode)
         else:
             bot.send_message(chat_id,
                              f"✅ Принял: «{text}»\n\nЧто нужно сделать дальше?",
@@ -125,23 +197,23 @@ def handle_sheet_command(chat_id, text, mode):
             bot.send_message(chat_id, "⏳ Читаю таблицу...")
             values = get_values(sheet_id, range_name)
             result = format_table(values)
-            bot.send_message(chat_id, f"📊 Данные из таблицы ({range_name}):\n\n`{result}`",
+            bot.send_message(chat_id, f"📊 Данные ({range_name}):\n\n`{result}`",
                              parse_mode="Markdown", reply_markup=sheets_menu())
 
         elif mode == "write":
             if len(parts) < 3:
-                bot.send_message(chat_id, "⚠️ Нужно указать ID таблицы, диапазон и данные через пробел.")
+                bot.send_message(chat_id, "⚠️ Нужно указать ID таблицы, диапазон и данные.")
                 return
             sheet_id, range_name, data = parts[0], parts[1], parts[2]
             bot.send_message(chat_id, "⏳ Записываю в таблицу...")
             append_values(sheet_id, range_name, [[data]])
-            bot.send_message(chat_id, f"✅ Записано в таблицу!\nДиапазон: {range_name}\nДанные: {data}",
+            bot.send_message(chat_id, f"✅ Записано!\nДиапазон: {range_name}\nДанные: {data}",
                              reply_markup=sheets_menu())
 
         elif mode == "info":
             sheet_id = parts[0]
             bot.send_message(chat_id, "⏳ Получаю информацию...")
-            info = get_values.__module__ and __import__('sheets').get_sheet_info(sheet_id)
+            info = get_sheet_info(sheet_id)
             title = info.get("properties", {}).get("title", "Неизвестно")
             sheets = info.get("sheets", [])
             sheet_names = [s.get("properties", {}).get("title", "") for s in sheets]
@@ -152,7 +224,7 @@ def handle_sheet_command(chat_id, text, mode):
                              parse_mode="Markdown", reply_markup=sheets_menu())
 
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ Ошибка при работе с таблицей:\n{str(e)}", reply_markup=main_menu())
+        bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}", reply_markup=main_menu())
 
 
 @bot.message_handler(commands=['start'])
@@ -160,14 +232,14 @@ def start(message):
     bot.send_message(message.chat.id,
                      "👋 Привет, Руслан! Я твой личный помощник.\n\n"
                      "Говори голосом или текстом — я всё понимаю 🔥\n"
-                     "Теперь умею работать с Google Таблицами 📗",
+                     "Умею отправлять гео Тохе по SMS 🚕",
                      reply_markup=main_menu())
 
 
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     chat_id = message.chat.id
-    bot.send_message(chat_id, "🎤 Голосовое получено, расшифровываю...")
+    bot.send_message(chat_id, "🎤 Расшифровываю...")
     try:
         file_info = bot.get_file(message.voice.file_id)
         downloaded = bot.download_file(file_info.file_path)
@@ -188,11 +260,40 @@ def handle_voice(message):
 
 @bot.message_handler(content_types=['location'])
 def handle_location(message):
+    chat_id = message.chat.id
     lat = message.location.latitude
     lon = message.location.longitude
-    bot.send_message(message.chat.id,
-                     f"📍 Геопозиция получена!\nШирота: {lat}\nДолгота: {lon}",
-                     reply_markup=main_menu())
+
+    # Сохраняем последнюю геопозицию
+    last_location[chat_id] = (lat, lon)
+
+    maps_link = f"https://maps.google.com/?q={lat},{lon}"
+
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+    markup.add(types.InlineKeyboardButton("🚕 Отправить Тохе SMS", callback_data="send_geo_toha"))
+
+    bot.send_message(chat_id,
+                     f"📍 Геопозиция сохранена!\nШирота: {lat}\nДолгота: {lon}",
+                     reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "send_geo_toha")
+def callback_send_geo(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    if chat_id in last_location:
+        lat, lon = last_location[chat_id]
+        bot.send_message(chat_id, "📤 Отправляю Тохе SMS с геопозицией...")
+        ok = send_geo_to_toha(lat, lon)
+        if ok:
+            maps_link = f"https://maps.google.com/?q={lat},{lon}"
+            bot.send_message(chat_id, f"✅ SMS отправлено Тохе!\n📍 {maps_link}", reply_markup=main_menu())
+        else:
+            bot.send_message(chat_id, "⚠️ Не удалось отправить SMS. Проверь настройки Twilio.",
+                             reply_markup=main_menu())
+    else:
+        bot.send_message(chat_id, "⚠️ Геопозиция не найдена.", reply_markup=main_menu())
 
 
 @bot.message_handler(func=lambda message: True)
@@ -202,7 +303,7 @@ def handle_message(message):
 
 if __name__ == "__main__":
     keep_alive()
-    print("🚀 Ruslan Personal Helper запущен с Google Sheets!")
+    print("🚀 Ruslan Personal Helper с SMS для Тохи!")
     while True:
         try:
             bot.infinity_polling(timeout=10, long_polling_timeout=5)
