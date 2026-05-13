@@ -106,20 +106,23 @@ def process_text(chat_id, text):
     elif "отправить гео тохе" in t or "📍 отправить гео тохе" in t:
         if chat_id in last_location:
             lat, lon = last_location[chat_id]
-            bot.send_message(chat_id, "📤 Отправляю геопозицию Тохе по SMS...")
-            ok = send_geo_to_toha(lat, lon)
-            if ok:
-                maps_link = f"https://maps.google.com/?q={lat},{lon}"
-                bot.send_message(chat_id, f"✅ SMS отправлено Тохе!\n📍 {maps_link}", reply_markup=toha_menu())
-            else:
-                bot.send_message(chat_id, "⚠️ Не удалось отправить SMS.", reply_markup=toha_menu())
+            maps_link = f"https://maps.google.com/?q={lat},{lon}"
+            toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+            sms_text = f"📍 Гео Руслана: {maps_link}"
+            sms_link = f"sms:{toha_number}?body={sms_text}"
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
+            markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+            bot.send_message(chat_id,
+                             f"📍 Нажми кнопку — откроется SMS с геопозицией для Тохи:\n{maps_link}",
+                             reply_markup=markup)
         else:
             bot.send_message(chat_id,
                              "📍 Сначала отправь мне геопозицию через скрепку 📎 → Геопозиция.",
                              reply_markup=toha_menu())
 
     elif "написать тохе sms" in t or "💬 написать тохе sms" in t:
-        bot.send_message(chat_id, "💬 Напиши текст SMS для Тохи — я отправлю:")
+        bot.send_message(chat_id, "💬 Напиши текст SMS для Тохи:")
         waiting_for_sheet_id[chat_id] = "toha_sms"
 
     elif "гео" in t or "где я" in t or "геопозиция" in t:
@@ -172,12 +175,13 @@ def process_text(chat_id, text):
         if chat_id in waiting_for_sheet_id:
             mode = waiting_for_sheet_id.pop(chat_id)
             if mode == "toha_sms":
-                bot.send_message(chat_id, f"📤 Отправляю SMS Тохе: «{text}»...")
-                ok = send_sms_to_toha(text)
-                if ok:
-                    bot.send_message(chat_id, "✅ SMS отправлено Тохе!", reply_markup=toha_menu())
-                else:
-                    bot.send_message(chat_id, "⚠️ Не удалось отправить SMS.", reply_markup=toha_menu())
+                toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+                sms_link = f"sms:{toha_number}?body={text}"
+                markup = types.InlineKeyboardMarkup()
+                markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
+                bot.send_message(chat_id,
+                                 f"💬 Нажми кнопку — откроется SMS с текстом для Тохи:\n«{text}»",
+                                 reply_markup=markup)
             else:
                 handle_sheet_command(chat_id, text, mode)
         else:
@@ -320,16 +324,18 @@ def callback_send_geo(call):
     bot.answer_callback_query(call.id)
     if chat_id in last_location:
         lat, lon = last_location[chat_id]
-        bot.send_message(chat_id, "📤 Отправляю Тохе SMS с геопозицией...")
-        ok = send_geo_to_toha(lat, lon)
-        if ok:
-            maps_link = f"https://maps.google.com/?q={lat},{lon}"
-            bot.send_message(chat_id, f"✅ SMS отправлено Тохе!\n📍 {maps_link}", reply_markup=main_menu())
-        else:
-            bot.send_message(chat_id, "⚠️ Не удалось отправить SMS. Проверь настройки Twilio.",
-                             reply_markup=main_menu())
+        maps_link = f"https://maps.google.com/?q={lat},{lon}"
+        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+        sms_text = f"📍 Гео Руслана: {maps_link}"
+        sms_link = f"sms:{toha_number}?body={sms_text}"
+        markup = types.InlineKeyboardMarkup()
+        markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
+        markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
+        bot.send_message(chat_id,
+                         f"📍 Нажми кнопку — откроется SMS приложение с геопозицией:\n{maps_link}",
+                         reply_markup=markup)
     else:
-        bot.send_message(chat_id, "⚠️ Геопозиция не найдена.", reply_markup=main_menu())
+        bot.send_message(chat_id, "⚠️ Геопозиция не найдена. Сначала отправь своё гео.", reply_markup=main_menu())
 
 
 @bot.message_handler(func=lambda message: True)
