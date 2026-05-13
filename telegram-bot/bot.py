@@ -119,9 +119,19 @@ def driver_menu():
     return markup
 
 
+def worker_menu():
+    """Меню для рабочего — только аналитика"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("📊 Аналитика таблицы")
+    markup.add("📋 Мои таблицы")
+    return markup
+
+
 def get_menu_for_role(role: str):
     if role == "driver":
         return driver_menu()
+    if role == "worker":
+        return worker_menu()
     return main_menu()
 
 
@@ -447,8 +457,9 @@ def start(message):
         bot.send_message(chat_id, "👋 Привет, Руслан! Я твой личный помощник 🔥", reply_markup=main_menu())
     elif role == "driver":
         bot.send_message(chat_id, "👋 Привет! Нажми кнопку чтобы узнать где Руслан.", reply_markup=driver_menu())
+    elif role == "worker":
+        bot.send_message(chat_id, "👋 Привет! Здесь ты можешь смотреть аналитику таблиц.", reply_markup=worker_menu())
     else:
-        # Нет роли — ждёт назначения
         bot.send_message(chat_id, "✅ Ты уже в системе. Ожидай — Руслан назначит тебе доступ.",
                          reply_markup=types.ReplyKeyboardRemove())
 
@@ -561,6 +572,46 @@ def callback_send_geo(call):
         bot.send_message(chat_id, "⚠️ Геопозиция не найдена. Сначала отправь своё гео.", reply_markup=main_menu())
 
 
+def process_worker(chat_id: int, text: str):
+    """Обработка команд для рабочего — только аналитика"""
+    t = text.lower()
+    if "аналитика" in t or "📊" in t or "статистика таблиц" in t or "сводк" in t:
+        saved = list_sheets()
+        if not saved:
+            bot.send_message(chat_id, "📊 Нет сохранённых таблиц. Обратись к Руслану.", reply_markup=worker_menu())
+        else:
+            names = "\n".join([f"• {name}" for name in saved.keys()])
+            bot.send_message(chat_id, f"📊 Выбери таблицу:\n\n{names}", reply_markup=worker_menu())
+            waiting_for_sheet_id[chat_id] = "analytics"
+    elif "мои таблицы" in t or "📋" in t:
+        saved = list_sheets()
+        if not saved:
+            bot.send_message(chat_id, "Нет таблиц. Обратись к Руслану.", reply_markup=worker_menu())
+        else:
+            names = "\n".join([f"• *{name}*" for name in saved.keys()])
+            bot.send_message(chat_id, f"📋 *Доступные таблицы:*\n\n{names}",
+                             parse_mode="Markdown", reply_markup=worker_menu())
+    elif chat_id in waiting_for_sheet_id and waiting_for_sheet_id[chat_id] == "analytics":
+        waiting_for_sheet_id.pop(chat_id)
+        name = text.strip().lower()
+        sheet_id = find_sheet_id(name)
+        if not sheet_id:
+            saved = list_sheets()
+            names = "\n".join([f"• {n}" for n in saved.keys()]) if saved else "нет"
+            bot.send_message(chat_id, f"⚠️ Таблица «{text.strip()}» не найдена.\n\nДоступные:\n{names}",
+                             reply_markup=worker_menu())
+            return
+        bot.send_message(chat_id, f"⏳ Анализирую «{text.strip()}»...")
+        result = analyze_sheet_data(sheet_id)
+        if len(result) > 4000:
+            for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
+                bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=worker_menu())
+        else:
+            bot.send_message(chat_id, result, parse_mode="Markdown", reply_markup=worker_menu())
+    else:
+        bot.send_message(chat_id, "Нажми кнопку 👇", reply_markup=worker_menu())
+
+
 def process_driver(chat_id: int, text: str):
     """Обработка команд для водителя"""
     t = text.lower()
@@ -599,13 +650,12 @@ def handle_message(message):
     role = get_role(chat_id)
     if role == "driver":
         process_driver(chat_id, text)
-    elif role == "owner" or role == "guest":
-        if role == "guest" and chat_id != OWNER_ID:
-            bot.send_message(chat_id,
-                             "⏳ Ожидай — Руслан ещё не назначил тебе роль.",
-                             reply_markup=types.ReplyKeyboardRemove())
-            return
-        process_text(chat_id, text)
+    elif role == "worker":
+        process_worker(chat_id, text)
+    elif role == "guest" and chat_id != OWNER_ID:
+        bot.send_message(chat_id,
+                         "⏳ Ожидай — Руслан ещё не назначил тебе роль.",
+                         reply_markup=types.ReplyKeyboardRemove())
     else:
         process_text(chat_id, text)
 
