@@ -15,10 +15,23 @@ from grok import ask_grok
 from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
 from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
+from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending
+
+import threading
+import json
+import re
+from datetime import datetime, timedelta
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+
+# UTC offset for Ukraine (EET = UTC+2, adjust to +3 in summer if needed)
+TZ_HOURS = int(os.environ.get("TZ_OFFSET_HOURS", "2"))
+
+def _now_local() -> datetime:
+    """Текущее местное время (UTC + TZ_HOURS)."""
+    return datetime.utcnow() + timedelta(hours=TZ_HOURS)
 
 OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
 OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
@@ -412,6 +425,43 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         _save_grok_history()
         bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с чистого листа!", reply_markup=main_menu())
 
+    elif action_type == "remind":
+        # action_param: "YYYY-MM-DDTHH:MM|текст напоминания"
+        if not action_param or "|" not in action_param:
+            bot.send_message(chat_id, "⚠️ Не удалось разобрать время напоминания. Попробуй уточнить: «напомни мне завтра в 9 утра проверить таблицу».")
+            return
+        dt_str, reminder_text = action_param.split("|", 1)
+        dt_str = dt_str.strip()
+        reminder_text = reminder_text.strip()
+        try:
+            fire_at = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M")
+        except ValueError:
+            bot.send_message(chat_id, f"⚠️ Неверный формат даты: «{dt_str}». Попробуй ещё раз.")
+            return
+        if fire_at <= _now_local():
+            bot.send_message(chat_id, "⚠️ Время напоминания уже прошло. Укажи будущее время.")
+            return
+        reminder = add_reminder(chat_id, reminder_text, fire_at)
+        friendly_time = fire_at.strftime("%d.%m.%Y в %H:%M")
+        bot.send_message(chat_id, f"⏰ Запомнил! Напомню тебе *{friendly_time}*:\n_{reminder_text}_",
+                         parse_mode="Markdown")
+
+    elif action_type == "list_reminders":
+        pending = list_pending(chat_id)
+        if not pending:
+            bot.send_message(chat_id, "⏰ Нет предстоящих напоминаний.")
+        else:
+            lines = []
+            for r in pending:
+                try:
+                    fire_at = datetime.strptime(r["fire_at"], "%Y-%m-%dT%H:%M")
+                    when = fire_at.strftime("%d.%m.%Y в %H:%M")
+                except Exception:
+                    when = r.get("fire_at", "?")
+                lines.append(f"• {when} — {r['text']}")
+            bot.send_message(chat_id, "⏰ *Предстоящие напоминания:*\n\n" + "\n".join(lines),
+                             parse_mode="Markdown")
+
 
 def _extract_remember_tags(text: str) -> tuple[list, str]:
     """Извлекает [REMEMBER:факт] и [ACTION:remember:факт] теги из текста."""
@@ -428,6 +478,10 @@ def _ask_grok_and_route(chat_id: int, text: str):
     """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
     history = grok_history.get(chat_id, [])
     memory_block = format_for_prompt()
+    # Добавляем текущую дату и время, чтобы Grok правильно рассчитывал относительные сроки
+    now = _now_local()
+    date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{TZ_HOURS}, Украина).\n"
+    memory_block = date_line + memory_block
     bot.send_chat_action(chat_id, "typing")
     reply = ask_grok(text, history, memory_block=memory_block)
 
@@ -1340,8 +1394,191 @@ def handle_callback(call):
         bot.send_message(chat_id, "Нажми чтобы открыть:", reply_markup=markup)
 
 
+# ──────────────────────────────────────────────
+# УТРЕННЯЯ СВОДКА И ПЛАНИРОВЩИК НАПОМИНАНИЙ
+# ──────────────────────────────────────────────
+
+MORNING_BRIEFING_HOUR = 8   # 08:00 по местному времени
+MORNING_BRIEFING_FILE = "morning_briefing.json"
+
+_morning_lock = threading.Lock()
+
+
+def _load_last_briefing_date() -> str:
+    if os.path.exists(MORNING_BRIEFING_FILE):
+        try:
+            with open(MORNING_BRIEFING_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("last_date", "")
+        except Exception:
+            pass
+    return ""
+
+
+def _save_last_briefing_date(date_str: str):
+    with open(MORNING_BRIEFING_FILE, "w", encoding="utf-8") as f:
+        json.dump({"last_date": date_str}, f)
+
+
+def _fetch_weather_kyiv() -> str:
+    """Получает погоду для Киева через Open-Meteo (без API ключа)."""
+    try:
+        import urllib.request
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            "?latitude=50.45&longitude=30.52"
+            "&current=temperature_2m,weathercode,windspeed_10m"
+            "&hourly=temperature_2m,precipitation_probability"
+            "&forecast_days=1"
+            "&timezone=Europe%2FKiev"
+        )
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        cur = data.get("current", {})
+        temp = cur.get("temperature_2m", "?")
+        wind = cur.get("windspeed_10m", "?")
+        code = cur.get("weathercode", 0)
+
+        WMO = {
+            0: "☀️ Ясно", 1: "🌤 Преимущественно ясно", 2: "⛅️ Переменная облачность",
+            3: "☁️ Пасмурно", 45: "🌫 Туман", 48: "🌫 Изморозь",
+            51: "🌦 Лёгкая морось", 53: "🌦 Морось", 55: "🌧 Плотная морось",
+            61: "🌧 Небольшой дождь", 63: "🌧 Дождь", 65: "🌧 Сильный дождь",
+            71: "🌨 Небольшой снег", 73: "🌨 Снег", 75: "❄️ Сильный снег",
+            80: "🌦 Кратковременный дождь", 81: "🌧 Дождь", 82: "⛈ Ливень",
+            95: "⛈ Гроза", 96: "⛈ Гроза с градом", 99: "⛈ Сильная гроза"
+        }
+        desc = WMO.get(code, f"код {code}")
+
+        # Максимальный шанс осадков за день
+        hourly = data.get("hourly", {})
+        precip_probs = hourly.get("precipitation_probability", [])
+        max_precip = max(precip_probs[:24]) if precip_probs else 0
+
+        result = f"🌡 {temp}°C | {desc} | 💨 {wind} км/ч"
+        if max_precip >= 30:
+            result += f" | 🌧 Вероятность осадков до {max_precip}%"
+        return result
+    except Exception as e:
+        return f"⚠️ Погода недоступна ({e})"
+
+
+def _send_morning_briefing():
+    """Отправляет утреннюю сводку Руслану."""
+    now = _now_local()
+    today = now.strftime("%Y-%m-%d")
+
+    with _morning_lock:
+        if _load_last_briefing_date() == today:
+            return  # Уже отправляли сегодня
+        # Не помечаем как отправленное до успешной отправки — см. ниже
+
+    try:
+        date_str = now.strftime("%d.%m.%Y")
+        weather = _fetch_weather_kyiv()
+
+        # Формируем утреннюю сводку
+        lines = [
+            f"☀️ *Доброе утро, Руслан!* ({date_str})",
+            "",
+            f"🌍 *Погода (Киев):* {weather}",
+            "",
+        ]
+
+        # Краткая аналитика до 2 зарегистрированных таблиц
+        saved = list_sheets()
+        if saved:
+            sheet_names = list(saved.keys())
+            lines.append("📊 *Аналитика таблиц:*")
+            lines.append("")
+            for name in sheet_names[:2]:
+                sheet_id = saved[name]
+                try:
+                    analysis = analyze_sheet_with_ai(sheet_id)
+                    # Обрезаем до ~600 символов, чтобы сводка оставалась краткой
+                    if len(analysis) > 600:
+                        analysis = analysis[:600].rsplit("\n", 1)[0] + "\n..."
+                    lines.append(f"*{name.title()}:*")
+                    lines.append(analysis)
+                    lines.append("")
+                except Exception as e:
+                    lines.append(f"*{name.title()}:* ⚠️ Не удалось получить аналитику ({e})")
+                    lines.append("")
+            if len(sheet_names) > 2:
+                remaining = sheet_names[2:]
+                lines.append(f"📋 Ещё таблиц: {', '.join(remaining)}")
+                lines.append("")
+        else:
+            lines.append("📊 Таблиц пока нет. Добавь через меню 📗 Таблицы.")
+            lines.append("")
+
+        # Предстоящие напоминания на сегодня
+        pending = list_pending(OWNER_ID)
+        today_reminders = sorted(
+            [r for r in pending if r.get("fire_at", "")[:10] == today],
+            key=lambda r: r.get("fire_at", ""),
+        )
+        if today_reminders:
+            lines.append("📅 *Напоминания на сегодня:*")
+            for r in today_reminders:
+                try:
+                    fire_at = datetime.strptime(r["fire_at"], "%Y-%m-%dT%H:%M")
+                    lines.append(f"  ⏰ {fire_at.strftime('%H:%M')} — {r['text']}")
+                except Exception:
+                    lines.append(f"  ⏰ {r['text']}")
+            lines.append("")
+
+        lines.append("Хорошего дня! 💪")
+
+        safe_send(OWNER_ID, "\n".join(lines), main_menu())
+
+        # Помечаем как отправленное только после успешной отправки
+        with _morning_lock:
+            _save_last_briefing_date(today)
+
+    except Exception as e:
+        print(f"Ошибка утренней сводки: {e}")
+
+
+def _scheduler_loop():
+    """Фоновый поток: проверяет напоминания каждую минуту, отправляет утреннюю сводку в 8:00."""
+    print("⏰ Планировщик напоминаний запущен.")
+    while True:
+        try:
+            now = _now_local()
+
+            # Утренняя сводка в MORNING_BRIEFING_HOUR:xx — окно целого часа,
+            # чтобы не пропустить при перезапуске бота в HH:01+
+            if now.hour == MORNING_BRIEFING_HOUR:
+                _send_morning_briefing()
+
+            # Проверяем и отправляем просроченные напоминания
+            due = get_due(now)
+            for reminder in due:
+                chat_id = reminder.get("chat_id")
+                text = reminder.get("text", "")
+                reminder_id = reminder.get("id", "")
+                try:
+                    # safe_send обрабатывает ошибки Markdown-разметки (fallback на plain text),
+                    # поэтому пользовательский текст напоминания не может сломать отправку
+                    safe_send(chat_id, f"⏰ *Напоминание!*\n\n{text}", main_menu())
+                    mark_fired(reminder_id)
+                except Exception as e:
+                    print(f"Ошибка отправки напоминания {reminder_id}: {e}")
+                    # Увеличиваем счётчик ошибок; после MAX_FAILURES — деактивируем
+                    mark_failed(reminder_id)
+
+        except Exception as e:
+            print(f"Ошибка в планировщике: {e}")
+
+        time.sleep(60)
+
+
 if __name__ == "__main__":
     keep_alive()
+    # Запускаем планировщик напоминаний в фоновом потоке
+    scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="reminder-scheduler")
+    scheduler_thread.start()
     print("🚀 Ruslan Personal Helper с SMS для Тохи!")
     while True:
         try:
