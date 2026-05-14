@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Ruslan Helper — Status"
+version = "1.0.0"
+id = "artifacts/status-page"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18297
+
+[services.development]
+run = "pnpm --filter @workspace/status-page run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/status-page", "run", "build" ]
+publicDir = "artifacts/status-page/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18297"
+BASE_PATH = "/"
