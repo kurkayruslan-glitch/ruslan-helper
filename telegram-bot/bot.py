@@ -15,7 +15,7 @@ from grok import ask_grok
 from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
 from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
-from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending
+from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
 import sheet_monitor
 
 import threading
@@ -459,9 +459,32 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
                     when = fire_at.strftime("%d.%m.%Y в %H:%M")
                 except Exception:
                     when = r.get("fire_at", "?")
-                lines.append(f"• {when} — {r['text']}")
-            bot.send_message(chat_id, "⏰ *Предстоящие напоминания:*\n\n" + "\n".join(lines),
+                lines.append(f"• `{r.get('id','?')}` — {when} — {r['text']}")
+            bot.send_message(chat_id, "⏰ *Предстоящие напоминания:*\n\n" + "\n".join(lines) +
+                             "\n\n_Чтобы отменить, скажи «отмени напоминание <id>» или просто «отмени про …»._",
                              parse_mode="Markdown")
+
+    elif action_type == "cancel_reminder":
+        reminder_id = (action_param or "").strip()
+        if not reminder_id:
+            bot.send_message(chat_id, "⚠️ Не понял, какое напоминание отменить. Назови его id или скажи «покажи напоминания».")
+            return
+        # Match only against this chat's pending reminders to avoid cross-chat cancellation
+        pending = list_pending(chat_id)
+        target = next((r for r in pending if r.get("id") == reminder_id), None)
+        if not target:
+            bot.send_message(chat_id, f"⚠️ Не нашёл активное напоминание с id `{reminder_id}`.", parse_mode="Markdown")
+            return
+        if cancel_reminder(reminder_id):
+            try:
+                fire_at = datetime.strptime(target["fire_at"], "%Y-%m-%dT%H:%M")
+                when = fire_at.strftime("%d.%m.%Y в %H:%M")
+            except Exception:
+                when = target.get("fire_at", "?")
+            bot.send_message(chat_id, f"🗑️ Отменил напоминание на *{when}*:\n_{target.get('text','')}_",
+                             parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, f"⚠️ Не удалось отменить напоминание `{reminder_id}`.", parse_mode="Markdown")
 
 
 def _extract_remember_tags(text: str) -> tuple[list, str]:
