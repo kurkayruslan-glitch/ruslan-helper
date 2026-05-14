@@ -220,6 +220,7 @@ def main(stop_event: threading.Event = None):
         idx = 0
         checked = 0
         last_status_at = 0
+        fallback_done = False
 
         while len(found) < TARGET and idx < len(remaining):
             if stop_event.is_set():
@@ -260,8 +261,9 @@ def main(stop_event: threading.Event = None):
                 print(f"Проверено: {checked} | Найдено: {len(found)}")
                 tg_send(f"⏳ Сканер: проверено {checked:,} страниц, найдено {len(found)}/{TARGET}")
 
-            # Fallback Grok после 50К проверок если найдено < 10
-            if checked == 50000 and len(found) < 10:
+            # Fallback Grok после 50К проверок если найдено < 10 (одноразово)
+            if not fallback_done and checked >= 50000 and len(found) < 10:
+                fallback_done = True
                 tg_send(f"🌐 Найдено только {len(found)}/{TARGET} в zona.media. Подключаю Grok web search…")
                 extra = grok_web_fallback(TARGET - len(found))
                 for rec in extra:
