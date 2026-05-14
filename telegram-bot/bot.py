@@ -809,6 +809,45 @@ def cmd_zona_build(message):
     threading.Thread(target=_build, daemon=True).start()
 
 
+@bot.message_handler(commands=['zona_scan'])
+def cmd_zona_scan(message):
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+    import scan_contacts
+    import threading
+
+    arg = ""
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1:
+        arg = parts[1].strip().lower()
+
+    if arg == "stop":
+        if scan_contacts.IS_RUNNING.is_set():
+            scan_contacts.STOP_EVENT.set()
+            bot.send_message(chat_id, "⏹ Останавливаю сканер... (завершит текущий батч)")
+        else:
+            bot.send_message(chat_id, "ℹ️ Сканер не запущен.")
+        return
+
+    if scan_contacts.IS_RUNNING.is_set():
+        bot.send_message(chat_id, "⚠️ Сканер уже работает. Останови: /zona_scan stop")
+        return
+
+    if not index_exists():
+        bot.send_message(chat_id, "❌ Индекс zona.media не загружен. Сначала /zona_build")
+        return
+
+    bot.send_message(chat_id,
+        f"🚀 Запускаю сканер 200.zona.media\n"
+        f"📅 Период: 14.10 – 14.12.2025 (5–7 мес назад)\n"
+        f"🎯 Цель: 20 контактов родственников\n\n"
+        f"Прогресс пойдёт сюда. Прервать: /zona_scan stop"
+    )
+
+    threading.Thread(target=scan_contacts.main, daemon=True).start()
+
+
 @bot.message_handler(commands=['contacts'])
 def cmd_contacts(message):
     import json
