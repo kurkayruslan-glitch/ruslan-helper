@@ -16,6 +16,7 @@ from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_pro
 from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
+import tax_calendar
 import sheet_monitor
 
 import threading
@@ -652,7 +653,11 @@ def process_text(chat_id, text):
         "📗 таблицы": lambda: _btn_sheets(chat_id),
         "💰 usdt крипто": lambda: _btn_usdt(chat_id),
         "📊 я тигр": lambda: _ask_grok_and_route(chat_id, "Сделай полную статистику по бизнесу Я Тигр"),
-        "📋 фоп": lambda: _ask_grok_and_route(chat_id, "Расскажи что нужно знать о ФОП 3 группы в Украине"),
+        "📋 фоп": lambda: _show_tax_calendar(chat_id),
+        "/налоги": lambda: _show_tax_calendar(chat_id),
+        "/податки": lambda: _show_tax_calendar(chat_id),
+        "налоги": lambda: _show_tax_calendar(chat_id),
+        "податки": lambda: _show_tax_calendar(chat_id),
         "🗑️ забыть": lambda: _btn_forget(chat_id),
         "🛣️ маршрут": lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
         "📝 анкета": lambda: _start_anketa(chat_id),
@@ -883,6 +888,29 @@ ANKETA_QUESTIONS = [
 ]
 
 anketa_state: dict = {}  # chat_id -> {"step": int, "answers": {key: text}}
+
+
+def _show_tax_calendar(chat_id: int):
+    if chat_id != OWNER_ID:
+        return
+    text = tax_calendar.format_calendar(_now_local(), months_ahead=6)
+    safe_send(chat_id, text, main_menu())
+
+
+def _seed_tax_reminders_safe():
+    """Створює нагадування про податки ФОП на наступні 12 місяців."""
+    try:
+        created = tax_calendar.seed_reminders(
+            chat_id=OWNER_ID,
+            now=_now_local(),
+            add_reminder_fn=add_reminder,
+            list_pending_fn=list_pending,
+            months_ahead=12,
+        )
+        if created:
+            print(f"💰 Налоговый календарь ФОП: добавлено {created} новых напоминаний.")
+    except Exception as e:
+        print(f"⚠️ Не удалось засеять налоговые напоминания: {e}")
 
 
 def _start_anketa(chat_id: int):
@@ -2007,6 +2035,8 @@ if __name__ == "__main__":
     # Запускаем планировщик напоминаний в фоновом потоке
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="reminder-scheduler")
     scheduler_thread.start()
+    # Засеваем налоговый календарь ФОП — идемпотентно, дубли не создаст
+    _seed_tax_reminders_safe()
     print("🚀 Ruslan Personal Helper с SMS для Тохи!")
     while True:
         try:
