@@ -1659,6 +1659,43 @@ def handle_callback(call):
             return
         _show_monitor_settings(chat_id)
 
+    elif call.data.startswith("ms:"):
+        # Per-sheet settings menu (короткий префикс из-за 64-байтного лимита
+        # callback_data в Telegram: sheet_id уже занимает ~44 символа).
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Настройками управляет только Руслан.")
+            return
+        sheet_id = call.data.split(":", 1)[1]
+        _show_sheet_monitor_settings(chat_id, sheet_id)
+
+    elif call.data.startswith("msp:"):
+        # msp:<sheet_id>:<value|none> — порог % для конкретной таблицы.
+        if chat_id != OWNER_ID:
+            return
+        try:
+            _, sheet_id, value = call.data.split(":", 2)
+            sheet_monitor.set_sheet_override(
+                sheet_id, "change_pct", None if value == "none" else float(value)
+            )
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось сохранить: {e}")
+            return
+        _show_sheet_monitor_settings(chat_id, sheet_id)
+
+    elif call.data.startswith("msi:"):
+        # msi:<sheet_id>:<value|none> — интервал проверки для конкретной таблицы.
+        if chat_id != OWNER_ID:
+            return
+        try:
+            _, sheet_id, value = call.data.split(":", 2)
+            sheet_monitor.set_sheet_override(
+                sheet_id, "interval_hours", None if value == "none" else float(value)
+            )
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось сохранить: {e}")
+            return
+        _show_sheet_monitor_settings(chat_id, sheet_id)
+
     elif call.data.startswith("monitor_set_hours:"):
         if chat_id != OWNER_ID:
             return
@@ -1679,14 +1716,22 @@ def _show_monitor_menu(chat_id):
     if not monitored:
         bot.send_message(chat_id, "📊 Нет таблиц для мониторинга.")
         return
-    inline = types.InlineKeyboardMarkup(row_width=1)
+    inline = types.InlineKeyboardMarkup(row_width=2)
     for sheet_id, info in monitored.items():
         mark = "✅" if info["enabled"] else "⬜️"
-        inline.add(types.InlineKeyboardButton(
-            f"{mark} {info['name'].title()}",
-            callback_data=f"monitor_toggle:{sheet_id}",
-        ))
-    inline.add(types.InlineKeyboardButton("⚙️ Настройки", callback_data="monitor_settings"))
+        # Каждой таблице — отдельная строка: переключатель + кнопка
+        # перехода к её собственным настройкам чувствительности.
+        inline.row(
+            types.InlineKeyboardButton(
+                f"{mark} {info['name'].title()}",
+                callback_data=f"monitor_toggle:{sheet_id}",
+            ),
+            types.InlineKeyboardButton(
+                "⚙️ настроить",
+                callback_data=f"ms:{sheet_id}",
+            ),
+        )
+    inline.add(types.InlineKeyboardButton("⚙️ Общие настройки", callback_data="monitor_settings"))
     s = sheet_monitor.get_settings()
     interval = _fmt_hours(s["interval_hours"])
     pct = int(s["change_pct"])
@@ -1758,6 +1803,65 @@ def _show_monitor_settings(chat_id):
         f"📊 Порог изменений: *≥ {int(cur_pct)}%*\n"
         f"🕒 Рабочие часы: *{hours_str}*\n\n"
         "Выбери новые значения — применятся сразу."
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
+
+def _show_sheet_monitor_settings(chat_id, sheet_id):
+    """Меню настроек чувствительности конкретной таблицы.
+    Кнопка «как общие» сбрасывает override; конкретное значение — задаёт его.
+    Рабочие часы оставлены глобальными — их Руслан меняет реже и едино."""
+    if sheet_id not in set(list_sheets().values()):
+        bot.send_message(chat_id, "⚠️ Эта таблица больше не зарегистрирована.")
+        return
+    # Имя таблицы для шапки — ищем обратным проходом по реестру.
+    name = next((n for n, sid in list_sheets().items() if sid == sheet_id), sheet_id)
+    common = sheet_monitor.get_settings()
+    overrides = sheet_monitor.get_sheet_overrides(sheet_id)
+    cur_pct = overrides.get("change_pct")          # None = «как общие»
+    cur_interval = overrides.get("interval_hours")  # None = «как общие»
+
+    inline = types.InlineKeyboardMarkup(row_width=4)
+
+    # Порог %: «как общие» + конкретные значения.
+    pct_buttons = [types.InlineKeyboardButton(
+        ("✅ " if cur_pct is None else "") + "как общие",
+        callback_data=f"msp:{sheet_id}:none",
+    )]
+    for v in sheet_monitor.ALLOWED_CHANGE_PCT:
+        mark = "✅ " if cur_pct == v else ""
+        pct_buttons.append(types.InlineKeyboardButton(
+            f"{mark}{int(v)}%", callback_data=f"msp:{sheet_id}:{int(v)}",
+        ))
+    inline.row(*pct_buttons)
+
+    # Интервал проверки: «как общие» + конкретные значения.
+    int_buttons = [types.InlineKeyboardButton(
+        ("✅ " if cur_interval is None else "") + "как общие",
+        callback_data=f"msi:{sheet_id}:none",
+    )]
+    for v in sheet_monitor.ALLOWED_INTERVALS:
+        mark = "✅ " if cur_interval == v else ""
+        int_buttons.append(types.InlineKeyboardButton(
+            f"{mark}{int(v)}ч", callback_data=f"msi:{sheet_id}:{int(v)}",
+        ))
+    inline.row(*int_buttons)
+
+    inline.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="monitor_menu"))
+
+    pct_str = (
+        f"≥ {int(cur_pct)}%" if cur_pct is not None
+        else f"как общие (≥ {int(common['change_pct'])}%)"
+    )
+    int_str = (
+        _fmt_hours(cur_interval) if cur_interval is not None
+        else f"как общие ({_fmt_hours(common['interval_hours'])})"
+    )
+    text = (
+        f"⚙️ *Настройки таблицы «{name.title()}»*\n\n"
+        f"📊 Порог изменений: *{pct_str}*\n"
+        f"⏱ Интервал проверки: *{int_str}*\n\n"
+        "«как общие» — таблица берёт значение из общих настроек."
     )
     bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
 
@@ -1916,7 +2020,10 @@ def _maybe_run_sheet_monitor(now_local: datetime):
     Интервал берётся из настроек мониторинга (Руслан меняет его из чата),
     env используется только как дефолт при первом запуске."""
     global _last_sheet_monitor_run
-    interval_hours = sheet_monitor.get_settings()["interval_hours"]
+    # Тикaем с шагом самой «торопливой» таблицы: если у одной из них override
+    # 1ч, а у остальных — общие 6ч, планировщик должен заходить раз в час,
+    # а check_all сам отфильтрует, какие именно таблицы пора проверять.
+    interval_hours = sheet_monitor.min_effective_interval_hours()
     if _last_sheet_monitor_run is not None:
         elapsed = (now_local - _last_sheet_monitor_run).total_seconds() / 3600.0
         if elapsed < interval_hours:

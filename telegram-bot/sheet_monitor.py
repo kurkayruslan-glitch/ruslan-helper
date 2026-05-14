@@ -87,6 +87,60 @@ def update_settings(**kwargs):
         _save_state(state)
 
 
+def get_sheet_overrides(sheet_id: str) -> dict:
+    """Возвращает «сырые» override-настройки для конкретной таблицы.
+    Только те ключи, что реально переопределены — отсутствие ключа значит
+    «как общие». Используется UI, чтобы показать «как общие» vs конкретное
+    значение."""
+    with _state_lock:
+        ov = _load_state().get(sheet_id, {}).get("overrides", {}) or {}
+    # копия, чтобы вызывающий случайно не мутировал state в памяти
+    return dict(ov)
+
+
+def get_effective_settings(sheet_id: str) -> dict:
+    """Эффективные настройки таблицы: общие, поверх которых наложены overrides.
+    Используется в check_sheet и при принятии решения о частоте опроса.
+    Если у таблицы нет override'а по ключу — берём общее значение."""
+    base = get_settings()
+    ov = get_sheet_overrides(sheet_id)
+    for k, v in ov.items():
+        base[k] = v
+    return base
+
+
+def set_sheet_override(sheet_id: str, key: str, value):
+    """Устанавливает (value не None) или сбрасывает (value=None) override
+    по ключу для конкретной таблицы. Допустимые ключи и значения те же,
+    что и у общих настроек, чтобы защититься от подменённого callback."""
+    if sheet_id not in set(list_sheets().values()):
+        raise ValueError("Эта таблица не зарегистрирована.")
+    allowed = {"interval_hours", "change_pct"}
+    if key not in allowed:
+        raise ValueError(f"Нельзя переопределять: {key}")
+    if value is not None:
+        if key == "interval_hours":
+            value = float(value)
+            if value not in ALLOWED_INTERVALS:
+                raise ValueError("Недопустимый интервал")
+        elif key == "change_pct":
+            value = float(value)
+            if value not in ALLOWED_CHANGE_PCT:
+                raise ValueError("Недопустимый порог")
+    with _state_lock:
+        state = _load_state()
+        e = _entry(state, sheet_id)
+        ov = e.setdefault("overrides", {})
+        if value is None:
+            ov.pop(key, None)
+            # пустой словарь не оставляем — чтобы state-файл не разрастался
+            if not ov:
+                e.pop("overrides", None)
+        else:
+            ov[key] = value
+        _save_state(state)
+
+
 def _load_state() -> dict:
     if os.path.exists(STATE_FILE):
         try:
@@ -290,7 +344,10 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
 
     # Снимаем настройки один раз на всю проверку, чтобы не дёргать lock и файл
     # на каждой колонке (на широких таблицах это сотни лишних read'ов).
-    settings = get_settings()
+    # Используем эффективные настройки: если у таблицы есть override порога —
+    # берём его, иначе общий. Так Руслан может видеть «Продажи» при ≥10%,
+    # а служебные таблицы — только при ≥50%.
+    settings = get_effective_settings(sheet_id)
     threshold_pct = settings["change_pct"]
 
     alerts = []
@@ -347,13 +404,48 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
     return text
 
 
+def _is_due(sheet_id: str, now_utc: datetime) -> bool:
+    """True, если по эффективному интервалу таблицу пора проверить.
+    Если last_check ещё не выставлен — считаем «пора» (первый запуск).
+    Сравниваем в UTC, как и сохраняли last_check, чтобы не было сдвигов."""
+    interval_hours = float(get_effective_settings(sheet_id)["interval_hours"])
+    with _state_lock:
+        raw = _load_state().get(sheet_id, {}).get("last_check")
+    if not raw:
+        return True
+    try:
+        last = datetime.fromisoformat(raw)
+    except Exception:
+        return True
+    return (now_utc - last).total_seconds() >= interval_hours * 3600
+
+
+def min_effective_interval_hours() -> float:
+    """Минимальный эффективный интервал среди включённых таблиц — нужен
+    планировщику, чтобы тикать не реже самого «торопливого» override.
+    Если нет включённых таблиц — возвращает общий интервал."""
+    intervals = []
+    for sheet_id, info in list_monitored().items():
+        if info.get("enabled"):
+            intervals.append(float(get_effective_settings(sheet_id)["interval_hours"]))
+    if not intervals:
+        return float(get_settings()["interval_hours"])
+    return min(intervals)
+
+
 def check_all(now_local: datetime) -> list:
     """Проверяет все включённые таблицы, возвращает список алертов в виде
     словарей: {sheet_id, name, text}. Так вызывающий код может прицепить
     inline-кнопки для быстрых действий."""
     alerts = []
+    now_utc = datetime.utcnow()
     for name, sheet_id in list_sheets().items():
         if not is_enabled(sheet_id):
+            continue
+        # Per-sheet интервал: если у таблицы свой override, она опрашивается
+        # реже/чаще общего. Планировщик может тикать чаще минимума override'ов,
+        # но конкретная таблица проверяется только когда её интервал прошёл.
+        if not _is_due(sheet_id, now_utc):
             continue
         try:
             msg = check_sheet(sheet_id, name, now_local)
