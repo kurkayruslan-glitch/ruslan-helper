@@ -1,106 +1,204 @@
 import json
 import os
-import uuid
 import threading
+import uuid
 from datetime import datetime
 
-REMINDERS_FILE = "reminders.json"
-_lock = threading.Lock()
+import psycopg
+from psycopg.rows import dict_row
 
+REMINDERS_FILE = "reminders.json"
 MAX_FAILURES = 3  # Drop a reminder after this many consecutive send failures
 
-
-def _load() -> list:
-    if os.path.exists(REMINDERS_FILE):
-        try:
-            with open(REMINDERS_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return data
-        except Exception:
-            pass
-    return []
+_lock = threading.Lock()
+_init_lock = threading.Lock()
+_initialized = False
 
 
-def _save(reminders: list):
-    with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(reminders, f, ensure_ascii=False, indent=2)
+def _conn():
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("DATABASE_URL is not set; cannot store reminders")
+    return psycopg.connect(dsn, row_factory=dict_row)
+
+
+def _ensure_schema():
+    global _initialized
+    if _initialized:
+        return
+    with _init_lock:
+        if _initialized:
+            return
+        with _conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id          TEXT PRIMARY KEY,
+                    chat_id     BIGINT NOT NULL,
+                    text        TEXT NOT NULL,
+                    fire_at     TIMESTAMP NOT NULL,
+                    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                    fired       BOOLEAN NOT NULL DEFAULT FALSE,
+                    failures    INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS reminders_due_idx "
+                "ON reminders (fire_at) WHERE fired = FALSE"
+            )
+            c.commit()
+        _migrate_json_if_present()
+        _initialized = True
+
+
+def _migrate_json_if_present():
+    """One-time import of legacy reminders.json into the DB, then archive the file."""
+    if not os.path.exists(REMINDERS_FILE):
+        return
+    try:
+        with open(REMINDERS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return
+        with _conn() as c, c.cursor() as cur:
+            for r in data:
+                rid = r.get("id") or str(uuid.uuid4())[:8]
+                chat_id = r.get("chat_id")
+                text = r.get("text", "")
+                fire_at_raw = r.get("fire_at", "")
+                if chat_id is None or not fire_at_raw:
+                    continue
+                try:
+                    fire_at = datetime.strptime(fire_at_raw, "%Y-%m-%dT%H:%M")
+                except Exception:
+                    continue
+                created_raw = r.get("created", "")
+                try:
+                    created = datetime.strptime(created_raw, "%Y-%m-%dT%H:%M")
+                except Exception:
+                    created = datetime.now()
+                cur.execute(
+                    """
+                    INSERT INTO reminders (id, chat_id, text, fire_at, created_at, fired, failures)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        rid,
+                        int(chat_id),
+                        text,
+                        fire_at,
+                        created,
+                        bool(r.get("fired", False)),
+                        int(r.get("failures", 0)),
+                    ),
+                )
+            c.commit()
+        os.rename(REMINDERS_FILE, REMINDERS_FILE + ".migrated")
+    except Exception as e:
+        print(f"reminders.json migration skipped: {e}")
+
+
+def _row_to_dict(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "chat_id": row["chat_id"],
+        "text": row["text"],
+        "fire_at": row["fire_at"].strftime("%Y-%m-%dT%H:%M"),
+        "created": row["created_at"].strftime("%Y-%m-%dT%H:%M"),
+        "fired": row["fired"],
+        "failures": row["failures"],
+    }
 
 
 def add_reminder(chat_id: int, text: str, fire_at: datetime) -> dict:
     """Добавляет напоминание. Возвращает созданный объект."""
-    with _lock:
-        reminders = _load()
-        reminder = {
-            "id": str(uuid.uuid4())[:8],
-            "chat_id": chat_id,
-            "text": text,
-            "fire_at": fire_at.strftime("%Y-%m-%dT%H:%M"),
-            "created": datetime.now().strftime("%Y-%m-%dT%H:%M"),
-            "fired": False,
-            "failures": 0,
-        }
-        reminders.append(reminder)
-        _save(reminders)
-    return reminder
+    _ensure_schema()
+    rid = str(uuid.uuid4())[:8]
+    with _lock, _conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO reminders (id, chat_id, text, fire_at)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, chat_id, text, fire_at, created_at, fired, failures
+            """,
+            (rid, int(chat_id), text, fire_at.replace(second=0, microsecond=0)),
+        )
+        row = cur.fetchone()
+        c.commit()
+    return _row_to_dict(row)
 
 
 def get_due(now: datetime) -> list:
     """Возвращает напоминания, время которых наступило и которые ещё не отправлены."""
-    with _lock:
-        reminders = _load()
-    due = []
-    for r in reminders:
-        if r.get("fired"):
-            continue
-        if r.get("failures", 0) >= MAX_FAILURES:
-            continue
-        try:
-            fire_at = datetime.strptime(r["fire_at"], "%Y-%m-%dT%H:%M")
-        except Exception:
-            continue
-        if fire_at <= now:
-            due.append(r)
-    return due
+    _ensure_schema()
+    with _lock, _conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, chat_id, text, fire_at, created_at, fired, failures
+            FROM reminders
+            WHERE fired = FALSE AND failures < %s AND fire_at <= %s
+            ORDER BY fire_at
+            """,
+            (MAX_FAILURES, now),
+        )
+        rows = cur.fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def mark_fired(reminder_id: str):
     """Помечает напоминание как успешно отправленное."""
-    with _lock:
-        reminders = _load()
-        for r in reminders:
-            if r.get("id") == reminder_id:
-                r["fired"] = True
-                r["failures"] = 0
-        _save(reminders)
+    _ensure_schema()
+    with _lock, _conn() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE reminders SET fired = TRUE, failures = 0 WHERE id = %s",
+            (reminder_id,),
+        )
+        c.commit()
 
 
 def mark_failed(reminder_id: str):
     """Увеличивает счётчик ошибок. После MAX_FAILURES напоминание деактивируется."""
-    with _lock:
-        reminders = _load()
-        for r in reminders:
-            if r.get("id") == reminder_id:
-                r["failures"] = r.get("failures", 0) + 1
-                if r["failures"] >= MAX_FAILURES:
-                    r["fired"] = True  # Деактивируем после MAX_FAILURES неудачных попыток
-        _save(reminders)
+    _ensure_schema()
+    with _lock, _conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE reminders
+            SET failures = failures + 1,
+                fired = CASE WHEN failures + 1 >= %s THEN TRUE ELSE fired END
+            WHERE id = %s
+            """,
+            (MAX_FAILURES, reminder_id),
+        )
+        c.commit()
 
 
 def list_pending(chat_id: int) -> list:
     """Возвращает список активных (не отправленных) напоминаний для чата."""
-    with _lock:
-        reminders = _load()
-    return [r for r in reminders if r.get("chat_id") == chat_id and not r.get("fired")]
+    _ensure_schema()
+    with _lock, _conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, chat_id, text, fire_at, created_at, fired, failures
+            FROM reminders
+            WHERE chat_id = %s AND fired = FALSE
+            ORDER BY fire_at
+            """,
+            (int(chat_id),),
+        )
+        rows = cur.fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def cancel_reminder(reminder_id: str) -> bool:
     """Отменяет напоминание по id. Возвращает True если найдено."""
-    with _lock:
-        reminders = _load()
-        for r in reminders:
-            if r.get("id") == reminder_id:
-                r["fired"] = True
-                _save(reminders)
-                return True
-    return False
+    _ensure_schema()
+    with _lock, _conn() as c, c.cursor() as cur:
+        cur.execute(
+            "UPDATE reminders SET fired = TRUE WHERE id = %s AND fired = FALSE",
+            (reminder_id,),
+        )
+        found = cur.rowcount > 0
+        c.commit()
+    return found
