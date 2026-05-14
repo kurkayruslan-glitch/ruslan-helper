@@ -764,6 +764,35 @@ def cmd_zona_build(message):
     threading.Thread(target=_build, daemon=True).start()
 
 
+@bot.message_handler(commands=['contacts'])
+def cmd_contacts(message):
+    import json
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+    DB_FILE = "contacts_db.json"
+    if not os.path.exists(DB_FILE):
+        bot.send_message(chat_id, "📭 База контактов пуста.\n\nПришли CSV файлы с данными zona.media — я их обработаю автоматически.")
+        return
+    with open(DB_FILE, encoding='utf-8') as f:
+        found = json.load(f)
+    if not found:
+        bot.send_message(chat_id, "📭 База контактов пуста. Пришли CSV файлы с данными zona.media.")
+        return
+    bot.send_message(chat_id, f"📋 *База контактов: {len(found)}/20*\n\nОтправляю все записи...", parse_mode="Markdown")
+    for i, rec in enumerate(found, 1):
+        contacts = "\n".join(rec.get('vk', [])[:3] + rec.get('archive', [])[:3])
+        msg = (f"[{i}/20] *{rec.get('name','—')}*\n"
+               f"📍 {rec.get('region','—')}, {rec.get('location','—')}\n"
+               f"⚔️ {rec.get('type','—')}"
+               + (f" | {rec['rank']}" if rec.get('rank') else "") +
+               f"\n💀 Погиб: {rec.get('death_date','—')}\n"
+               f"🔗 Контакты:\n{contacts or '—'}")
+        if rec.get('url'):
+            msg += f"\n📄 {rec['url']}"
+        bot.send_message(chat_id, msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+
 @bot.message_handler(commands=['memory'])
 def cmd_memory(message):
     chat_id = message.chat.id
@@ -1038,6 +1067,155 @@ def handle_message(message):
                          reply_markup=types.ReplyKeyboardRemove())
     else:
         process_text(chat_id, text)
+
+
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    """Принимает CSV/TXT файлы с данными zona.media, ищет погибших сен–ноя 2025 с контактами."""
+    import csv
+    import json
+    from datetime import datetime
+    from io import StringIO
+
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+
+    doc = message.document
+    name = doc.file_name or ""
+    bot.send_message(chat_id, f"📂 Получил файл: `{name}` ({doc.file_size // 1024} КБ)\n⏳ Обрабатываю...", parse_mode="Markdown")
+
+    try:
+        file_info = bot.get_file(doc.file_id)
+        raw = bot.download_file(file_info.file_path)
+        text = raw.decode('utf-8', errors='ignore')
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Ошибка загрузки: {e}")
+        return
+
+    DATE_FROM = datetime(2025, 9, 14)
+    DATE_TO   = datetime(2025, 11, 14)
+    DB_FILE   = "contacts_db.json"
+
+    # Загружаем уже найденное
+    found = []
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, encoding='utf-8') as f:
+                found = json.load(f)
+        except Exception:
+            found = []
+    found_urls = {r.get('url', r.get('name','')) for r in found}
+
+    matched   = []
+    total     = 0
+    in_range  = 0
+
+    # Пробуем разные разделители
+    delimiter = '\t' if '\t' in text[:2000] else ','
+    reader = csv.DictReader(StringIO(text), delimiter=delimiter)
+
+    # Нормализуем заголовки (на случай разного регистра/пробелов)
+    def norm(d, *keys):
+        for k in keys:
+            for dk in d.keys():
+                if dk.strip().lower() == k.lower():
+                    return d[dk].strip()
+        return ""
+
+    for row in reader:
+        total += 1
+        death_raw = norm(row, 'death_date','date_death','дата_гибели','дата гибели','Дата гибели','Died','died')
+        if not death_raw:
+            # Ищем дату в любом поле
+            for v in row.values():
+                m = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', str(v))
+                if m:
+                    try:
+                        dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                        if 2020 <= dt.year <= 2026:
+                            death_raw = m.group(0)
+                            break
+                    except Exception:
+                        pass
+
+        if not death_raw:
+            continue
+
+        m = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', death_raw)
+        if not m:
+            continue
+        try:
+            death_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except Exception:
+            continue
+
+        if not (DATE_FROM <= death_dt <= DATE_TO):
+            continue
+        in_range += 1
+
+        # Контакты
+        all_text = " ".join(str(v) for v in row.values())
+        vk_links  = re.findall(r'https?://(?:vk\.com|vkontakte\.ru)/[^\s,;"\'<>]+', all_text)
+        arc_links = re.findall(r'https?://(?:archive\.ph|web\.archive\.org)/[^\s,;"\'<>]+', all_text)
+        if not vk_links and not arc_links:
+            continue
+
+        rec_id = norm(row,'url','URL','ссылка','link') or norm(row,'name','имя','ФИО','fio') or f"row_{total}"
+        if rec_id in found_urls:
+            continue
+
+        rec = {
+            "name":       norm(row,'name','имя','ФИО','fio','Имя','Name'),
+            "region":     norm(row,'region','регион','Region'),
+            "type":       norm(row,'type','род войск','тип','Type'),
+            "location":   norm(row,'location','населённый пункт','город','Location'),
+            "rank":       norm(row,'rank','звание','Rank'),
+            "death_date": death_dt.strftime('%d.%m.%Y'),
+            "vk":         vk_links[:5],
+            "archive":    arc_links[:5],
+            "url":        norm(row,'url','URL','ссылка','link') or "",
+            "source_file": name,
+        }
+        matched.append(rec)
+        found_urls.add(rec_id)
+
+    # Добавляем новые к уже найденным
+    new_count = 0
+    for rec in matched:
+        if len(found) >= 20:
+            break
+        found.append(rec)
+        new_count += 1
+
+    # Сохраняем
+    with open(DB_FILE, 'w', encoding='utf-8') as f:
+        json.dump(found, f, ensure_ascii=False, indent=2)
+
+    # Отчёт
+    bot.send_message(chat_id,
+        f"📊 Файл `{name}` обработан:\n"
+        f"• Всего строк: {total}\n"
+        f"• Попали в диапазон 14.09–14.11.2025: {in_range}\n"
+        f"• С контактами (VK/archive): {len(matched)}\n"
+        f"• Добавлено в базу: {new_count}\n"
+        f"• Итого в базе: {len(found)}/20",
+        parse_mode="Markdown")
+
+    # Отправляем каждую новую запись
+    for i, rec in enumerate(matched[:new_count], 1):
+        contacts = "\n".join(rec['vk'][:3] + rec['archive'][:3])
+        msg = (f"✅ [{len(found)-new_count+i}/20] {rec['name']}\n"
+               f"📍 {rec['region']}, {rec['location']}\n"
+               f"⚔️ {rec['type']}{' | '+rec['rank'] if rec['rank'] else ''}\n"
+               f"💀 Погиб: {rec['death_date']}\n"
+               f"🔗 Контакты:\n{contacts}")
+        if rec.get('url'):
+            msg += f"\n📄 {rec['url']}"
+        bot.send_message(chat_id, msg)
+
+    if len(found) >= 20:
+        bot.send_message(chat_id, "🎉 База контактов собрана! 20/20. Напиши /contacts чтобы посмотреть всё.")
 
 
 @bot.callback_query_handler(func=lambda call: True)
