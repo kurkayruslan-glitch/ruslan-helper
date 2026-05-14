@@ -14,9 +14,71 @@ from analytics import list_sheets, get_raw_data, _try_number, _fmt
 STATE_FILE = "sheet_monitor.json"
 _state_lock = threading.Lock()
 
-SIGNIFICANT_CHANGE_PCT = float(os.environ.get("SHEET_MONITOR_CHANGE_PCT", "20"))
-BUSINESS_HOUR_START = int(os.environ.get("SHEET_BUSINESS_HOUR_START", "9"))
-BUSINESS_HOUR_END = int(os.environ.get("SHEET_BUSINESS_HOUR_END", "20"))
+# Ключ в state-файле для общих настроек мониторинга (не sheet_id).
+# Префикс с подчёркиванием — чтобы не пересечься с реальными ID Google Sheets.
+SETTINGS_KEY = "_settings"
+
+# Дефолты берём из env, чтобы при первом запуске поведение не менялось.
+# Реальные значения после первой настройки лежат в STATE_FILE и применяются
+# без перезапуска бота.
+DEFAULT_INTERVAL_HOURS = float(os.environ.get("SHEET_MONITOR_INTERVAL_HOURS", "2"))
+DEFAULT_CHANGE_PCT = float(os.environ.get("SHEET_MONITOR_CHANGE_PCT", "20"))
+DEFAULT_BUSINESS_HOUR_START = int(os.environ.get("SHEET_BUSINESS_HOUR_START", "9"))
+DEFAULT_BUSINESS_HOUR_END = int(os.environ.get("SHEET_BUSINESS_HOUR_END", "20"))
+
+ALLOWED_INTERVALS = (1.0, 2.0, 6.0, 12.0)
+ALLOWED_CHANGE_PCT = (10.0, 20.0, 50.0)
+# Пресеты «рабочих часов» (start, end). 0-24 = всегда «в рабочее время»,
+# то есть пометка «вне рабочих часов» в алертах не появится.
+ALLOWED_BUSINESS_HOURS = ((7, 19), (9, 20), (10, 22), (0, 24))
+
+
+def get_settings() -> dict:
+    with _state_lock:
+        s = _load_state().get(SETTINGS_KEY, {}) or {}
+    return {
+        "interval_hours": float(s.get("interval_hours", DEFAULT_INTERVAL_HOURS)),
+        "change_pct": float(s.get("change_pct", DEFAULT_CHANGE_PCT)),
+        "business_hour_start": int(s.get("business_hour_start", DEFAULT_BUSINESS_HOUR_START)),
+        "business_hour_end": int(s.get("business_hour_end", DEFAULT_BUSINESS_HOUR_END)),
+    }
+
+
+def update_settings(**kwargs):
+    """Обновляет общие настройки мониторинга. Принимает только проверенные ключи
+    с проверенными значениями, чтобы не записать мусор из callback payload."""
+    allowed = {"interval_hours", "change_pct", "business_hour_start", "business_hour_end"}
+    clean = {}
+    for k, v in kwargs.items():
+        if k not in allowed:
+            raise ValueError(f"Неизвестная настройка: {k}")
+        if k == "interval_hours":
+            v = float(v)
+            if v not in ALLOWED_INTERVALS:
+                raise ValueError("Недопустимый интервал")
+        elif k == "change_pct":
+            v = float(v)
+            if v not in ALLOWED_CHANGE_PCT:
+                raise ValueError("Недопустимый порог")
+        elif k in ("business_hour_start", "business_hour_end"):
+            v = int(v)
+            if v < 0 or v > 24:
+                raise ValueError("Час должен быть 0..24")
+        clean[k] = v
+    # Если меняем рабочие часы — пара должна быть из whitelist'а пресетов,
+    # чтобы из подменённого callback'а нельзя было записать инвертированный
+    # или произвольный диапазон (например, 22-3).
+    if "business_hour_start" in clean or "business_hour_end" in clean:
+        cur = get_settings()
+        new_start = clean.get("business_hour_start", cur["business_hour_start"])
+        new_end = clean.get("business_hour_end", cur["business_hour_end"])
+        if (new_start, new_end) not in ALLOWED_BUSINESS_HOURS:
+            raise ValueError("Недопустимый диапазон рабочих часов")
+    with _state_lock:
+        state = _load_state()
+        s = state.setdefault(SETTINGS_KEY, {})
+        s.update(clean)
+        _save_state(state)
 
 
 def _load_state() -> dict:
@@ -111,8 +173,13 @@ def _build_snapshot(sheet_id: str) -> dict:
     }
 
 
-def _is_outside_business_hours(now: datetime) -> bool:
-    return now.hour < BUSINESS_HOUR_START or now.hour >= BUSINESS_HOUR_END
+def _is_outside_business_hours(now: datetime, settings: Optional[dict] = None) -> bool:
+    s = settings if settings is not None else get_settings()
+    start, end = s["business_hour_start"], s["business_hour_end"]
+    # 0..24 — мониторинг считает рабочими все часы (пометки «вне часов» нет).
+    if start <= 0 and end >= 24:
+        return False
+    return now.hour < start or now.hour >= end
 
 
 def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
@@ -165,11 +232,16 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
     if not prev:
         return None  # первый снимок — без алерта
 
+    # Снимаем настройки один раз на всю проверку, чтобы не дёргать lock и файл
+    # на каждой колонке (на широких таблицах это сотни лишних read'ов).
+    settings = get_settings()
+    threshold_pct = settings["change_pct"]
+
     alerts = []
     new_rows = snap["row_count"] - prev.get("row_count", 0)
     if new_rows > 0:
         msg = f"➕ Новых строк: {new_rows}"
-        if _is_outside_business_hours(now_local):
+        if _is_outside_business_hours(now_local, settings):
             msg += f" (вне рабочих часов, {now_local.strftime('%H:%M')})"
         alerts.append(msg)
 
@@ -183,7 +255,7 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
                 alerts.append(f"📈 «{col}»: было 0, стало {_fmt(val)}")
             continue
         delta_pct = (val - old) / abs(old) * 100
-        if abs(delta_pct) >= SIGNIFICANT_CHANGE_PCT:
+        if abs(delta_pct) >= threshold_pct:
             arrow = "📉" if delta_pct < 0 else "📈"
             alerts.append(
                 f"{arrow} «{col}»: {_fmt(old)} → {_fmt(val)} "

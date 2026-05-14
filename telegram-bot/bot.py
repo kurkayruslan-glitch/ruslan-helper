@@ -1580,6 +1580,48 @@ def handle_callback(call):
         bot.send_message(chat_id, f"🔔 Мониторинг {status}.")
         _show_monitor_menu(chat_id)
 
+    elif call.data == "monitor_settings":
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Настройками управляет только Руслан.")
+            return
+        _show_monitor_settings(chat_id)
+
+    elif call.data.startswith("monitor_set_interval:"):
+        if chat_id != OWNER_ID:
+            return
+        try:
+            value = float(call.data.split(":", 1)[1])
+            sheet_monitor.update_settings(interval_hours=value)
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось сохранить: {e}")
+            return
+        _show_monitor_settings(chat_id)
+
+    elif call.data.startswith("monitor_set_pct:"):
+        if chat_id != OWNER_ID:
+            return
+        try:
+            value = float(call.data.split(":", 1)[1])
+            sheet_monitor.update_settings(change_pct=value)
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось сохранить: {e}")
+            return
+        _show_monitor_settings(chat_id)
+
+    elif call.data.startswith("monitor_set_hours:"):
+        if chat_id != OWNER_ID:
+            return
+        try:
+            start_s, end_s = call.data.split(":", 1)[1].split("-")
+            sheet_monitor.update_settings(
+                business_hour_start=int(start_s),
+                business_hour_end=int(end_s),
+            )
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось сохранить: {e}")
+            return
+        _show_monitor_settings(chat_id)
+
 
 def _show_monitor_menu(chat_id):
     monitored = sheet_monitor.list_monitored()
@@ -1593,12 +1635,78 @@ def _show_monitor_menu(chat_id):
             f"{mark} {info['name'].title()}",
             callback_data=f"monitor_toggle:{sheet_id}",
         ))
-    interval = os.environ.get("SHEET_MONITOR_INTERVAL_HOURS", "2")
-    pct = os.environ.get("SHEET_MONITOR_CHANGE_PCT", "20")
+    inline.add(types.InlineKeyboardButton("⚙️ Настройки", callback_data="monitor_settings"))
+    s = sheet_monitor.get_settings()
+    interval = _fmt_hours(s["interval_hours"])
+    pct = int(s["change_pct"])
+    bh_start, bh_end = s["business_hour_start"], s["business_hour_end"]
+    if bh_start <= 0 and bh_end >= 24:
+        hours_str = "круглосуточно"
+    else:
+        hours_str = f"{bh_start:02d}:00–{bh_end:02d}:00"
     text = (
         "🔔 *Мониторинг таблиц*\n\n"
-        f"Проверка каждые {interval} ч., порог изменений ≥ {pct}%.\n"
+        f"Проверка каждые {interval}, порог изменений ≥ {pct}%.\n"
+        f"Рабочие часы: {hours_str}.\n"
         "Нажми чтобы включить/выключить."
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
+
+def _fmt_hours(h: float) -> str:
+    return f"{int(h)} ч" if float(h).is_integer() else f"{h} ч"
+
+
+def _show_monitor_settings(chat_id):
+    s = sheet_monitor.get_settings()
+    cur_interval = float(s["interval_hours"])
+    cur_pct = float(s["change_pct"])
+    cur_start = int(s["business_hour_start"])
+    cur_end = int(s["business_hour_end"])
+
+    inline = types.InlineKeyboardMarkup(row_width=4)
+
+    interval_buttons = []
+    for v in sheet_monitor.ALLOWED_INTERVALS:
+        mark = "✅ " if v == cur_interval else ""
+        label = f"{mark}{int(v)}ч"
+        interval_buttons.append(types.InlineKeyboardButton(
+            label, callback_data=f"monitor_set_interval:{int(v)}"
+        ))
+    inline.row(*interval_buttons)
+
+    pct_buttons = []
+    for v in sheet_monitor.ALLOWED_CHANGE_PCT:
+        mark = "✅ " if v == cur_pct else ""
+        pct_buttons.append(types.InlineKeyboardButton(
+            f"{mark}{int(v)}%", callback_data=f"monitor_set_pct:{int(v)}"
+        ))
+    inline.row(*pct_buttons)
+
+    hours_buttons = []
+    for start, end in sheet_monitor.ALLOWED_BUSINESS_HOURS:
+        mark = "✅ " if start == cur_start and end == cur_end else ""
+        if start <= 0 and end >= 24:
+            label = f"{mark}24/7"
+        else:
+            label = f"{mark}{start}-{end}"
+        hours_buttons.append(types.InlineKeyboardButton(
+            label, callback_data=f"monitor_set_hours:{start}-{end}"
+        ))
+    inline.row(*hours_buttons)
+
+    inline.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="monitor_menu"))
+
+    if cur_start <= 0 and cur_end >= 24:
+        hours_str = "круглосуточно"
+    else:
+        hours_str = f"{cur_start:02d}:00–{cur_end:02d}:00"
+    text = (
+        "⚙️ *Настройки мониторинга*\n\n"
+        f"⏱ Интервал проверки: *{_fmt_hours(cur_interval)}*\n"
+        f"📊 Порог изменений: *≥ {int(cur_pct)}%*\n"
+        f"🕒 Рабочие часы: *{hours_str}*\n\n"
+        "Выбери новые значения — применятся сразу."
     )
     bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
 
@@ -1749,16 +1857,18 @@ def _send_morning_briefing():
         print(f"Ошибка утренней сводки: {e}")
 
 
-SHEET_MONITOR_INTERVAL_HOURS = float(os.environ.get("SHEET_MONITOR_INTERVAL_HOURS", "2"))
 _last_sheet_monitor_run: datetime | None = None
 
 
 def _maybe_run_sheet_monitor(now_local: datetime):
-    """Запускает проверку таблиц не чаще раз в SHEET_MONITOR_INTERVAL_HOURS часов."""
+    """Запускает проверку таблиц не чаще раз в N часов.
+    Интервал берётся из настроек мониторинга (Руслан меняет его из чата),
+    env используется только как дефолт при первом запуске."""
     global _last_sheet_monitor_run
+    interval_hours = sheet_monitor.get_settings()["interval_hours"]
     if _last_sheet_monitor_run is not None:
         elapsed = (now_local - _last_sheet_monitor_run).total_seconds() / 3600.0
-        if elapsed < SHEET_MONITOR_INTERVAL_HOURS:
+        if elapsed < interval_hours:
             return
     try:
         alerts = sheet_monitor.check_all(now_local)
