@@ -16,6 +16,7 @@ from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_pro
 from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending
+import sheet_monitor
 
 import threading
 import json
@@ -686,6 +687,8 @@ def _btn_sheets(chat_id):
             inline.add(types.InlineKeyboardButton(f"📄 {name.title()}", url=url))
     inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
     inline.add(types.InlineKeyboardButton("📊 Аналитика", callback_data="analytics_menu"))
+    if saved and chat_id == OWNER_ID:
+        inline.add(types.InlineKeyboardButton("🔔 Мониторинг изменений", callback_data="monitor_menu"))
     text = "📗 *Мои таблицы*\n\nНажми — откроется в приложении:" if saved else "📗 *Таблицы*\n\nПока нет сохранённых."
     bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
 
@@ -1393,6 +1396,49 @@ def handle_callback(call):
         markup.add(types.InlineKeyboardButton("📄 Открыть таблицу", url=url))
         bot.send_message(chat_id, "Нажми чтобы открыть:", reply_markup=markup)
 
+    elif call.data == "monitor_menu":
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Мониторингом управляет только Руслан.")
+            return
+        _show_monitor_menu(chat_id)
+
+    elif call.data.startswith("monitor_toggle:"):
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Мониторингом управляет только Руслан.")
+            return
+        sheet_id = call.data.split(":", 1)[1]
+        new_state = not sheet_monitor.is_enabled(sheet_id)
+        try:
+            sheet_monitor.set_enabled(sheet_id, new_state)
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось включить мониторинг: {e}")
+            return
+        status = "включён" if new_state else "выключен"
+        bot.send_message(chat_id, f"🔔 Мониторинг {status}.")
+        _show_monitor_menu(chat_id)
+
+
+def _show_monitor_menu(chat_id):
+    monitored = sheet_monitor.list_monitored()
+    if not monitored:
+        bot.send_message(chat_id, "📊 Нет таблиц для мониторинга.")
+        return
+    inline = types.InlineKeyboardMarkup(row_width=1)
+    for sheet_id, info in monitored.items():
+        mark = "✅" if info["enabled"] else "⬜️"
+        inline.add(types.InlineKeyboardButton(
+            f"{mark} {info['name'].title()}",
+            callback_data=f"monitor_toggle:{sheet_id}",
+        ))
+    interval = os.environ.get("SHEET_MONITOR_INTERVAL_HOURS", "2")
+    pct = os.environ.get("SHEET_MONITOR_CHANGE_PCT", "20")
+    text = (
+        "🔔 *Мониторинг таблиц*\n\n"
+        f"Проверка каждые {interval} ч., порог изменений ≥ {pct}%.\n"
+        "Нажми чтобы включить/выключить."
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
 
 # ──────────────────────────────────────────────
 # УТРЕННЯЯ СВОДКА И ПЛАНИРОВЩИК НАПОМИНАНИЙ
@@ -1540,6 +1586,32 @@ def _send_morning_briefing():
         print(f"Ошибка утренней сводки: {e}")
 
 
+SHEET_MONITOR_INTERVAL_HOURS = float(os.environ.get("SHEET_MONITOR_INTERVAL_HOURS", "2"))
+_last_sheet_monitor_run: datetime | None = None
+
+
+def _maybe_run_sheet_monitor(now_local: datetime):
+    """Запускает проверку таблиц не чаще раз в SHEET_MONITOR_INTERVAL_HOURS часов."""
+    global _last_sheet_monitor_run
+    if _last_sheet_monitor_run is not None:
+        elapsed = (now_local - _last_sheet_monitor_run).total_seconds() / 3600.0
+        if elapsed < SHEET_MONITOR_INTERVAL_HOURS:
+            return
+    try:
+        alerts = sheet_monitor.check_all(now_local)
+    except Exception as e:
+        print(f"Ошибка мониторинга таблиц: {e}")
+        return
+    # Помечаем как успешный запуск только после завершения, чтобы при сбое
+    # повторить раньше, а не ждать целый интервал.
+    _last_sheet_monitor_run = now_local
+    for alert in alerts:
+        try:
+            safe_send(OWNER_ID, alert, main_menu())
+        except Exception as e:
+            print(f"Не удалось отправить алерт мониторинга: {e}")
+
+
 def _scheduler_loop():
     """Фоновый поток: проверяет напоминания каждую минуту, отправляет утреннюю сводку в 8:00."""
     print("⏰ Планировщик напоминаний запущен.")
@@ -1551,6 +1623,9 @@ def _scheduler_loop():
             # чтобы не пропустить при перезапуске бота в HH:01+
             if now.hour == MORNING_BRIEFING_HOUR:
                 _send_morning_briefing()
+
+            # Периодический мониторинг изменений в Google Sheets
+            _maybe_run_sheet_monitor(now)
 
             # Проверяем и отправляем просроченные напоминания
             due = get_due(now)
