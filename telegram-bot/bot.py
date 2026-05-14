@@ -864,6 +864,114 @@ def cmd_forget(message):
     bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с нуля!", reply_markup=main_menu())
 
 
+ANKETA_QUESTIONS = [
+    ("name",     "1/10 👤 Как тебя полностью зовут? (Имя, фамилия, отчество)"),
+    ("birth",    "2/10 🎂 Когда у тебя день рождения? (ДД.ММ.ГГГГ)"),
+    ("city",     "3/10 🏙️ В каком городе живёшь?"),
+    ("work",     "4/10 💼 Чем занимаешься? Работа, бизнес, должность?"),
+    ("family",   "5/10 👨‍👩‍👧 Семья: жена/девушка, дети? Как зовут?"),
+    ("goals",    "6/10 🎯 Какие у тебя сейчас главные цели (на 3–6 месяцев)?"),
+    ("dislikes", "7/10 🚫 Что не любишь? Что бесит, чего избегаешь?"),
+    ("routine",  "8/10 ⏰ Распорядок дня: во сколько встаёшь, ложишься, привычки?"),
+    ("contacts", "9/10 ☎️ Кто экстренные контакты? (имя — телефон, через запятую)"),
+    ("extra",    "10/10 ✨ Что ещё мне важно о тебе знать? (любая важная инфа)"),
+]
+
+anketa_state: dict = {}  # chat_id -> {"step": int, "answers": {key: text}}
+
+
+@bot.message_handler(commands=['anketa', 'анкета', 'profile'])
+def cmd_anketa(message):
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+    anketa_state[chat_id] = {"step": 0, "answers": {}}
+    bot.send_message(
+        chat_id,
+        "📝 *Анкета о тебе*\n\nЯ задам 10 вопросов — отвечай как удобно. "
+        "Если на вопрос ответа нет — напиши «-» или «пропустить».\n\n"
+        "Чтобы прервать в любой момент — /cancel",
+        parse_mode="Markdown",
+    )
+    _ask_next_anketa(chat_id)
+
+
+def _ask_next_anketa(chat_id):
+    state = anketa_state.get(chat_id)
+    if state is None:
+        return
+    step = state["step"]
+    if step >= len(ANKETA_QUESTIONS):
+        _finish_anketa(chat_id)
+        return
+    _, question = ANKETA_QUESTIONS[step]
+    msg = bot.send_message(chat_id, question)
+    bot.register_next_step_handler(msg, _handle_anketa_answer)
+
+
+def _handle_anketa_answer(message):
+    chat_id = message.chat.id
+    state = anketa_state.get(chat_id)
+    if state is None:
+        return
+    text = (message.text or "").strip()
+    if text.lower() in ("/cancel", "отмена", "стоп", "/stop"):
+        anketa_state.pop(chat_id, None)
+        bot.send_message(chat_id, "❌ Анкета отменена.", reply_markup=main_menu())
+        return
+    step = state["step"]
+    key, _ = ANKETA_QUESTIONS[step]
+    if text and text not in ("-", "—", "пропустить", "skip"):
+        state["answers"][key] = text
+    state["step"] = step + 1
+    _ask_next_anketa(chat_id)
+
+
+def _finish_anketa(chat_id):
+    state = anketa_state.pop(chat_id, None)
+    if not state:
+        return
+    answers = state["answers"]
+    if not answers:
+        bot.send_message(chat_id, "🤷 Ничего не записал — все вопросы пропущены.",
+                         reply_markup=main_menu())
+        return
+
+    LABELS = {
+        "name": "ФИО",
+        "birth": "День рождения",
+        "city": "Город",
+        "work": "Чем занимается",
+        "family": "Семья",
+        "goals": "Текущие цели",
+        "dislikes": "Что не любит",
+        "routine": "Распорядок дня",
+        "contacts": "Экстренные контакты",
+        "extra": "Дополнительно",
+    }
+
+    saved = 0
+    summary_lines = []
+    for key, _ in ANKETA_QUESTIONS:
+        if key in answers:
+            label = LABELS.get(key, key)
+            fact = f"{label}: {answers[key]}"
+            if add_fact(fact):
+                saved += 1
+            summary_lines.append(f"• *{label}:* {answers[key]}")
+
+    summary = "\n".join(summary_lines)
+    bot.send_message(
+        chat_id,
+        f"✅ *Анкета сохранена!* Записал {saved} новых факта(ов) в долгосрочную память.\n\n"
+        f"{summary}\n\n"
+        f"Теперь я буду помнить это в каждом разговоре. "
+        f"Посмотреть всё — /memory, добавить факт — /memory <текст>.",
+        parse_mode="Markdown",
+        reply_markup=main_menu(),
+    )
+
+
 @bot.message_handler(commands=['zona_build'])
 def cmd_zona_build(message):
     chat_id = message.chat.id
