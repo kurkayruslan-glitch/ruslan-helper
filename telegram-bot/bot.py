@@ -12,7 +12,7 @@ from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet,
 from roles import get_role, set_role, list_roles
 from calls import make_call
 from grok import ask_grok
-from memory import get_facts, add_fact, delete_fact, clear_facts, facts_for_prompt
+from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
 from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 
@@ -413,25 +413,39 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с чистого листа!", reply_markup=main_menu())
 
 
-def _ask_grok_and_route(chat_id: int, text: str):
-    """Отправляет сообщение в Grok, разбирает ACTION-теги, показывает ответ."""
+def _extract_remember_tags(text: str) -> tuple[list, str]:
+    """Извлекает [REMEMBER:факт] и [ACTION:remember:факт] теги из текста."""
     import re
+    facts_r = re.findall(r"\[REMEMBER:([^\]]+)\]", text, flags=re.IGNORECASE)
+    facts_a = re.findall(r"\[ACTION:remember:([^\]]+)\]", text)
+    all_facts = facts_r + facts_a
+    clean = re.sub(r"\[REMEMBER:[^\]]+\]\s*", "", text, flags=re.IGNORECASE)
+    clean = re.sub(r"\[ACTION:remember:[^\]]+\]\s*", "", clean).strip()
+    return all_facts, clean
+
+
+def _ask_grok_and_route(chat_id: int, text: str):
+    """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
     history = grok_history.get(chat_id, [])
-    memory_facts = get_facts()
+    memory_block = format_for_prompt()
     bot.send_chat_action(chat_id, "typing")
-    reply = ask_grok(text, history, memory_facts=memory_facts if memory_facts else None)
+    reply = ask_grok(text, history, memory_block=memory_block)
 
-    # Вытаскиваем ВСЕ [ACTION:remember:...] теги из любого места ответа (проактивная память)
-    remember_matches = re.findall(r"\[ACTION:remember:([^\]]+)\]", reply)
-    # Убираем remember-теги из текста (они служебные, не для показа)
-    reply_no_remember = re.sub(r"\[ACTION:remember:[^\]]+\]\s*", "", reply).strip()
+    # Извлекаем оба формата тегов памяти: [REMEMBER:] и [ACTION:remember:] (только для владельца)
+    new_facts, reply_without_remember = _extract_remember_tags(reply)
+    remember_matches = []  # обработано ниже — post-conflict код становится no-op
+    saved_count = 0
+    if chat_id == OWNER_ID:
+        for fact in new_facts:
+            if add_fact(fact.strip()):
+                saved_count += 1
 
-    # Теперь парсим основное действие (из начала очищенного текста)
-    action_type, action_param, clean_reply = _parse_action(reply_no_remember)
+    # Разбираем основной ACTION тег
+    action_type, action_param, clean_reply = _parse_action(reply_without_remember)
 
-    # Сохраняем в историю (чистый текст без тегов)
+    # Сохраняем в историю (без служебных тегов)
     history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": clean_reply or reply_no_remember})
+    history.append({"role": "assistant", "content": clean_reply or reply_without_remember})
     grok_history[chat_id] = history
     _save_grok_history()
 
@@ -456,6 +470,11 @@ def _ask_grok_and_route(chat_id: int, text: str):
         if is_voice:
             _tts_send_voice(chat_id, clean_reply)
         safe_send(chat_id, clean_reply, main_menu())
+
+    # Тихо уведомляем если что-то запомнено
+    if saved_count > 0:
+        noun = "факт" if saved_count == 1 else ("факта" if saved_count < 5 else "фактов")
+        bot.send_message(chat_id, f"🧠 Запомнил {saved_count} {noun}.")
 
 
 def process_text(chat_id, text):
@@ -517,6 +536,32 @@ def process_text(chat_id, text):
             return
         _handle_grok_action(chat_id, "usdt", address)
         return
+
+    # ══════════════════════════════════════════════════════════════════
+    # 1.5 ЯВНЫЕ КОМАНДЫ ПАМЯТИ — «запомни что...» (только для владельца)
+    # ══════════════════════════════════════════════════════════════════
+
+    if chat_id == OWNER_ID:
+        remember_prefixes = [
+            "запомни что ", "запомни: ", "запомни ",
+            "сохрани что ", "сохрани: ", "сохрани факт ",
+            "не забудь что ", "не забудь: ",
+            "запиши что ", "запиши: ",
+        ]
+        for prefix in remember_prefixes:
+            if tl.startswith(prefix):
+                fact = t[len(prefix):].strip()
+                if fact:
+                    added = add_fact(fact)
+                    if added:
+                        bot.send_message(chat_id, f"🧠 Запомнил: {fact}",
+                                         reply_markup=main_menu())
+                    else:
+                        bot.send_message(chat_id, f"🧠 Уже знаю это: {fact}",
+                                         reply_markup=main_menu())
+                else:
+                    bot.send_message(chat_id, "⚠️ Что именно запомнить? Напиши после «запомни».")
+                return
 
     # ══════════════════════════════════════════════════════════════════
     # 2. ТОЧНЫЕ МЕТКИ КНОПОК МЕНЮ — только для UI-навигации
@@ -796,17 +841,24 @@ def cmd_contacts(message):
 @bot.message_handler(commands=['memory'])
 def cmd_memory(message):
     chat_id = message.chat.id
-    if not is_allowed(chat_id):
+    if chat_id != OWNER_ID:
         return
-    facts = get_facts()
-    if not facts:
-        bot.send_message(chat_id, "🧠 Долгосрочная память пуста.\n\nСкажи мне что запомнить — например: «запомни, Тоха работает по вторникам»")
-    else:
-        lines = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(facts))
-        bot.send_message(chat_id,
-                         f"🧠 *Запомнено навсегда ({len(facts)} фактов):*\n\n{lines}\n\n"
-                         f"Чтобы удалить факт — скажи «забудь факт 2»",
-                         parse_mode="Markdown")
+    args = message.text.strip().split(maxsplit=1)
+    # /memory clear — очистить память
+    if len(args) > 1 and args[1].strip().lower() in ("clear", "очистить", "сбросить"):
+        clear_memory()
+        bot.send_message(chat_id, "🗑️ Долгосрочная память очищена.", reply_markup=main_menu())
+        return
+    # /memory <факт> — добавить вручную
+    if len(args) > 1:
+        fact = args[1].strip()
+        added = add_fact(fact)
+        if added:
+            bot.send_message(chat_id, f"🧠 Запомнил: {fact}", reply_markup=main_menu())
+        else:
+            bot.send_message(chat_id, f"🧠 Уже знаю это: {fact}", reply_markup=main_menu())
+        return
+    safe_send(chat_id, format_for_display(), main_menu())
 
 
 @bot.message_handler(commands=['start'])
