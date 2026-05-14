@@ -132,7 +132,7 @@ def grok_web_fallback(needed: int):
         f"Только реальные проверяемые ссылки, без выдумок."
     )
     try:
-        reply = ask_grok(OWNER_ID, prompt)
+        reply = ask_grok(prompt, [])
         # Ищем JSON-массив в ответе
         m = re.search(r'\[[\s\S]*\]', reply)
         if not m:
@@ -182,12 +182,18 @@ def main(stop_event: threading.Event = None):
             except Exception:
                 found = []
 
-        # Фильтруем по новому диапазону дат — записи из старого диапазона не считаем
+        # Фильтруем по новому диапазону дат — записи из старого диапазона не считаем.
+        # Сразу же сохраняем отфильтрованную базу, чтобы /contacts не показывал
+        # устаревшие записи, даже если новых не найдём.
         valid = []
         for rec in found:
             dt = parse_date(rec.get("death_date", ""))
             if dt and DATE_FROM <= dt <= DATE_TO:
                 valid.append(rec)
+        if len(valid) != len(found):
+            with SCAN_LOCK:
+                with open(DB_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(valid, f, ensure_ascii=False, indent=2)
         found = valid
 
         # Индекс
@@ -248,12 +254,11 @@ def main(stop_event: threading.Event = None):
                         tg_send(msg)
                         print(f"✅ [{len(found)}/{TARGET}] {res['name']} | {res['death_date']}")
 
-            # Статус каждые 500 проверенных
+            # Статус каждые 500 проверенных — и в stdout, и в Telegram
             if checked - last_status_at >= 500:
                 last_status_at = checked
                 print(f"Проверено: {checked} | Найдено: {len(found)}")
-                if checked % 2000 == 0:
-                    tg_send(f"⏳ Сканер: проверено {checked:,} страниц, найдено {len(found)}/{TARGET}")
+                tg_send(f"⏳ Сканер: проверено {checked:,} страниц, найдено {len(found)}/{TARGET}")
 
             # Fallback Grok после 50К проверок если найдено < 10
             if checked == 50000 and len(found) < 10:
