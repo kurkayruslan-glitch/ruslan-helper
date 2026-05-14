@@ -199,7 +199,9 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
 
 
 def check_all(now_local: datetime) -> list:
-    """Проверяет все включённые таблицы, возвращает список текстов алертов."""
+    """Проверяет все включённые таблицы, возвращает список алертов в виде
+    словарей: {sheet_id, name, text}. Так вызывающий код может прицепить
+    inline-кнопки для быстрых действий."""
     alerts = []
     for name, sheet_id in list_sheets().items():
         if not is_enabled(sheet_id):
@@ -207,7 +209,11 @@ def check_all(now_local: datetime) -> list:
         try:
             msg = check_sheet(sheet_id, name, now_local)
             if msg:
-                alerts.append(msg)
+                alerts.append({"sheet_id": sheet_id, "name": name, "text": msg})
         except Exception as e:
-            alerts.append(f"⚠️ *{name.title()}* — ошибка мониторинга: {e}")
+            alerts.append({
+                "sheet_id": sheet_id,
+                "name": name,
+                "text": f"⚠️ *{name.title()}* — ошибка мониторинга: {e}",
+            })
     return alerts

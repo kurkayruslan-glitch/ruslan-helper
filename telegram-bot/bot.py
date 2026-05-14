@@ -1425,6 +1425,38 @@ def handle_callback(call):
             return
         _show_monitor_menu(chat_id)
 
+    elif call.data.startswith("alert_analytics:"):
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Аналитика по таблицам — только для Руслана.")
+            return
+        sheet_id = call.data.split(":", 1)[1]
+        if sheet_id not in set(list_sheets().values()):
+            bot.send_message(chat_id, "⚠️ Эта таблица больше не зарегистрирована.")
+            return
+        try:
+            result = analyze_sheet_with_ai(sheet_id)
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось получить аналитику: {e}")
+            return
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(
+            "📄 Открыть таблицу",
+            url=f"https://docs.google.com/spreadsheets/d/{sheet_id}",
+        ))
+        safe_send(chat_id, result, markup)
+
+    elif call.data.startswith("alert_monitor_off:"):
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Мониторингом управляет только Руслан.")
+            return
+        sheet_id = call.data.split(":", 1)[1]
+        try:
+            sheet_monitor.set_enabled(sheet_id, False)
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось выключить мониторинг: {e}")
+            return
+        bot.send_message(chat_id, "🔕 Мониторинг этой таблицы выключен. Включить обратно — в меню 📗 Таблицы → 🔔 Мониторинг изменений.")
+
     elif call.data.startswith("monitor_toggle:"):
         if chat_id != OWNER_ID:
             bot.send_message(chat_id, "🔒 Мониторингом управляет только Руслан.")
@@ -1630,7 +1662,21 @@ def _maybe_run_sheet_monitor(now_local: datetime):
     _last_sheet_monitor_run = now_local
     for alert in alerts:
         try:
-            safe_send(OWNER_ID, alert, main_menu())
+            sheet_id = alert["sheet_id"]
+            inline = types.InlineKeyboardMarkup(row_width=1)
+            inline.add(types.InlineKeyboardButton(
+                "📊 Подробная аналитика",
+                callback_data=f"alert_analytics:{sheet_id}",
+            ))
+            inline.add(types.InlineKeyboardButton(
+                "📄 Открыть таблицу",
+                url=f"https://docs.google.com/spreadsheets/d/{sheet_id}",
+            ))
+            inline.add(types.InlineKeyboardButton(
+                "🔕 Выключить мониторинг",
+                callback_data=f"alert_monitor_off:{sheet_id}",
+            ))
+            safe_send(OWNER_ID, alert["text"], inline)
         except Exception as e:
             print(f"Не удалось отправить алерт мониторинга: {e}")
 
