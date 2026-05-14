@@ -32,6 +32,12 @@ ALLOWED_CHANGE_PCT = (10.0, 20.0, 50.0)
 # то есть пометка «вне рабочих часов» в алертах не появится.
 ALLOWED_BUSINESS_HOURS = ((7, 19), (9, 20), (10, 22), (0, 24))
 
+# Дедуп повторных алертов по одной и той же таблице: если за это окно
+# уже отправляли алерт с точно таким же текстом — повтор не шлём,
+# чтобы Руслана не заваливало одинаковыми уведомлениями при «дребезге»
+# данных. Окно подобрано так же, как для ошибок (см. last_error ниже).
+ALERT_DEDUP_HOURS = float(os.environ.get("SHEET_MONITOR_ALERT_DEDUP_HOURS", "6"))
+
 
 def get_settings() -> dict:
     with _state_lock:
@@ -267,7 +273,28 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
 
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
     header = f"🔔 *{name.title()}* ({snap.get('sheet','')})\n[Открыть таблицу]({url})"
-    return header + "\n" + "\n".join(alerts)
+    text = header + "\n" + "\n".join(alerts)
+
+    # Дедуп: если в пределах ALERT_DEDUP_HOURS уже слали алерт с таким же
+    # содержимым по этой таблице — пропускаем, чтобы не дублировать сообщения
+    # при повторяющемся «дребезге» данных. Сравниваем по списку строк-алертов
+    # (без шапки), чтобы изменение названия листа не сбрасывало дедуп.
+    body_key = "\n".join(alerts)
+    with _state_lock:
+        state = _load_state()
+        entry = _entry(state, sheet_id)
+        last_alert = entry.get("last_alert") or {}
+        if last_alert.get("body") == body_key:
+            try:
+                last_at = datetime.fromisoformat(last_alert.get("at", ""))
+                if (datetime.utcnow() - last_at).total_seconds() < ALERT_DEDUP_HOURS * 3600:
+                    return None
+            except Exception:
+                pass
+        entry["last_alert"] = {"body": body_key, "at": datetime.utcnow().isoformat()}
+        _save_state(state)
+
+    return text
 
 
 def check_all(now_local: datetime) -> list:

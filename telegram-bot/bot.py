@@ -1886,25 +1886,58 @@ def _maybe_run_sheet_monitor(now_local: datetime):
     # Помечаем как успешный запуск только после завершения, чтобы при сбое
     # повторить раньше, а не ждать целый интервал.
     _last_sheet_monitor_run = now_local
-    for alert in alerts:
+    if not alerts:
+        return
+
+    # Если в одном цикле сработало больше одной таблицы — схлопываем в одно
+    # сводное сообщение со списком таблиц и кнопками по каждой, чтобы Руслан
+    # не получал «лавину» отдельных уведомлений. По одному алерту шлём как
+    # раньше — с полным текстом и кнопками действий.
+    if len(alerts) == 1:
+        alert = alerts[0]
+        sheet_id = alert["sheet_id"]
+        inline = types.InlineKeyboardMarkup(row_width=1)
+        inline.add(types.InlineKeyboardButton(
+            "📊 Подробная аналитика",
+            callback_data=f"alert_analytics:{sheet_id}",
+        ))
+        inline.add(types.InlineKeyboardButton(
+            "📄 Открыть таблицу",
+            url=f"https://docs.google.com/spreadsheets/d/{sheet_id}",
+        ))
+        inline.add(types.InlineKeyboardButton(
+            "🔕 Выключить мониторинг",
+            callback_data=f"alert_monitor_off:{sheet_id}",
+        ))
         try:
-            sheet_id = alert["sheet_id"]
-            inline = types.InlineKeyboardMarkup(row_width=1)
-            inline.add(types.InlineKeyboardButton(
-                "📊 Подробная аналитика",
-                callback_data=f"alert_analytics:{sheet_id}",
-            ))
-            inline.add(types.InlineKeyboardButton(
-                "📄 Открыть таблицу",
-                url=f"https://docs.google.com/spreadsheets/d/{sheet_id}",
-            ))
-            inline.add(types.InlineKeyboardButton(
-                "🔕 Выключить мониторинг",
-                callback_data=f"alert_monitor_off:{sheet_id}",
-            ))
             safe_send(OWNER_ID, alert["text"], inline)
         except Exception as e:
             print(f"Не удалось отправить алерт мониторинга: {e}")
+        return
+
+    lines = [f"🔔 *Изменения сразу в {len(alerts)} таблицах:*", ""]
+    inline = types.InlineKeyboardMarkup(row_width=2)
+    for alert in alerts:
+        sheet_id = alert["sheet_id"]
+        name = str(alert.get("name", "")).title()
+        lines.append(f"• *{name}*")
+        # Две компактные кнопки в ряд по каждой таблице: аналитика + выключить.
+        # Полные кнопки (включая «Открыть таблицу») доступны через аналитику и
+        # из меню — здесь экономим место, чтобы клавиатура не разрасталась.
+        inline.add(
+            types.InlineKeyboardButton(
+                f"📊 {name}",
+                callback_data=f"alert_analytics:{sheet_id}",
+            ),
+            types.InlineKeyboardButton(
+                f"🔕 {name}",
+                callback_data=f"alert_monitor_off:{sheet_id}",
+            ),
+        )
+    try:
+        safe_send(OWNER_ID, "\n".join(lines), inline)
+    except Exception as e:
+        print(f"Не удалось отправить сводный алерт мониторинга: {e}")
 
 
 def _scheduler_loop():
