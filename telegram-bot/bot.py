@@ -1573,6 +1573,21 @@ def handle_callback(call):
             return
         bot.send_message(chat_id, "🔕 Мониторинг этой таблицы выключен. Включить обратно — в меню 📗 Таблицы → 🔔 Мониторинг изменений.")
 
+    elif call.data.startswith("alert_snooze:"):
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Мониторингом управляет только Руслан.")
+            return
+        sheet_id = call.data.split(":", 1)[1]
+        try:
+            wake = sheet_monitor.snooze_until_morning(sheet_id, _now_local())
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не удалось приглушить мониторинг: {e}")
+            return
+        bot.send_message(
+            chat_id,
+            f"😴 Тише до {wake.strftime('%H:%M')}. С утра мониторинг сам проснётся.",
+        )
+
     elif call.data.startswith("monitor_toggle:"):
         if chat_id != OWNER_ID:
             bot.send_message(chat_id, "🔒 Мониторингом управляет только Руслан.")
@@ -1906,6 +1921,10 @@ def _maybe_run_sheet_monitor(now_local: datetime):
             url=f"https://docs.google.com/spreadsheets/d/{sheet_id}",
         ))
         inline.add(types.InlineKeyboardButton(
+            "😴 Тише до утра",
+            callback_data=f"alert_snooze:{sheet_id}",
+        ))
+        inline.add(types.InlineKeyboardButton(
             "🔕 Выключить мониторинг",
             callback_data=f"alert_monitor_off:{sheet_id}",
         ))
@@ -1921,13 +1940,19 @@ def _maybe_run_sheet_monitor(now_local: datetime):
         sheet_id = alert["sheet_id"]
         name = str(alert.get("name", "")).title()
         lines.append(f"• *{name}*")
-        # Две компактные кнопки в ряд по каждой таблице: аналитика + выключить.
+        # Три компактные кнопки в ряд по каждой таблице: аналитика + snooze + выключить.
         # Полные кнопки (включая «Открыть таблицу») доступны через аналитику и
         # из меню — здесь экономим место, чтобы клавиатура не разрасталась.
+        # Префиксы коротких callback_data (alert_*) подобраны так, чтобы вместе
+        # с 44-символьным sheet_id вписаться в лимит Telegram (64 байта).
         inline.add(
             types.InlineKeyboardButton(
                 f"📊 {name}",
                 callback_data=f"alert_analytics:{sheet_id}",
+            ),
+            types.InlineKeyboardButton(
+                f"😴 {name}",
+                callback_data=f"alert_snooze:{sheet_id}",
             ),
             types.InlineKeyboardButton(
                 f"🔕 {name}",

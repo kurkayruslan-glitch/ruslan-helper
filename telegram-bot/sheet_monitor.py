@@ -6,7 +6,7 @@
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from analytics import list_sheets, get_raw_data, _try_number, _fmt
@@ -110,6 +110,47 @@ def _entry(state: dict, sheet_id: str) -> dict:
     return state.setdefault(sheet_id, {"enabled": False, "snapshot": None, "last_check": None})
 
 
+def _next_business_start(now_local: datetime) -> datetime:
+    """Возвращает ближайший момент начала рабочего дня (BUSINESS_HOUR_START).
+    Если уже сегодня до этого часа — вернёт сегодня; если позже — завтра."""
+    s = get_settings()
+    start_h = int(s["business_hour_start"])
+    # Защита от случая 0..24 (круглосуточно): «утро» по умолчанию = 9:00,
+    # иначе snooze до 0:00 был бы бесполезен — наступит через минуту.
+    if start_h <= 0 or start_h >= 24:
+        start_h = 9
+    target = now_local.replace(hour=start_h, minute=0, second=0, microsecond=0)
+    if target <= now_local:
+        target = target + timedelta(days=1)
+    return target
+
+
+def snooze_until_morning(sheet_id: str, now_local: datetime) -> datetime:
+    """Приглушает алерты по таблице до начала следующего рабочего дня.
+    Мониторинг остаётся включённым: после wake-time check_sheet снова
+    начинает слать алерты. Возвращает локальное datetime, до которого тише."""
+    if sheet_id not in set(list_sheets().values()):
+        raise ValueError("Эта таблица не зарегистрирована.")
+    wake = _next_business_start(now_local)
+    with _state_lock:
+        state = _load_state()
+        e = _entry(state, sheet_id)
+        e["snoozed_until"] = wake.isoformat()
+        _save_state(state)
+    return wake
+
+
+def _is_snoozed(entry: dict, now_local: datetime) -> bool:
+    raw = entry.get("snoozed_until")
+    if not raw:
+        return False
+    try:
+        until = datetime.fromisoformat(raw)
+    except Exception:
+        return False
+    return now_local < until
+
+
 def is_enabled(sheet_id: str) -> bool:
     with _state_lock:
         return bool(_load_state().get(sheet_id, {}).get("enabled"))
@@ -198,6 +239,15 @@ def check_sheet(sheet_id: str, name: str, now_local: datetime) -> Optional[str]:
         entry = _entry(state, sheet_id)
         if not entry.get("enabled"):
             return None
+        # «Тише до утра»: если пользователь приглушил алерты по этой таблице
+        # и время ещё не наступило — молча выходим, snapshot не обновляем,
+        # чтобы при пробуждении сравнить с тем, что было до тишины.
+        if _is_snoozed(entry, now_local):
+            return None
+        # Время вышло — чистим маркер, чтобы не таскать его в state навсегда.
+        if entry.get("snoozed_until"):
+            entry.pop("snoozed_until", None)
+            _save_state(state)
         prev = entry.get("snapshot")
 
     try:
