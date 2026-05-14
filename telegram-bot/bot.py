@@ -180,7 +180,7 @@ def main_menu():
     markup.add("📍 Геопозиция",  "📗 Таблицы")
     markup.add("💰 USDT крипто", "📊 Я Тигр")
     markup.add("📋 ФОП",         "🗑️ Забыть")
-    markup.add("🛣️ Маршрут")
+    markup.add("🛣️ Маршрут",     "📝 Анкета")
     return markup
 
 
@@ -655,6 +655,11 @@ def process_text(chat_id, text):
         "📋 фоп": lambda: _ask_grok_and_route(chat_id, "Расскажи что нужно знать о ФОП 3 группы в Украине"),
         "🗑️ забыть": lambda: _btn_forget(chat_id),
         "🛣️ маршрут": lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
+        "📝 анкета": lambda: _start_anketa(chat_id),
+        "анкета": lambda: _start_anketa(chat_id),
+        "/анкета": lambda: _start_anketa(chat_id),
+        "/anketa": lambda: _start_anketa(chat_id),
+        "/profile": lambda: _start_anketa(chat_id),
         # Toha sub-menu
         "📍 отправить гео тохе": lambda: _btn_geo_toha(chat_id),
         "💬 написать тохе sms": lambda: _btn_sms_toha(chat_id),
@@ -880,9 +885,7 @@ ANKETA_QUESTIONS = [
 anketa_state: dict = {}  # chat_id -> {"step": int, "answers": {key: text}}
 
 
-@bot.message_handler(commands=['anketa', 'анкета', 'profile'])
-def cmd_anketa(message):
-    chat_id = message.chat.id
+def _start_anketa(chat_id: int):
     if chat_id != OWNER_ID:
         return
     anketa_state[chat_id] = {"step": 0, "answers": {}}
@@ -894,6 +897,11 @@ def cmd_anketa(message):
         parse_mode="Markdown",
     )
     _ask_next_anketa(chat_id)
+
+
+@bot.message_handler(commands=['anketa', 'анкета', 'profile'])
+def cmd_anketa(message):
+    _start_anketa(message.chat.id)
 
 
 def _ask_next_anketa(chat_id):
