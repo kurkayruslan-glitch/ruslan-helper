@@ -13,7 +13,6 @@ from roles import get_role, set_role, list_roles
 from calls import make_call
 from grok import ask_grok
 from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
-from zona import zona_search, zona_detail, build_index, index_exists, index_size
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
 import tax_calendar
@@ -381,30 +380,6 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         else:
             lines = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(facts))
             bot.send_message(chat_id, f"🧠 *Запомненные факты:*\n\n{lines}", parse_mode="Markdown")
-
-    elif action_type == "zona_search":
-        name = action_param or ""
-        if not name:
-            bot.send_message(chat_id, "⚠️ Укажи фамилию для поиска. Пример: найди Иванов Иван")
-            return
-        if not index_exists():
-            bot.send_message(chat_id, "⏳ База 200.zona.media не загружена. Напиши /zona_build чтобы загрузить (~2 мин).")
-            return
-        bot.send_chat_action(chat_id, "typing")
-        result = zona_search(name)
-        safe_send(chat_id, result, main_menu())
-
-    elif action_type == "zona_detail":
-        name = action_param or ""
-        if not name:
-            bot.send_message(chat_id, "⚠️ Укажи фамилию и имя.")
-            return
-        if not index_exists():
-            bot.send_message(chat_id, "⏳ База 200.zona.media не загружена. Напиши /zona_build чтобы загрузить (~2 мин).")
-            return
-        bot.send_chat_action(chat_id, "typing")
-        result, _ = zona_detail(name)
-        safe_send(chat_id, result, main_menu())
 
     elif action_type == "forget_fact":
         try:
@@ -1008,99 +983,6 @@ def _finish_anketa(chat_id):
     )
 
 
-@bot.message_handler(commands=['zona_build'])
-def cmd_zona_build(message):
-    chat_id = message.chat.id
-    if chat_id != OWNER_ID:
-        return
-    if index_exists():
-        n = index_size()
-        bot.send_message(chat_id, f"📊 База уже загружена: *{n:,}* записей.\n\nДля перезагрузки подожди и запусти снова.", parse_mode="Markdown")
-        return
-    bot.send_message(chat_id, "⏳ Загружаю индекс базы 200.zona.media... (~2-3 минуты, 220,000+ записей)")
-
-    def _build():
-        try:
-            def progress(i, total, count):
-                if i % 5 == 0:
-                    bot.send_message(chat_id, f"📥 Загружено {i}/{total} файлов, {count:,} записей...")
-            total = build_index(progress_cb=progress)
-            bot.send_message(chat_id, f"✅ Индекс готов! *{total:,}* записей загружено.\n\nТеперь можешь искать: «найди Иванов Иван»", parse_mode="Markdown")
-        except Exception as e:
-            bot.send_message(chat_id, f"❌ Ошибка загрузки: {e}")
-
-    import threading
-    threading.Thread(target=_build, daemon=True).start()
-
-
-@bot.message_handler(commands=['zona_scan'])
-def cmd_zona_scan(message):
-    chat_id = message.chat.id
-    if chat_id != OWNER_ID:
-        return
-    import scan_contacts
-    import threading
-
-    arg = ""
-    parts = message.text.split(maxsplit=1)
-    if len(parts) > 1:
-        arg = parts[1].strip().lower()
-
-    if arg == "stop":
-        if scan_contacts.IS_RUNNING.is_set():
-            scan_contacts.STOP_EVENT.set()
-            bot.send_message(chat_id, "⏹ Останавливаю сканер... (завершит текущий батч)")
-        else:
-            bot.send_message(chat_id, "ℹ️ Сканер не запущен.")
-        return
-
-    if scan_contacts.IS_RUNNING.is_set():
-        bot.send_message(chat_id, "⚠️ Сканер уже работает. Останови: /zona_scan stop")
-        return
-
-    if not index_exists():
-        bot.send_message(chat_id, "❌ Индекс zona.media не загружен. Сначала /zona_build")
-        return
-
-    bot.send_message(chat_id,
-        f"🚀 Запускаю сканер 200.zona.media\n"
-        f"📅 Период: 14.10 – 14.12.2025 (5–7 мес назад)\n"
-        f"🎯 Цель: 20 контактов родственников\n\n"
-        f"Прогресс пойдёт сюда. Прервать: /zona_scan stop"
-    )
-
-    threading.Thread(target=scan_contacts.main, daemon=True).start()
-
-
-@bot.message_handler(commands=['contacts'])
-def cmd_contacts(message):
-    import json
-    chat_id = message.chat.id
-    if chat_id != OWNER_ID:
-        return
-    DB_FILE = "contacts_db.json"
-    if not os.path.exists(DB_FILE):
-        bot.send_message(chat_id, "📭 База контактов пуста.\n\nПришли CSV файлы с данными zona.media — я их обработаю автоматически.")
-        return
-    with open(DB_FILE, encoding='utf-8') as f:
-        found = json.load(f)
-    if not found:
-        bot.send_message(chat_id, "📭 База контактов пуста. Пришли CSV файлы с данными zona.media.")
-        return
-    bot.send_message(chat_id, f"📋 *База контактов: {len(found)}/20*\n\nОтправляю все записи...", parse_mode="Markdown")
-    for i, rec in enumerate(found, 1):
-        contacts = "\n".join(rec.get('vk', [])[:3] + rec.get('archive', [])[:3])
-        msg = (f"[{i}/20] *{rec.get('name','—')}*\n"
-               f"📍 {rec.get('region','—')}, {rec.get('location','—')}\n"
-               f"⚔️ {rec.get('type','—')}"
-               + (f" | {rec['rank']}" if rec.get('rank') else "") +
-               f"\n💀 Погиб: {rec.get('death_date','—')}\n"
-               f"🔗 Контакты:\n{contacts or '—'}")
-        if rec.get('url'):
-            msg += f"\n📄 {rec['url']}"
-        bot.send_message(chat_id, msg, parse_mode="Markdown", disable_web_page_preview=True)
-
-
 @bot.message_handler(commands=['memory'])
 def cmd_memory(message):
     chat_id = message.chat.id
@@ -1386,15 +1268,16 @@ def handle_message(message):
 
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
-    """Принимает CSV/TXT файлы с данными zona.media, ищет погибших сен–ноя 2025 с контактами."""
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+    bot.send_message(chat_id, "📎 Загрузка файлов сейчас не поддерживается.")
+    return
+
     import csv
     import json
     from datetime import datetime
     from io import StringIO
-
-    chat_id = message.chat.id
-    if chat_id != OWNER_ID:
-        return
 
     doc = message.document
     name = doc.file_name or ""
