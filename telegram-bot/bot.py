@@ -1370,7 +1370,7 @@ CODE_MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 МБ хватит на любой .
 CODE_BACKUP_DIR = os.path.join(CODE_DIR, ".backups")
 
 def _backup_code_file(path: str) -> str | None:
-    """Сохраняет текущую версию файла в .backups/имя.timestamp и возвращает путь к бэкапу."""
+    """Сохраняет текущую версию файла в .backups/имя.timestamp."""
     try:
         os.makedirs(CODE_BACKUP_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1392,12 +1392,9 @@ def handle_document(message):
 
     doc = message.document
     raw_name = (doc.file_name or "").strip()
-    # Имя файла из сообщения может быть с префиксом (например "Pasted-...txt") —
-    # позволим переименовать через caption: подпись = желаемое имя
     caption = (message.caption or "").strip()
     target_name = caption if caption else raw_name
 
-    # Проверки безопасности
     if not target_name:
         bot.send_message(chat_id, "❌ Нет имени файла. Пришли документ с именем или подпиши caption'ом нужное имя (например `grok.py`).")
         return
@@ -1405,7 +1402,6 @@ def handle_document(message):
         bot.send_message(chat_id, f"❌ Файл слишком большой ({doc.file_size} байт). Лимит — {CODE_MAX_UPLOAD_BYTES // 1024} КБ.")
         return
 
-    # Базовое имя, без путей
     safe_name = os.path.basename(target_name).strip().lstrip(".")
     if not safe_name or "/" in safe_name or "\\" in safe_name or ".." in safe_name:
         bot.send_message(chat_id, f"❌ Плохое имя файла: `{target_name}`", parse_mode="Markdown")
@@ -1422,7 +1418,6 @@ def handle_document(message):
     full_path = os.path.join(CODE_DIR, safe_name)
     is_replace = os.path.isfile(full_path)
 
-    # Скачиваем содержимое
     try:
         file_info = bot.get_file(doc.file_id)
         raw = bot.download_file(file_info.file_path)
@@ -1430,7 +1425,6 @@ def handle_document(message):
         bot.send_message(chat_id, f"❌ Не смог скачать файл: {e}")
         return
 
-    # Если .py — проверим, что код валиден синтаксически
     if ext == ".py":
         try:
             import ast as _ast
@@ -1449,10 +1443,8 @@ def handle_document(message):
             bot.send_message(chat_id, f"❌ В `{safe_name}` невалидный JSON — не сохраняю:\n`{e}`", parse_mode="Markdown")
             return
 
-    # Бэкап старой версии (если была)
     backup_path = _backup_code_file(full_path) if is_replace else None
 
-    # Пишем атомарно
     try:
         tmp_path = full_path + ".tmp"
         with open(tmp_path, "wb") as f:
@@ -1470,149 +1462,6 @@ def handle_document(message):
     if ext == ".py":
         msg += "\n\n♻️ Чтобы изменения подхватились, перезапусти меня (workflow «Telegram Bot»)."
     bot.send_message(chat_id, msg, parse_mode="Markdown")
-    return
-
-    # ── (старый CSV-парсинг ниже больше не используется и недостижим) ──
-    import csv
-    import json
-    from datetime import datetime
-    from io import StringIO
-
-    doc = message.document
-    name = doc.file_name or ""
-    bot.send_message(chat_id, f"📂 Получил файл: `{name}` ({doc.file_size // 1024} КБ)\n⏳ Обрабатываю...", parse_mode="Markdown")
-
-    try:
-        file_info = bot.get_file(doc.file_id)
-        raw = bot.download_file(file_info.file_path)
-        text = raw.decode('utf-8', errors='ignore')
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ Ошибка загрузки: {e}")
-        return
-
-    DATE_FROM = datetime(2025, 9, 14)
-    DATE_TO   = datetime(2025, 11, 14)
-    DB_FILE   = "contacts_db.json"
-
-    # Загружаем уже найденное
-    found = []
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, encoding='utf-8') as f:
-                found = json.load(f)
-        except Exception:
-            found = []
-    found_urls = {r.get('url', r.get('name','')) for r in found}
-
-    matched   = []
-    total     = 0
-    in_range  = 0
-
-    # Пробуем разные разделители
-    delimiter = '\t' if '\t' in text[:2000] else ','
-    reader = csv.DictReader(StringIO(text), delimiter=delimiter)
-
-    # Нормализуем заголовки (на случай разного регистра/пробелов)
-    def norm(d, *keys):
-        for k in keys:
-            for dk in d.keys():
-                if dk.strip().lower() == k.lower():
-                    return d[dk].strip()
-        return ""
-
-    for row in reader:
-        total += 1
-        death_raw = norm(row, 'death_date','date_death','дата_гибели','дата гибели','Дата гибели','Died','died')
-        if not death_raw:
-            # Ищем дату в любом поле
-            for v in row.values():
-                m = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', str(v))
-                if m:
-                    try:
-                        dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-                        if 2020 <= dt.year <= 2026:
-                            death_raw = m.group(0)
-                            break
-                    except Exception:
-                        pass
-
-        if not death_raw:
-            continue
-
-        m = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', death_raw)
-        if not m:
-            continue
-        try:
-            death_dt = datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-        except Exception:
-            continue
-
-        if not (DATE_FROM <= death_dt <= DATE_TO):
-            continue
-        in_range += 1
-
-        # Контакты
-        all_text = " ".join(str(v) for v in row.values())
-        vk_links  = re.findall(r'https?://(?:vk\.com|vkontakte\.ru)/[^\s,;"\'<>]+', all_text)
-        arc_links = re.findall(r'https?://(?:archive\.ph|web\.archive\.org)/[^\s,;"\'<>]+', all_text)
-        if not vk_links and not arc_links:
-            continue
-
-        rec_id = norm(row,'url','URL','ссылка','link') or norm(row,'name','имя','ФИО','fio') or f"row_{total}"
-        if rec_id in found_urls:
-            continue
-
-        rec = {
-            "name":       norm(row,'name','имя','ФИО','fio','Имя','Name'),
-            "region":     norm(row,'region','регион','Region'),
-            "type":       norm(row,'type','род войск','тип','Type'),
-            "location":   norm(row,'location','населённый пункт','город','Location'),
-            "rank":       norm(row,'rank','звание','Rank'),
-            "death_date": death_dt.strftime('%d.%m.%Y'),
-            "vk":         vk_links[:5],
-            "archive":    arc_links[:5],
-            "url":        norm(row,'url','URL','ссылка','link') or "",
-            "source_file": name,
-        }
-        matched.append(rec)
-        found_urls.add(rec_id)
-
-    # Добавляем новые к уже найденным
-    new_count = 0
-    for rec in matched:
-        if len(found) >= 20:
-            break
-        found.append(rec)
-        new_count += 1
-
-    # Сохраняем
-    with open(DB_FILE, 'w', encoding='utf-8') as f:
-        json.dump(found, f, ensure_ascii=False, indent=2)
-
-    # Отчёт
-    bot.send_message(chat_id,
-        f"📊 Файл `{name}` обработан:\n"
-        f"• Всего строк: {total}\n"
-        f"• Попали в диапазон 14.09–14.11.2025: {in_range}\n"
-        f"• С контактами (VK/archive): {len(matched)}\n"
-        f"• Добавлено в базу: {new_count}\n"
-        f"• Итого в базе: {len(found)}/20",
-        parse_mode="Markdown")
-
-    # Отправляем каждую новую запись
-    for i, rec in enumerate(matched[:new_count], 1):
-        contacts = "\n".join(rec['vk'][:3] + rec['archive'][:3])
-        msg = (f"✅ [{len(found)-new_count+i}/20] {rec['name']}\n"
-               f"📍 {rec['region']}, {rec['location']}\n"
-               f"⚔️ {rec['type']}{' | '+rec['rank'] if rec['rank'] else ''}\n"
-               f"💀 Погиб: {rec['death_date']}\n"
-               f"🔗 Контакты:\n{contacts}")
-        if rec.get('url'):
-            msg += f"\n📄 {rec['url']}"
-        bot.send_message(chat_id, msg)
-
-    if len(found) >= 20:
-        bot.send_message(chat_id, "🎉 База контактов собрана! 20/20. Напиши /contacts чтобы посмотреть всё.")
 
 
 @bot.callback_query_handler(func=lambda call: True)
