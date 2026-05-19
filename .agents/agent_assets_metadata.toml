@@ -6,3 +6,9 @@ id = "vbiVNfsujfKplrANFfS2D"
 uri = "file://downloads/telegram-bot.zip"
 type = "unspecified"
 title = "telegram-bot.zip (v3.1)"
+
+[[outputs]]
+id = "9BYJ6inQXvGVjp6TPE0yK"
+uri = "file://downloads/telegram-bot-v31.zip"
+type = "unspecified"
+title = "telegram-bot-v31.zip"
