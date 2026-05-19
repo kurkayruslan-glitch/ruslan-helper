@@ -1,17 +1,35 @@
+# Загружаем переменные из .env (если есть python-dotenv и .env-файл)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 import telebot
 from telebot import types
 import os
 import time
 import io
 from urllib.parse import quote
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None  # на ПК без OpenAI-ключа просто не будет TTS
 from keep_alive import keep_alive
 from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha
 from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets
 from roles import get_role, set_role, list_roles
 from calls import make_call
-from grok import ask_grok
+import pc_control
+
+# Бэкенд ИИ: llama (локальная через Ollama) или grok (облачный xAI). По умолчанию grok.
+if os.environ.get("LLM_BACKEND", "grok").lower() == "llama":
+    from llama import ask_grok
+    print("🧠 LLM backend: llama (Ollama)")
+else:
+    from grok import ask_grok
+    print("🧠 LLM backend: grok (xAI)")
 from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
@@ -37,10 +55,13 @@ def _now_local() -> datetime:
 OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
 OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
 
-openai_client = OpenAI(
-    base_url=OPENAI_BASE_URL,
-    api_key=OPENAI_API_KEY,
-)
+if OpenAI and OPENAI_API_KEY:
+    openai_client = OpenAI(
+        base_url=OPENAI_BASE_URL,
+        api_key=OPENAI_API_KEY,
+    )
+else:
+    openai_client = None  # TTS/STT недоступны, бот всё равно работает
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -445,6 +466,18 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
 
     elif action_type == "list_code":
         _send_code_list(chat_id)
+
+    elif action_type == "open_url":
+        safe_send(chat_id, pc_control.open_url(action_param or ""))
+
+    elif action_type == "search_files":
+        safe_send(chat_id, pc_control.search_files(action_param or "", by_content=False))
+
+    elif action_type == "search_content":
+        safe_send(chat_id, pc_control.search_files(action_param or "", by_content=True))
+
+    elif action_type == "open_folder":
+        safe_send(chat_id, pc_control.open_folder(action_param or ""))
 
     elif action_type == "cancel_reminder":
         reminder_id = (action_param or "").strip()
