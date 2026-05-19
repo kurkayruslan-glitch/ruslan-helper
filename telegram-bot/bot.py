@@ -17,7 +17,7 @@ except Exception:
     OpenAI = None  # на ПК без OpenAI-ключа просто не будет TTS
 from keep_alive import keep_alive
 from sheets import get_values, append_values, get_sheet_info, format_table
-from sms import send_geo_to_toha, send_sms_to_toha
+from sms import send_geo_to_toha, send_sms_to_toha, send_sms
 from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets
 from roles import get_role, set_role, list_roles
 from calls import make_call
@@ -522,6 +522,34 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         except Exception as e:
             result = f"❌ Поиск упал: {str(e)[:200]}"
         safe_send(chat_id, result)
+
+    elif action_type == "send_sms":
+        raw = (action_param or "").strip()
+        if ":" in raw:
+            phone, message = raw.split(":", 1)
+        else:
+            phone, message = raw, ""
+        phone = phone.strip().lower()
+        message = message.strip()
+        aliases = {
+            "тоха": os.environ.get("TOHA_PHONE_NUMBER", ""),
+            "toha": os.environ.get("TOHA_PHONE_NUMBER", ""),
+            "жена": os.environ.get("WIFE_PHONE_NUMBER", ""),
+            "wife": os.environ.get("WIFE_PHONE_NUMBER", ""),
+        }
+        if phone in aliases:
+            phone = aliases[phone]
+        if not phone:
+            safe_send(chat_id, "❌ Не указан номер получателя SMS.")
+            return
+        if not message:
+            safe_send(chat_id, "❌ Пустой текст SMS — скажи, что написать.")
+            return
+        ok, info = send_sms(phone, message)
+        if ok:
+            safe_send(chat_id, f"✅ SMS отправил на {phone}\n💬 «{message}»")
+        else:
+            safe_send(chat_id, f"❌ Не получилось отправить SMS: {info}")
 
     elif action_type == "call_wife":
         message = (action_param or "").strip()
