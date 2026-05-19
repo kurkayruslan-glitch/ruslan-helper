@@ -22,6 +22,7 @@ from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet,
 from roles import get_role, set_role, list_roles
 from calls import make_call
 import pc_control
+import pc_apps
 import price_search
 import crm
 
@@ -532,6 +533,15 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
 
     elif action_type == "open_folder":
         safe_send(chat_id, pc_control.open_folder(action_param or ""))
+
+    elif action_type == "launch_app":
+        safe_send(chat_id, pc_apps.launch_app(action_param or ""))
+
+    elif action_type == "close_app":
+        safe_send(chat_id, pc_apps.close_app(action_param or ""))
+
+    elif action_type == "list_apps":
+        safe_send(chat_id, pc_apps.list_apps())
 
     elif action_type == "search_price":
         safe_send(chat_id, "🔎 Ищу цены, секунду…")
