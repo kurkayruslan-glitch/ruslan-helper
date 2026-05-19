@@ -23,6 +23,9 @@ def make_call(to_number: str, message: str) -> tuple[bool, str]:
     if not all([account_sid, auth_token, from_number]):
         return False, "Twilio не настроен"
 
+    # Убираем https:// / http:// и хвостовой слэш — оставляем чистый хост
+    domain = re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/")
+
     clean_to = re.sub(r"[\s\-\(\)]", "", to_number)
     twiml_url = f"https://{domain}/api/twiml?message={quote(message)}"
 
