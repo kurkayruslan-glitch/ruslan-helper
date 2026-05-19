@@ -440,6 +440,12 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
                              "\n\n_Чтобы отменить, скажи «отмени напоминание <id>» или просто «отмени про …»._",
                              parse_mode="Markdown")
 
+    elif action_type == "show_code":
+        _send_code_file(chat_id, action_param or "")
+
+    elif action_type == "list_code":
+        _send_code_list(chat_id)
+
     elif action_type == "cancel_reminder":
         reminder_id = (action_param or "").strip()
         if not reminder_id:
@@ -981,6 +987,100 @@ def _finish_anketa(chat_id):
         parse_mode="Markdown",
         reply_markup=main_menu(),
     )
+
+
+# ──────────────────────────────────────────────
+# ДОСТУП К СВОЕМУ КОДУ — бот может показать свои исходники
+# ──────────────────────────────────────────────
+CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+CODE_ALLOWED_EXT = {".py", ".json", ".txt", ".md"}
+CODE_DENYLIST = {"whitelist.json", "known_users.json", "memory.json"}  # содержат приватные данные
+
+def _list_code_files() -> list[str]:
+    files = []
+    for name in sorted(os.listdir(CODE_DIR)):
+        full = os.path.join(CODE_DIR, name)
+        if not os.path.isfile(full):
+            continue
+        if name in CODE_DENYLIST:
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in CODE_ALLOWED_EXT:
+            continue
+        files.append(name)
+    return files
+
+def _resolve_code_file(name: str) -> str | None:
+    """Возвращает абсолютный путь к файлу, если он разрешён, иначе None."""
+    name = (name or "").strip().lstrip("/").replace("\\", "/")
+    if not name or "/" in name or ".." in name:
+        return None
+    if name in CODE_DENYLIST:
+        return None
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in CODE_ALLOWED_EXT:
+        return None
+    full = os.path.join(CODE_DIR, name)
+    if not os.path.isfile(full):
+        return None
+    return full
+
+def _send_code_list(chat_id: int):
+    if chat_id != OWNER_ID:
+        return
+    files = _list_code_files()
+    if not files:
+        bot.send_message(chat_id, "Файлов не нашёл.")
+        return
+    lines = "\n".join(f"• `{f}`" for f in files)
+    bot.send_message(chat_id,
+        f"📂 Мои файлы:\n\n{lines}\n\n"
+        f"Покажу любой — напиши «покажи код <имя>» или /code <имя>",
+        parse_mode="Markdown")
+
+def _send_code_file(chat_id: int, name: str):
+    if chat_id != OWNER_ID:
+        return
+    if not name:
+        _send_code_list(chat_id)
+        return
+    path = _resolve_code_file(name)
+    if not path:
+        bot.send_message(chat_id, f"Нет такого файла или он закрыт: `{name}`", parse_mode="Markdown")
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        bot.send_message(chat_id, f"Не смог прочитать: {e}")
+        return
+    real_name = os.path.basename(path)
+    size = len(content)
+    # Если короткое — шлём текстом, иначе документом
+    if size <= 3500:
+        ext = os.path.splitext(real_name)[1].lstrip(".") or "txt"
+        bot.send_message(chat_id,
+            f"`{real_name}` ({size} симв.)\n```{ext}\n{content}\n```",
+            parse_mode="Markdown")
+    else:
+        bio = io.BytesIO(content.encode("utf-8"))
+        bio.name = real_name
+        bot.send_document(chat_id, bio, caption=f"📄 {real_name} ({size} симв.)")
+
+@bot.message_handler(commands=['files', 'code_list'])
+def cmd_files(message):
+    _send_code_list(message.chat.id)
+
+@bot.message_handler(commands=['code'])
+def cmd_code(message):
+    chat_id = message.chat.id
+    if chat_id != OWNER_ID:
+        return
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        _send_code_list(chat_id)
+        return
+    _send_code_file(chat_id, parts[1].strip())
 
 
 @bot.message_handler(commands=['memory'])
