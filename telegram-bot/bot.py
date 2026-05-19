@@ -488,6 +488,21 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
             result = f"❌ Поиск упал: {str(e)[:200]}"
         safe_send(chat_id, result)
 
+    elif action_type == "call_wife":
+        message = (action_param or "").strip()
+        wife_number = os.environ.get("WIFE_PHONE_NUMBER", "")
+        if not wife_number:
+            safe_send(chat_id, "❌ Номер жены не настроен. Добавь WIFE_PHONE_NUMBER в .env (формат +380XXXXXXXXX) и перезапусти бота.")
+            return
+        if not message:
+            safe_send(chat_id, "❌ Не понял, что передать жене. Скажи: «позвони жене и скажи …».")
+            return
+        ok, info = make_call(wife_number, message)
+        if ok:
+            safe_send(chat_id, f"📞 Звоню жене ({wife_number})\n💬 Скажу: «{message}»")
+        else:
+            safe_send(chat_id, f"❌ Не получилось дозвониться жене: {info}")
+
     elif action_type == "call_restaurant":
         raw = (action_param or "").strip()
         if ":" in raw:
