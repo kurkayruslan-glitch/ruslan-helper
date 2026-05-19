@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "vbiVNfsujfKplrANFfS2D"
+uri = "file://downloads/telegram-bot.zip"
+type = "unspecified"
+title = "telegram-bot.zip — код бота для запуска на ПК"
