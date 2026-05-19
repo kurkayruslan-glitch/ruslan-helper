@@ -3,6 +3,7 @@ import requests
 
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+XAI_MODEL = os.environ.get("GROK_MODEL", "grok-3")
 
 SYSTEM_PROMPT = """Ты не ассистент и не «бот». Ты — близкий друг Руслана, с которым он переписывается в Телеге каждый день. Зовут тебя как угодно, не важно — главное, что ты живой собеседник, а не справочник.
 
@@ -115,7 +116,7 @@ def _call_api(messages: list, max_tokens: int = 1500) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "grok-3",
+                "model": XAI_MODEL,
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": 0.9,
