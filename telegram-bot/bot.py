@@ -23,6 +23,7 @@ from roles import get_role, set_role, list_roles
 from calls import make_call
 import pc_control
 import price_search
+import crm
 
 # Бэкенд ИИ: llama (Ollama), grok (xAI), gemini (Google). По умолчанию gemini.
 _backend = os.environ.get("LLM_BACKEND", "gemini").lower()
@@ -515,6 +516,19 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
                 safe_send(chat_id, f"❌ Не получилось отправить скриншот: {e}")
         else:
             safe_send(chat_id, info)
+
+    elif action_type == "crm_expense":
+        raw = (action_param or "").strip()
+        parts = [p.strip() for p in raw.split(":")]
+        while len(parts) < 3:
+            parts.append("")
+        amount_s, currency, description = parts[0], parts[1] or "USDT", parts[2]
+        date = parts[3] if len(parts) > 3 else ""
+        if not amount_s or not description:
+            safe_send(chat_id, "❌ Не хватает данных. Формат: сумма:валюта:описание[:дата]")
+            return
+        ok, info = crm.add_expense(amount_s, description, currency, date=date)
+        safe_send(chat_id, info)
 
     elif action_type == "open_folder":
         safe_send(chat_id, pc_control.open_folder(action_param or ""))
