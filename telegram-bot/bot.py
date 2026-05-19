@@ -199,8 +199,7 @@ known_users: dict = _load_known_users()
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("📞 Позвонить",   "🚕 Тоха")
-    markup.add("📍 Геопозиция",  "📗 Таблицы")
-    markup.add("💰 USDT крипто", "📊 Я Тигр")
+    markup.add("📍 Геопозиция",  "📊 Я Тигр")
     markup.add("📋 ФОП",         "🗑️ Забыть")
     markup.add("🛣️ Маршрут",     "📝 Анкета")
     return markup
