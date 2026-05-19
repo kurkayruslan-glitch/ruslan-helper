@@ -487,6 +487,31 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
     elif action_type == "search_content":
         safe_send(chat_id, pc_control.search_files(action_param or "", by_content=True))
 
+    elif action_type == "screenshot":
+        safe_send(chat_id, "📸 Снимаю экран…")
+        ok, info = pc_control.take_screenshot()
+        if ok:
+            try:
+                with open(info, "rb") as f:
+                    bot.send_photo(chat_id, f, caption="🖥️ Скриншот твоего ПК")
+            except Exception as e:
+                safe_send(chat_id, f"❌ Не получилось отправить скриншот: {e}")
+        else:
+            safe_send(chat_id, info)
+
+    elif action_type == "screenshot_site":
+        url = (action_param or "").strip()
+        safe_send(chat_id, f"📸 Делаю скриншот сайта {url}…")
+        ok, info = pc_control.screenshot_site(url)
+        if ok:
+            try:
+                with open(info, "rb") as f:
+                    bot.send_photo(chat_id, f, caption=f"🌐 {url}")
+            except Exception as e:
+                safe_send(chat_id, f"❌ Не получилось отправить скриншот: {e}")
+        else:
+            safe_send(chat_id, info)
+
     elif action_type == "open_folder":
         safe_send(chat_id, pc_control.open_folder(action_param or ""))
 

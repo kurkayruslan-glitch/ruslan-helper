@@ -133,6 +133,44 @@ def search_files(query: str, by_content: bool = False, limit: int = 15) -> str:
     return "\n".join(lines)
 
 
+def take_screenshot() -> tuple[bool, str]:
+    """Делает скриншот экрана ПК. Возвращает (успех, путь_или_ошибка)."""
+    try:
+        from PIL import ImageGrab
+    except Exception:
+        return False, "❌ Не установлен Pillow. В PowerShell: .\\.venv\\Scripts\\pip install Pillow"
+    try:
+        import tempfile
+        img = ImageGrab.grab(all_screens=True)
+        path = os.path.join(tempfile.gettempdir(), "ruslan_helper_screenshot.png")
+        img.save(path, "PNG")
+        return True, path
+    except Exception as e:
+        return False, f"❌ Не получилось снять экран: {e}"
+
+
+def screenshot_site(url: str) -> tuple[bool, str]:
+    """Делает скриншот сайта через бесплатный сервис image.thum.io.
+    Возвращает (успех, путь_или_ошибка)."""
+    import requests, tempfile
+    url = (url or "").strip()
+    if not url:
+        return False, "❌ Не указан адрес сайта."
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    api = f"https://image.thum.io/get/width/1280/png/{url}"
+    try:
+        r = requests.get(api, timeout=30)
+        if r.status_code != 200 or not r.content:
+            return False, f"❌ Сервис скриншотов вернул код {r.status_code}"
+        path = os.path.join(tempfile.gettempdir(), "ruslan_helper_site.png")
+        with open(path, "wb") as f:
+            f.write(r.content)
+        return True, path
+    except Exception as e:
+        return False, f"❌ Не получилось снять сайт: {e}"
+
+
 def open_folder(path: str) -> str:
     """Открывает папку в проводнике (или папку файла, если передан файл)."""
     path = (path or "").strip().strip('"').strip("'")
