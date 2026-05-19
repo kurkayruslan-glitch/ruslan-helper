@@ -265,17 +265,28 @@ def _parse_action(reply: str) -> tuple[str | None, str | None, str]:
     import re
     # Устойчиво к ведущим пробелам/переносам строки перед тегом
     stripped = reply.lstrip()
-    match = re.match(r"^\[ACTION:([^\]]+)\]\s*", stripped)
-    if not match:
-        return None, None, reply
-    # Возвращаем оригинальный текст без тега, сохраняя его начало
-    reply = stripped
-    tag_content = match.group(1)
-    text_after = reply[match.end():]
-    parts = tag_content.split(":", 1)
-    action_type = parts[0].strip()
-    action_param = parts[1].strip() if len(parts) > 1 else None
-    return action_type, action_param, text_after
+    # 1) Канонический формат: [ACTION:type:param]
+    match = re.search(r"\[ACTION:([^\]]+)\]\s*", stripped)
+    if match:
+        tag_content = match.group(1)
+        text_after = (stripped[:match.start()] + stripped[match.end():]).strip()
+        parts = tag_content.split(":", 1)
+        action_type = parts[0].strip()
+        action_param = parts[1].strip() if len(parts) > 1 else None
+        return action_type, action_param, text_after
+    # 2) Терпимый формат без скобок: ACTION:type[:param] — Llama часто их забывает
+    match = re.search(r"(?<![A-Za-z_])ACTION:([A-Za-z_]+)(?::([^\n\r]*))?", stripped)
+    if match:
+        action_type = match.group(1).strip()
+        action_param = (match.group(2) or "").strip() or None
+        text_after = (stripped[:match.start()] + stripped[match.end():]).strip()
+        # Если параметр не указан, а в ответе есть осмысленный текст —
+        # для call_wife/call_restaurant используем сам текст как сообщение.
+        if not action_param and action_type in ("call_wife",) and text_after:
+            action_param = text_after
+            text_after = ""
+        return action_type, action_param, text_after
+    return None, None, reply
 
 
 def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None):
