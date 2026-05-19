@@ -104,9 +104,9 @@ def search_prices(query: str, limit: int = 5) -> str:
                 + _fallback_links(query, q)
             )
 
-        lines = [f"💰 *Топ-{len(results)} по запросу «{query}»* (Hotline):\n"]
+        lines = [f"💰 Топ-{len(results)} по запросу «{query}» (Hotline):\n"]
         for i, (name, price, link) in enumerate(results, 1):
-            lines.append(f"{i}. {name} — *{price}*")
+            lines.append(f"{i}. {name} — {price}")
             if link:
                 lines.append(f"   {link}")
         lines.append(f"\nВсе варианты: https://hotline.ua/sr/?q={q}")

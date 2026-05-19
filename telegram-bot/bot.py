@@ -482,7 +482,11 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
 
     elif action_type == "search_price":
         safe_send(chat_id, "🔎 Ищу цены, секунду…")
-        safe_send(chat_id, price_search.search_prices(action_param or ""), parse_mode="Markdown")
+        try:
+            result = price_search.search_prices(action_param or "")
+        except Exception as e:
+            result = f"❌ Поиск упал: {str(e)[:200]}"
+        safe_send(chat_id, result)
 
     elif action_type == "call_restaurant":
         raw = (action_param or "").strip()
