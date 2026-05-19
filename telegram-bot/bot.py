@@ -22,6 +22,7 @@ from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet,
 from roles import get_role, set_role, list_roles
 from calls import make_call
 import pc_control
+import price_search
 
 # Бэкенд ИИ: llama (локальная через Ollama) или grok (облачный xAI). По умолчанию grok.
 if os.environ.get("LLM_BACKEND", "grok").lower() == "llama":
@@ -478,6 +479,27 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
 
     elif action_type == "open_folder":
         safe_send(chat_id, pc_control.open_folder(action_param or ""))
+
+    elif action_type == "search_price":
+        safe_send(chat_id, "🔎 Ищу цены, секунду…")
+        safe_send(chat_id, price_search.search_prices(action_param or ""), parse_mode="Markdown")
+
+    elif action_type == "call_restaurant":
+        raw = (action_param or "").strip()
+        if ":" in raw:
+            phone, message = raw.split(":", 1)
+        else:
+            phone, message = raw, "Здравствуйте, хочу забронировать столик. Перезвоните, пожалуйста."
+        phone = phone.strip()
+        message = message.strip() or "Здравствуйте, хочу забронировать столик."
+        if not phone:
+            safe_send(chat_id, "❌ Не указан номер ресторана.")
+        else:
+            ok, info = make_call(phone, message)
+            if ok:
+                safe_send(chat_id, f"📞 Звоню в ресторан {phone}\n💬 Скажу: «{message}»")
+            else:
+                safe_send(chat_id, f"❌ Не получилось дозвониться: {info}")
 
     elif action_type == "cancel_reminder":
         reminder_id = (action_param or "").strip()
