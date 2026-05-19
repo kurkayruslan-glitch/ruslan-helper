@@ -1,0 +1,100 @@
+import asyncio
+import aiohttp
+from aiogram import Router, F
+from aiogram.types import Message
+from aiogram.filters import Command
+
+router = Router()
+
+# Если у тебя есть токен от VK API (его можно получить бесплатно в панели разработчика VK)
+VK_TOKEN = "ТВОЙ_VK_СЕРВИСНЫЙ_КЛЮЧ_ДОСТУПА"
+
+async def search_vk_relatives(last_name: str, city_name: str = None) -> list:
+    """
+    Ищет людей со схожими параметрами в VK для выявления возможных родственников.
+    """
+    if not VK_TOKEN or "ТВОЙ_" in VK_TOKEN:
+        return []
+        
+    url = "https://api.vk.com/method/users.search"
+    params = {
+        "q": last_name,
+        "count": 10,
+        "fields": "bdate,city,connections",
+        "access_token": VK_TOKEN,
+        "v": "5.131"
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as response:
+                data = await response.json()
+                if "response" in data:
+                    results = []
+                    for item in data["response"]["items"]:
+                        # Фильтруем по городу, если он указан
+                        if city_name:
+                            user_city = item.get("city", {}).get("title", "").lower()
+                            if city_name.lower() not in user_city:
+                                continue
+                        
+                        name = f"{item.get('first_name')} {item.get('last_name')}"
+                        vk_link = f"https://vk.com/id{item.get('id')}"
+                        bdate = item.get("bdate", "Не указана")
+                        results.append(f"👤 {name}\n ДР: {bdate}\n Ссылка: {vk_link}")
+                    return results
+        except Exception as e:
+            print(f"Ошибка при запросе к VK API: {e}")
+    return []
+
+async def search_osint_db(full_name: str, phone: str = None) -> list:
+    """
+    Заглушка для подключения к приватным OSINT API (GetContact, Глаз Бога API и т.д.)
+    Если у тебя появится вебхук или ключ к таким базам, логика пойдет сюда.
+    """
+    # Пример логики: поиск по слитым базам или телефонным справочникам
+    # Сейчас возвращаем пустой список, так как легальных публичных API нет
+    await asyncio.sleep(0.5) 
+    return []
+
+@router.message(Command("find_family"))
+async def cmd_find_family(message: Message):
+    await message.answer(
+        "Введите данные человека для поиска родственников в формате:\n"
+        "`Фамилия Город` (например: *Иванов Киев*)\n\n"
+        "_Бот попробует найти людей с такой же фамилией в указанном городе через открытые источники._",
+        parse_mode="Markdown"
+    )
+
+@router.message(F.text)
+async def handle_search(message: Message):
+    # Проверяем, что это не другая команда
+    if message.text.startswith("/"):
+        return
+
+    args = message.text.split()
+    if len(args) < 1:
+        await message.answer("Пожалуйста, введите хотя бы фамилию.")
+        return
+
+    last_name = args[0]
+    city = args[1] if len(args) > 1 else None
+
+    status_msg = await message.answer("🔍 Ищу совпадения по открытым базам данных и соцсетям...")
+
+    # Запускаем поиск по VK
+    vk_results = await search_vk_relatives(last_name, city)
+    
+    # Запускаем поиск по OSINT-заглушке
+    osint_results = await search_osint_db(message.text)
+
+    all_results = vk_results + osint_results
+
+    if not all_results:
+        await status_msg.edit_text("❌ Прямых совпадений или возможных родственников не найдено.")
+        return
+
+    response_text = f"📋 **Возможные родственники/однофамильцы ({len(all_results)}):**\n\n"
+    response_text += "\n\n".join(all_results[:7]) # Ограничим 7 результатами, чтобы не спамить
+    
+    await status_msg.edit_text(response_text, disable_web_page_preview=True, parse_mode="Markdown")
