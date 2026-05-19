@@ -24,13 +24,17 @@ from calls import make_call
 import pc_control
 import price_search
 
-# Бэкенд ИИ: llama (локальная через Ollama) или grok (облачный xAI). По умолчанию grok.
-if os.environ.get("LLM_BACKEND", "grok").lower() == "llama":
+# Бэкенд ИИ: llama (Ollama), grok (xAI), gemini (Google). По умолчанию gemini.
+_backend = os.environ.get("LLM_BACKEND", "gemini").lower()
+if _backend == "llama":
     from llama import ask_grok
     print("🧠 LLM backend: llama (Ollama)")
-else:
+elif _backend == "grok":
     from grok import ask_grok
     print("🧠 LLM backend: grok (xAI)")
+else:
+    from gemini import ask_grok
+    print("🧠 LLM backend: gemini (Google)")
 from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
