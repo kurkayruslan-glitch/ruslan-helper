@@ -1,6 +1,5 @@
 import os
 import re
-from urllib.parse import quote
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioRestException
 
@@ -10,35 +9,47 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
+def _escape_xml(text: str) -> str:
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&apos;"))
+
+
 def make_call(to_number: str, message: str) -> tuple[bool, str]:
     """
     Звонит на номер и голосом произносит сообщение.
+    TwiML передаётся напрямую в Twilio (без внешнего URL/туннеля).
     Возвращает (успех, описание).
     """
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
     auth_token  = os.environ.get("TWILIO_AUTH_TOKEN")
     from_number = os.environ.get("TWILIO_FROM_NUMBER")
-    domain      = os.environ.get("REPLIT_DEV_DOMAIN", "localhost")
 
     if not all([account_sid, auth_token, from_number]):
         return False, "Twilio не настроен"
 
-    # Убираем https:// / http:// и хвостовой слэш — оставляем чистый хост
-    domain = re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/")
-
     clean_to = re.sub(r"[\s\-\(\)]", "", to_number)
-    twiml_url = f"https://{domain}/api/twiml?message={quote(message)}"
+    safe = _escape_xml(message)
+
+    twiml = (
+        '<Response>'
+        f'<Say language="ru-RU" voice="Polly.Tatyana">{safe}</Say>'
+        '<Pause length="1"/>'
+        f'<Say language="ru-RU" voice="Polly.Tatyana">{safe}</Say>'
+        '</Response>'
+    )
 
     try:
         client = Client(account_sid, auth_token)
         call = client.calls.create(
             to=clean_to,
             from_=from_number,
-            url=twiml_url,
+            twiml=twiml,
         )
         return True, call.sid
     except TwilioRestException as e:
-        # Понятные сообщения для типичных ошибок
         if e.code == 21219 or "unverified" in str(e).lower():
             return False, (
                 f"⚠️ Trial-аккаунт Twilio может звонить только на подтверждённые номера.\n\n"
@@ -48,7 +59,6 @@ def make_call(to_number: str, message: str) -> tuple[bool, str]:
             )
         if e.code == 21211:
             return False, f"⚠️ Неверный формат номера: {clean_to}"
-        # Остальные ошибки — чисто без ANSI
         return False, _strip_ansi(e.msg or str(e))
     except Exception as e:
         return False, _strip_ansi(str(e))
