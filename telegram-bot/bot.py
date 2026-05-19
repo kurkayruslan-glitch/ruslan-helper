@@ -1366,14 +1366,113 @@ def handle_message(message):
         process_text(chat_id, text)
 
 
+CODE_MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 МБ хватит на любой .py
+CODE_BACKUP_DIR = os.path.join(CODE_DIR, ".backups")
+
+def _backup_code_file(path: str) -> str | None:
+    """Сохраняет текущую версию файла в .backups/имя.timestamp и возвращает путь к бэкапу."""
+    try:
+        os.makedirs(CODE_BACKUP_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = os.path.basename(path)
+        dst = os.path.join(CODE_BACKUP_DIR, f"{base}.{ts}.bak")
+        with open(path, "rb") as src, open(dst, "wb") as out:
+            out.write(src.read())
+        return dst
+    except Exception:
+        return None
+
+
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     chat_id = message.chat.id
     if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "📎 Файлы принимаю только от Руслана.")
         return
-    bot.send_message(chat_id, "📎 Загрузка файлов сейчас не поддерживается.")
+
+    doc = message.document
+    raw_name = (doc.file_name or "").strip()
+    # Имя файла из сообщения может быть с префиксом (например "Pasted-...txt") —
+    # позволим переименовать через caption: подпись = желаемое имя
+    caption = (message.caption or "").strip()
+    target_name = caption if caption else raw_name
+
+    # Проверки безопасности
+    if not target_name:
+        bot.send_message(chat_id, "❌ Нет имени файла. Пришли документ с именем или подпиши caption'ом нужное имя (например `grok.py`).")
+        return
+    if doc.file_size and doc.file_size > CODE_MAX_UPLOAD_BYTES:
+        bot.send_message(chat_id, f"❌ Файл слишком большой ({doc.file_size} байт). Лимит — {CODE_MAX_UPLOAD_BYTES // 1024} КБ.")
+        return
+
+    # Базовое имя, без путей
+    safe_name = os.path.basename(target_name).strip().lstrip(".")
+    if not safe_name or "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+        bot.send_message(chat_id, f"❌ Плохое имя файла: `{target_name}`", parse_mode="Markdown")
+        return
+    if safe_name in CODE_DENYLIST:
+        bot.send_message(chat_id, f"❌ Этот файл я менять не буду: `{safe_name}` (приватные данные).", parse_mode="Markdown")
+        return
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in CODE_ALLOWED_EXT:
+        allowed = ", ".join(sorted(CODE_ALLOWED_EXT))
+        bot.send_message(chat_id, f"❌ Расширение `{ext or '(нет)'}` не разрешено. Можно только: {allowed}", parse_mode="Markdown")
+        return
+
+    full_path = os.path.join(CODE_DIR, safe_name)
+    is_replace = os.path.isfile(full_path)
+
+    # Скачиваем содержимое
+    try:
+        file_info = bot.get_file(doc.file_id)
+        raw = bot.download_file(file_info.file_path)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Не смог скачать файл: {e}")
+        return
+
+    # Если .py — проверим, что код валиден синтаксически
+    if ext == ".py":
+        try:
+            import ast as _ast
+            _ast.parse(raw.decode("utf-8"))
+        except SyntaxError as e:
+            bot.send_message(chat_id, f"❌ В `{safe_name}` синтаксическая ошибка — не сохраняю:\n`{e}`", parse_mode="Markdown")
+            return
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ Не смог разобрать как Python: {e}")
+            return
+    elif ext == ".json":
+        try:
+            import json as _json
+            _json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ В `{safe_name}` невалидный JSON — не сохраняю:\n`{e}`", parse_mode="Markdown")
+            return
+
+    # Бэкап старой версии (если была)
+    backup_path = _backup_code_file(full_path) if is_replace else None
+
+    # Пишем атомарно
+    try:
+        tmp_path = full_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(raw)
+        os.replace(tmp_path, full_path)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Не смог записать файл: {e}")
+        return
+
+    size = len(raw)
+    verb = "Перезаписал" if is_replace else "Создал"
+    msg = f"✅ {verb} `{safe_name}` ({size} байт)."
+    if backup_path:
+        msg += f"\n💾 Старая версия в `{os.path.relpath(backup_path, CODE_DIR)}`"
+    if ext == ".py":
+        msg += "\n\n♻️ Чтобы изменения подхватились, перезапусти меня (workflow «Telegram Bot»)."
+    bot.send_message(chat_id, msg, parse_mode="Markdown")
     return
 
+    # ── (старый CSV-парсинг ниже больше не используется и недостижим) ──
     import csv
     import json
     from datetime import datetime
