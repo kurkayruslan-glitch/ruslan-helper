@@ -1,0 +1,677 @@
+# Content-Type: text/x-python
+# Download-Filename: bot.py
+
+import telebot
+from telebot import types
+import os
+import time
+import io
+from urllib.parse import quote
+from openai import OpenAI
+from keep_alive import keep_alive
+from sheets import get_values, append_values, get_sheet_info, format_table
+from sms import send_geo_to_toha, send_sms_to_toha
+from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets
+from roles import get_role, set_role, list_roles
+from calls import make_call
+from grok import ask_grok
+from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
+from tron import get_usdt_transactions, get_account_balance, build_tx_summary
+from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
+import tax_calendar
+import sheet_monitor
+
+import threading
+import json
+import re
+import aiohttp
+import asyncio
+from datetime import datetime, timedelta
+
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+
+# UTC offset for Ukraine (EET = UTC+2, adjust to +3 in summer if needed)
+TZ_HOURS = int(os.environ.get("TZ_OFFSET_HOURS", "2"))
+
+def _now_local() -> datetime:
+    """Текущее местное время (UTC + TZ_HOURS)."""
+    return datetime.utcnow() + timedelta(hours=TZ_HOURS)
+
+OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
+OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
+
+openai_client = OpenAI(
+    base_url=OPENAI_BASE_URL,
+    api_key=OPENAI_API_KEY,
+)
+
+bot = telebot.TeleBot(TOKEN)
+
+# ──────────────────────────────────────────────
+# БЕЗОПАСНОСТЬ — белый список
+# ──────────────────────────────────────────────
+OWNER_ID = 7959647798          # Руслан — всегда имеет доступ
+SECRET_CODE = "ruslan2024vip"  # Секретный пароль для новых пользователей
+WHITELIST_FILE = "whitelist.json"
+
+# Токен VK API для поиска людей (Сервисный ключ доступа из панели VK Developers)
+VK_TOKEN = os.environ.get("VK_API_TOKEN", "")
+
+def _load_whitelist() -> set:
+    if os.path.exists(WHITELIST_FILE):
+        try:
+            import json
+            with open(WHITELIST_FILE) as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return {OWNER_ID}
+
+def _save_whitelist():
+    import json
+    with open(WHITELIST_FILE, "w") as f:
+        json.dump(list(allowed_users), f)
+
+allowed_users: set = _load_whitelist()
+allowed_users.add(OWNER_ID)
+
+def is_allowed(chat_id: int) -> bool:
+    return chat_id in allowed_users
+
+def grant_access(chat_id: int):
+    allowed_users.add(chat_id)
+    _save_whitelist()
+
+# ──────────────────────────────────────────────
+
+def safe_send(chat_id: int, text: str, reply_markup=None):
+    """Отправляет сообщение — сначала с Markdown, при ошибке — без форматирования."""
+    for chunk in [text[i:i+4000] for i in range(0, max(len(text), 1), 4000)]:
+        try:
+            bot.send_message(chat_id, chunk, parse_mode="Markdown", reply_markup=reply_markup)
+        except Exception:
+            try:
+                bot.send_message(chat_id, chunk, reply_markup=reply_markup)
+            except Exception as e2:
+                bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
+
+
+def _tts_send_voice(chat_id: int, text: str):
+    """Конвертирует текст в голос через gpt-audio-mini и отправляет как голосовое сообщение."""
+    import re, base64
+    try:
+        clean = re.sub(r"\[ACTION:[^\]]*\]", "", text)
+        clean = re.sub(r"[*_`#>]", "", clean).strip()
+        if not clean:
+            return
+        response = openai_client.chat.completions.create(
+            model="gpt-audio-mini",
+            modalities=["text", "audio"],
+            audio={"voice": "onyx", "format": "opus"},
+            messages=[
+                {"role": "system", "content": "Прочитай текст вслух естественно и живо, по-русски."},
+                {"role": "user", "content": clean},
+            ],
+        )
+        audio_data = base64.b64decode(response.choices[0].message.audio.data)
+        audio_bytes = io.BytesIO(audio_data)
+        audio_bytes.name = "reply.opus"
+        bot.send_voice(chat_id, audio_bytes)
+    except Exception as e:
+        print(f"TTS ошибка: {e}")
+
+# Последняя геопозиция пользователя
+last_location = {}
+
+# Состояние ожидания ID таблицы / ввода родственников
+waiting_for_sheet_id = {}
+
+# Состояние ожидания текста для звонка (worker)
+waiting_for_call_msg = {}
+
+# Состояние звонка владельца
+waiting_for_owner_call = {}
+
+# Ожидание адреса TRC20 кошелька
+waiting_for_wallet = set()
+
+# Чаты, ожидающие голосового ответа
+voice_request_chats: set = set()
+
+# История чата с Grok
+GROK_HISTORY_FILE = "grok_history.json"
+
+def _load_grok_history() -> dict:
+    if os.path.exists(GROK_HISTORY_FILE):
+        try:
+            import json
+            with open(GROK_HISTORY_FILE) as f:
+                return {int(k): v for k, v in json.load(f).items()}
+        except Exception:
+            pass
+    return {}
+
+def _save_grok_history():
+    import json
+    with open(GROK_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump({str(k): v for k, v in grok_history.items()}, f, ensure_ascii=False, indent=2)
+
+grok_history: dict = _load_grok_history()
+
+# Известные пользователи
+KNOWN_USERS_FILE = "known_users.json"
+
+def _load_known_users() -> dict:
+    if os.path.exists(KNOWN_USERS_FILE):
+        try:
+            import json
+            with open(KNOWN_USERS_FILE) as f:
+                return {k: int(v) for k, v in json.load(f).items()}
+        except Exception:
+            pass
+    return {}
+
+def _save_known_users():
+    import json
+    with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(known_users, f, ensure_ascii=False, indent=2)
+
+known_users: dict = _load_known_users()
+
+
+def main_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("📞 Позвонить",   "🚕 Тоха")
+    markup.add("📍 Геопозиция",  "📗 Таблицы")
+    markup.add("💰 USDT крипто", "📊 Я Тигр")
+    markup.add("📋 ФОП",         "🔍 Родственники")
+    markup.add("🛣️ Маршрут",     "📝 Анкета")
+    markup.add("🗑️ Забыть")
+    return markup
+
+
+def sheets_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("📊 Аналитика таблицы", "📋 Мои таблицы")
+    markup.add("📖 Читать таблицу", "✏️ Записать в таблицу")
+    markup.add("➕ Сохранить таблицу", "ℹ️ Инфо о таблице")
+    markup.add("🔙 Назад")
+    return markup
+
+
+def toha_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("📍 Отправить гео Тохе")
+    markup.add("💬 Написать Тохе SMS")
+    markup.add("🔙 Назад")
+    return markup
+
+
+def driver_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("📍 Геопозиция Руслана")
+    return markup
+
+
+def worker_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("📞 Позвонить Руслану")
+    markup.add("📊 Аналитика таблицы")
+    markup.add("📋 Мои таблицы")
+    return markup
+
+
+def get_menu_for_role(role: str):
+    if role == "driver":
+        return driver_menu()
+    if role == "worker":
+        return worker_menu()
+    return main_menu()
+
+
+def is_toha_geo_command(text: str) -> bool:
+    t = text.lower()
+    keywords = ["отправь тоше", "отправь тохе", "скинь тоше", "скинь тохе",
+                "пошли тоше", "пошли тохе", "отправь гео тох", "скинь гео тох",
+                "тоха гео", "тоше гео", "тохе гео"]
+    return any(k in t for k in keywords)
+
+
+def _parse_action(reply: str) -> tuple[str | None, str | None, str]:
+    import re
+    stripped = reply.lstrip()
+    match = re.match(r"^\[ACTION:([^\]]+)\]\s*", stripped)
+    if not match:
+        return None, None, reply
+    tag_content = match.group(1)
+    text_after = reply[match.end():]
+    parts = tag_content.split(":", 1)
+    action_type = parts[0].strip()
+    action_param = parts[1].strip() if len(parts) > 1 else None
+    return action_type, action_param, text_after
+
+
+def run_async_search(last_name: str, city_name: str = None):
+    async def _search():
+        results = []
+        if not VK_TOKEN or "ТВОЙ_" in VK_TOKEN:
+            return ["⚠️ На сервере не задан `VK_API_TOKEN` для глубокого OSINT-анализа."]
+            
+        url = "https://api.vk.com/method/users.search"
+        params = {
+            "q": last_name,
+            "count": 15,
+            "fields": "bdate,city,connections",
+            "access_token": VK_TOKEN,
+            "v": "5.131"
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=8) as response:
+                    data = await response.json()
+                    if "response" in data:
+                        for item in data["response"]["items"]:
+                            if city_name:
+                                user_city = item.get("city", {}).get("title", "").lower()
+                                if city_name.lower() not in user_city:
+                                    continue
+                            name = f"{item.get('first_name')} {item.get('last_name')}"
+                            vk_link = f"https://vk.com/id{item.get('id')}"
+                            bdate = item.get("bdate", "не указана")
+                            results.append(f"👤 {name}\n📅 ДР: {bdate}\n🔗 Ссылка: {vk_link}")
+        except Exception as e:
+            return [f"⚠️ Ошибка сети при парсинге OSINT графа: {e}"]
+        return results
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(_search())
+
+
+def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None):
+    if action_type == "call_toha":
+        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+        if not toha_number:
+            bot.send_message(chat_id, "⚠️ Номер Тохи не настроен.")
+            return
+        msg = action_param or "Руслан звонит тебе!"
+        bot.send_message(chat_id, f"📞 Звоню Тохе...")
+        ok, info = make_call(toha_number, msg)
+        if ok:
+            bot.send_message(chat_id, f"✅ Позвонил Тохе! Скажет: «{msg}»")
+        else:
+            bot.send_message(chat_id, f"❌ Ошибка звонка: {info}")
+
+    elif action_type == "sms_toha":
+        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+        msg = action_param or ""
+        if not toha_number:
+            bot.send_message(chat_id, "⚠️ Номер Тохи не настроен в системе.")
+        elif not msg:
+            bot.send_message(chat_id, "⚠️ Текст SMS не указан — напиши что передать Тохе.")
+        else:
+            sms_link = make_sms_link(toha_number, msg)
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("📱 Открыть SMS для Тохи", url=sms_link))
+            bot.send_message(chat_id, f"💬 Нажми — откроется SMS с текстом:\n«{msg}»", reply_markup=markup)
+
+    elif action_type == "usdt":
+        address = action_param or ""
+        if not (address.startswith("T") and len(address) == 34):
+            bot.send_message(chat_id, "⚠️ Некорректный TRC20 адрес в запросе.")
+            return
+        bot.send_message(chat_id, f"🔍 Ищу USDT транзакции для `{address}`...", parse_mode="Markdown")
+        ok, txs, err = get_usdt_transactions(address, limit=50)
+        if not ok:
+            bot.send_message(chat_id, f"❌ TronScan: {err}")
+            return
+        if not txs:
+            bot.send_message(chat_id, "📭 Транзакции USDT TRC20 не найдены.")
+            return
+        balance = get_account_balance(address)
+        summary, _, _ = build_tx_summary(address, txs)
+        bot.send_message(chat_id, f"💹 Баланс: *{balance}* | {len(txs)} транзакций — анализирую...",
+                         parse_mode="Markdown")
+        prompt = (
+            f"Проанализируй транзакции USDT TRC20 кошелька, дай бизнес-аналитику на русском.\n\n"
+            f"{summary}\n\n"
+            f"1. Резюме активности\n2. Топ контрагентов\n3. Паттерны по времени\n4. Риски\n5. Итог"
+        )
+        analysis = ask_grok(prompt, [])
+        safe_send(chat_id, f"💰 *Аналитика USDT TRC20*\n\n{analysis}", main_menu())
+
+    elif action_type == "sheet_analytics":
+        name = action_param or ""
+        sheet_id = find_sheet_id(name.lower())
+        if not sheet_id:
+            saved = list_sheets()
+            names = "\n".join([f"• {n}" for n in saved.keys()]) if saved else "нет"
+            bot.send_message(chat_id, f"⚠️ Таблица «{name}» не найдена.\n\nДоступные:\n{names}")
+            return
+        bot.send_message(chat_id, f"🤖 Анализирую «{name}»...")
+        bot.send_chat_action(chat_id, "typing")
+        result = analyze_sheet_with_ai(sheet_id)
+        safe_send(chat_id, result, reply_markup=main_menu())
+
+    elif action_type == "sheets_list":
+        saved = list_sheets()
+        inline = types.InlineKeyboardMarkup(row_width=1)
+        if saved:
+            for name, sid in saved.items():
+                url = f"https://docs.google.com/spreadsheets/d/{sid}"
+                inline.add(types.InlineKeyboardButton(f"📄 {name.title()}", url=url))
+        inline.add(types.InlineKeyboardButton("➕ Добавить таблицу", callback_data="add_sheet"))
+        text = "📗 *Мои таблицы:*" if saved else "📗 Пока нет таблиц."
+        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
+
+    elif action_type == "list_users":
+        roles_data = list_roles()
+        if not known_users:
+            bot.send_message(chat_id, "👥 Пока никто не запускал бота.")
+        else:
+            role_names = {"owner": "Владелец", "driver": "Водитель", "worker": "Работник", "guest": "Гость"}
+            lines = [f"• @{u} — {role_names.get(roles_data.get(str(uid), 'guest'), 'Гость')}"
+                     for u, uid in known_users.items()]
+            bot.send_message(chat_id, "👥 *Пользователи бота:*\n\n" + "\n".join(lines),
+                             parse_mode="Markdown")
+
+    elif action_type == "assign_role":
+        if not action_param or ":" not in action_param:
+            bot.send_message(chat_id, "⚠️ Укажи @username и роль. Пример: назначь @toha водителем")
+            return
+        username_raw, role = action_param.split(":", 1)
+        username = username_raw.lstrip("@").lower().strip()
+        role = role.strip()
+        valid_roles = {"driver", "worker", "guest", "owner"}
+        if role not in valid_roles:
+            bot.send_message(chat_id, f"⚠️ Неверная роль «{role}». Допустимые: driver, worker, guest.")
+            return
+        if username not in known_users:
+            bot.send_message(chat_id, f"⚠️ @{username} ещё не запускал бота. Попроси его написать /start.")
+            return
+        target_id = known_users[username]
+        grant_access(target_id)
+        set_role(target_id, role)
+        role_labels = {"driver": "Водитель", "worker": "Работник", "guest": "Гость", "owner": "Владелец"}
+        bot.send_message(chat_id, f"✅ @{username} назначен как *{role_labels.get(role, role)}*.",
+                         parse_mode="Markdown")
+
+    elif action_type == "remember":
+        fact = action_param or ""
+        if fact:
+            added = add_fact(fact)
+            if added:
+                bot.send_message(chat_id, f"🧠 Запомнил: «{fact}»")
+
+    elif action_type == "recall":
+        facts = get_facts()
+        if not facts:
+            bot.send_message(chat_id, "🧠 Пока ничего не запомнено. Скажи мне что запомнить!")
+        else:
+            lines = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(facts))
+            bot.send_message(chat_id, f"🧠 *Запомненные факты:*\n\n{lines}", parse_mode="Markdown")
+
+    elif action_type == "forget_fact":
+        try:
+            idx = int(action_param or "0") - 1
+            removed = delete_fact(idx)
+            if removed:
+                bot.send_message(chat_id, f"🗑️ Забыл: «{removed}»")
+            else:
+                facts = get_facts()
+                bot.send_message(chat_id, f"⚠️ Нет факта с номером {(idx + 1)}. Всего запомнено: {len(facts)}.")
+        except (ValueError, TypeError):
+            bot.send_message(chat_id, "⚠️ Укажи номер факта. Например: забудь факт 2")
+
+    elif action_type == "forget_all_facts":
+        clear_facts()
+        bot.send_message(chat_id, "🗑️ Вся долгосрочная память очищена.")
+
+    elif action_type == "forget":
+        grok_history.pop(chat_id, None)
+        _save_grok_history()
+        bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с чистого листа!", reply_markup=main_menu())
+
+    elif action_type == "remind":
+        if not action_param or "|" not in action_param:
+            bot.send_message(chat_id, "⚠️ Не удалось разобрать время напоминания. Попробуй уточнить.")
+            return
+        dt_str, reminder_text = action_param.split("|", 1)
+        dt_str = dt_str.strip()
+        reminder_text = reminder_text.strip()
+        try:
+            fire_at = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M")
+        except ValueError:
+            bot.send_message(chat_id, f"⚠️ Неверный формат даты: «{dt_str}». Попробуй ещё раз.")
+            return
+        if fire_at <= _now_local():
+            bot.send_message(chat_id, "⚠️ Время напоминания уже прошло. Укажи будущее время.")
+            return
+        reminder = add_reminder(chat_id, reminder_text, fire_at)
+        friendly_time = fire_at.strftime("%d.%m.%Y в %H:%M")
+        bot.send_message(chat_id, f"⏰ Запомнил! Напомню тебе *{friendly_time}*:\n_{reminder_text}_",
+                         parse_mode="Markdown")
+
+    elif action_type == "list_reminders":
+        pending = list_pending(chat_id)
+        if not pending:
+            bot.send_message(chat_id, "⏰ Нет предстоящих напоминаний.")
+        else:
+            lines = []
+            for r in pending:
+                try:
+                    fire_at = datetime.strptime(r["fire_at"], "%Y-%m-%dT%H:%M")
+                    when = fire_at.strftime("%d.%m.%Y в %H:%M")
+                except Exception:
+                    when = r.get("fire_at", "?")
+                lines.append(f"• `{r.get('id','?')}` — {when} — {r['text']}")
+            bot.send_message(chat_id, "⏰ *Предстоящие напоминания:*\n\n" + "\n".join(lines) +
+                             "\n\n_Чтобы отменить, скажи «отмени напоминание <id>»._",
+                             parse_mode="Markdown")
+
+    elif action_type == "show_code":
+        _send_code_file(chat_id, action_param or "")
+
+    elif action_type == "list_code":
+        _send_code_list(chat_id)
+
+    elif action_type == "cancel_reminder":
+        reminder_id = (action_param or "").strip()
+        if not reminder_id:
+            bot.send_message(chat_id, "⚠️ Не понял, какое напоминание отменить.")
+            return
+        pending = list_pending(chat_id)
+        target = next((r for r in pending if r.get("id") == reminder_id), None)
+        if not target:
+            bot.send_message(chat_id, f"⚠️ Не нашёл активное напоминание с id `{reminder_id}`.", parse_mode="Markdown")
+            return
+        if cancel_reminder(reminder_id):
+            try:
+                fire_at = datetime.strptime(target["fire_at"], "%Y-%m-%dT%H:%M")
+                when = fire_at.strftime("%d.%m.%Y в %H:%M")
+            except Exception:
+                when = target.get("fire_at", "?")
+            bot.send_message(chat_id, f"🗑️ Отменил напоминание на *{when}*:\n_{target.get('text','')}_",
+                             parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, f"⚠️ Не удалось отменить напоминание `{reminder_id}`.", parse_mode="Markdown")
+
+
+def _extract_remember_tags(text: str) -> tuple[list, str]:
+    """Извлекает [REMEMBER:факт] и [ACTION:remember:факт] теги из текста."""
+    import re
+    facts_r = re.findall(r"\[REMEMBER:([^\]]+)\]", text, flags=re.IGNORECASE)
+    facts_a = re.findall(r"\[ACTION:remember:([^\]]+)\]", text)
+    all_facts = facts_r + facts_a
+    clean = re.sub(r"\[REMEMBER:[^\]]+\]\s*", "", text, flags=re.IGNORECASE)
+    clean = re.sub(r"\[ACTION:remember:[^\]]+\]\s*", "", clean).strip()
+    return all_facts, clean
+
+
+def _ask_grok_and_route(chat_id: int, text: str):
+    """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
+    history = grok_history.get(chat_id, [])
+    memory_block = format_for_prompt()
+    now = _now_local()
+    date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{TZ_HOURS}, Украина).\n"
+    memory_block = date_line + memory_block
+    bot.send_chat_action(chat_id, "typing")
+    reply = ask_grok(text, history, memory_block=memory_block)
+
+    new_facts, reply_without_remember = _extract_remember_tags(reply)
+    remember_matches = []  
+    saved_count = 0
+    if chat_id == OWNER_ID:
+        for fact in new_facts:
+            if add_fact(fact.strip()):
+                saved_count += 1
+
+    action_type, action_param, clean_reply = _parse_action(reply_without_remember)
+
+    history.append({"role": "user", "content": text})
+    history.append({"role": "assistant", "content": clean_reply or reply_without_remember})
+    grok_history[chat_id] = history
+    _save_grok_history()
+
+    for fact in remember_matches:
+        add_fact(fact.strip())
+
+    is_voice = chat_id in voice_request_chats
+    if is_voice:
+        voice_request_chats.discard(chat_id)
+
+    if action_type == "forget":
+        _handle_grok_action(chat_id, action_type, action_param)
+        return  
+    if action_type:
+        _handle_grok_action(chat_id, action_type, action_param)
+
+    if clean_reply and clean_reply.strip():
+        if is_voice:
+            _tts_send_voice(chat_id, clean_reply)
+        safe_send(chat_id, clean_reply, main_menu())
+
+    if saved_count > 0:
+        noun = "факт" if saved_count == 1 else ("факта" if saved_count < 5 else "фактов")
+        bot.send_message(chat_id, f"🧠 Запомнил {saved_count} {noun}.")
+
+
+def process_text(chat_id, text):
+    import re
+    t = text.strip()
+    tl = t.lower()
+
+    # ══════════════════════════════════════════════════════════════════
+    # 1. СОСТОЯНИЯ ОЖИДАНИЯ — мультишаговые диалоги
+    # ══════════════════════════════════════════════════════════════════
+
+    if chat_id in waiting_for_owner_call:
+        state = waiting_for_owner_call[chat_id]
+        if state["step"] == "number":
+            number = re.sub(r"[\s\-\(\)]", "", t)
+            if not re.match(r"^\+?\d{7,15}$", number):
+                bot.send_message(chat_id, "⚠️ Не похоже на номер. Напиши в формате +380XXXXXXXXX:")
+                return
+            waiting_for_owner_call[chat_id] = {"step": "message", "number": number}
+            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nЧто сказать голосом?",
+                             parse_mode="Markdown")
+            return
+        elif state["step"] == "message":
+            number = state["number"]
+            waiting_for_owner_call.pop(chat_id)
+            bot.send_message(chat_id, f"📞 Звоню на {number}...")
+            ok, info = make_call(number, t)
+            if ok:
+                bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{t}_",
+                                 parse_mode="Markdown", reply_markup=main_menu())
+            else:
+                bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
+            return
+
+    if chat_id in waiting_for_sheet_id:
+        mode = waiting_for_sheet_id.pop(chat_id)
+        if mode == "toha_sms":
+            toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
+            sms_link = make_sms_link(toha_number, t)
+            markup = types.InlineKeyboardMarkup()
+            markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
+            bot.send_message(chat_id, f"💬 Нажми — откроется SMS с текстом для Тохи:\n«{t}»",
+                             reply_markup=markup)
+        elif mode == "relative_search":
+            parts = t.split(maxsplit=1)
+            last_name = parts[0]
+            city = parts[1] if len(parts) > 1 else None
+            
+            status_msg = bot.send_message(chat_id, "🔍 Подключаюсь к OSINT-графам и ищу совпадения...")
+            res = run_async_search(last_name, city)
+            
+            if not res:
+                bot.send_message(chat_id, "❌ По заданным критериям возможных родственников не обнаружено.")
+            else:
+                out = "📋 **Найденные связи и потенциальные родственники:**\n\n" + "\n\n".join(res[:8])
+                safe_send(chat_id, out, main_menu())
+            return
+        else:
+            handle_sheet_command(chat_id, t, mode)
+        return
+
+    if chat_id in waiting_for_wallet:
+        waiting_for_wallet.discard(chat_id)
+        address = t
+        if not (address.startswith("T") and len(address) == 34):
+            bot.send_message(chat_id,
+                             "⚠️ Некорректный TRC20 адрес.\nНажми *💰 USDT крипто* и попробуй снова.",
+                             parse_mode="Markdown")
+            return
+        _handle_grok_action(chat_id, "usdt", address)
+        return
+
+    # ══════════════════════════════════════════════════════════════════
+    # 1.5 ЯВНЫЕ КОМАНДЫ ПАМЯТИ
+    # ══════════════════════════════════════════════════════════════════
+
+    if chat_id == OWNER_ID:
+        remember_prefixes = [
+            "запомни что ", "запомни: ", "запомни ",
+            "сохрани что ", "сохрани: ", "сохрани факт ",
+            "не забудь что ", "не забудь: ",
+            "запиши что ", "запиши: ",
+        ]
+        for prefix in remember_prefixes:
+            if tl.startswith(prefix):
+                fact = t[len(prefix):].strip()
+                if fact:
+                    added = add_fact(fact)
+                    if added:
+                        bot.send_message(chat_id, f"🧠 Запомнил: {fact}",
+                                         reply_markup=main_menu())
+                    else:
+                        bot.send_message(chat_id, f"🧠 Уже знаю это: {fact}",
+                                         reply_markup=main_menu())
+                else:
+                    bot.send_message(chat_id, "⚠️ Что именно запомнить?")
+                return
+
+    # ══════════════════════════════════════════════════════════════════
+    # 2. ТОЧНЫЕ МЕТКИ КНОПОК МЕНЮ — UI-навигация
+    # ══════════════════════════════════════════════════════════════════
+
+    BUTTON_LABELS = {
+        "📞 позвонить": lambda: _btn_call(chat_id),
+        "🚕 тоха": lambda: bot.send_message(chat_id, "🚕 Что делаем с Тохой?", reply_markup=toha_menu()),
+        "📍 геопозиция": lambda: bot.send_message(chat_id, "📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция"),
+        "📗 таблицы": lambda: _btn_sheets(chat_id),
+        "💰 usdt крипто": lambda: _btn_usdt(chat_id),
+        "📊 я тигр": lambda: _ask_grok_and_route(chat_id, "Сделай полную статистику по бизнесу Я Тигр"),
+        "📋 фоп": lambda: _show_tax_calendar(chat_id),
+        "/налоги": lambda: _show_tax_calendar(chat_id),
+        "налоги": lambda: _show_tax_calendar(chat_id),
+        "🔍 родственники": lambda: _btn_relatives(chat_id),
+        "родословная": lambda: _btn_relatives(chat_id),
+        "поиск родственников": lambda: _btn_relatives(chat_id),
+        "🗑️ забыть":
