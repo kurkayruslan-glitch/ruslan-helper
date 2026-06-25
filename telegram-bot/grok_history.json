@@ -143,6 +143,30 @@
     {
       "role": "assistant",
       "content": "Не могу искать родственников."
+    },
+    {
+      "role": "user",
+      "content": "ПСС"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "Сделай полную статистику по бизнесу Я Тигр"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "Ты тут"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
     }
   ]
 }

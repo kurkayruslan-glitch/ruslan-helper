@@ -34,7 +34,11 @@ if _backend == "llama":
     print("🧠 LLM backend: llama (Ollama)")
 elif _backend == "grok":
     from grok import ask_grok
-    print("🧠 LLM backend: grok (xAI)")
+    _grok_key = os.environ.get("XAI_API_KEY", "")
+    if _grok_key:
+        print(f"🧠 LLM backend: grok (xAI), модель: {os.environ.get('GROK_MODEL','grok-3')}")
+    else:
+        print("🧠 LLM backend: grok (xAI) ⚠️  XAI_API_KEY не задан — бот запустится, но ИИ-ответы вернут ошибку.")
 elif _backend == "gemini":
     from gemini import ask_grok
     print("🧠 LLM backend: gemini (Google)")
@@ -56,12 +60,28 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
-# UTC offset for Ukraine (EET = UTC+2, adjust to +3 in summer if needed)
-TZ_HOURS = int(os.environ.get("TZ_OFFSET_HOURS", "2"))
+def _ukraine_tz_hours() -> int:
+    """UTC+3 летом (последнее вс марта — последнее вс октября), UTC+2 зимой.
+    Если задан TZ_OFFSET_HOURS в .env — использует его (ручной override)."""
+    manual = os.environ.get("TZ_OFFSET_HOURS", "").strip()
+    if manual.lstrip("-").isdigit():
+        return int(manual)
+    now_utc = datetime.utcnow()
+    y = now_utc.year
+    dst_start = max(
+        datetime(y, 3, d) for d in range(25, 32)
+        if datetime(y, 3, d).weekday() == 6
+    ).replace(hour=1)   # 01:00 UTC = 03:00 местного
+    dst_end = max(
+        datetime(y, 10, d) for d in range(25, 32)
+        if datetime(y, 10, d).weekday() == 6
+    ).replace(hour=1)   # 01:00 UTC = 03:00 местного
+    return 3 if dst_start <= now_utc < dst_end else 2
+
 
 def _now_local() -> datetime:
-    """Текущее местное время (UTC + TZ_HOURS)."""
-    return datetime.utcnow() + timedelta(hours=TZ_HOURS)
+    """Текущее местное время (Украина, с учётом летнего/зимнего времени)."""
+    return datetime.utcnow() + timedelta(hours=_ukraine_tz_hours())
 
 OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
 OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
@@ -80,7 +100,8 @@ bot = telebot.TeleBot(TOKEN)
 # БЕЗОПАСНОСТЬ — белый список
 # ──────────────────────────────────────────────
 OWNER_ID = 7959647798          # Руслан — всегда имеет доступ
-SECRET_CODE = "ruslan2024vip"  # Секретный пароль для новых пользователей
+# Секретный код берётся из .env (BOT_SECRET_CODE), fallback — на случай первого запуска
+SECRET_CODE = os.environ.get("BOT_SECRET_CODE", "ruslan2024vip")
 WHITELIST_FILE = "whitelist.json"
 
 def _load_whitelist() -> set:
@@ -165,8 +186,9 @@ waiting_for_wallet = set()
 # Чаты, ожидающие голосового ответа (запрос пришёл голосом)
 voice_request_chats: set = set()
 
-# История чата с Grok — сохраняется на диск
+# История чата — сохраняется на диск, максимум HISTORY_MAX пар на пользователя
 GROK_HISTORY_FILE = "grok_history.json"
+HISTORY_MAX = 40  # максимум сообщений в истории (пар user+assistant = 80 записей)
 
 def _load_grok_history() -> dict:
     if os.path.exists(GROK_HISTORY_FILE):
@@ -178,10 +200,22 @@ def _load_grok_history() -> dict:
             pass
     return {}
 
+def _trim_history(history: list) -> list:
+    """Оставляет последние HISTORY_MAX сообщений, не обрезая пару user/assistant."""
+    if len(history) <= HISTORY_MAX:
+        return history
+    trimmed = history[-HISTORY_MAX:]
+    # Если первый элемент — assistant (не user), убираем его, чтобы не начинать с ответа
+    if trimmed and trimmed[0].get("role") == "assistant":
+        trimmed = trimmed[1:]
+    return trimmed
+
 def _save_grok_history():
     import json
+    # Обрезаем перед записью — так файл не растёт бесконечно
+    trimmed = {str(k): _trim_history(v) for k, v in grok_history.items()}
     with open(GROK_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump({str(k): v for k, v in grok_history.items()}, f, ensure_ascii=False, indent=2)
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
 
 grok_history: dict = _load_grok_history()
 
@@ -655,7 +689,8 @@ def _ask_grok_and_route(chat_id: int, text: str):
     memory_block = format_for_prompt()
     # Добавляем текущую дату и время, чтобы Grok правильно рассчитывал относительные сроки
     now = _now_local()
-    date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{TZ_HOURS}, Украина).\n"
+    tz = _ukraine_tz_hours()
+    date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{tz}, Украина).\n"
     memory_block = date_line + memory_block
     bot.send_chat_action(chat_id, "typing")
     reply = ask_grok(text, history, memory_block=memory_block)
