@@ -183,6 +183,15 @@ waiting_for_owner_call = {}
 # Ожидание адреса TRC20 кошелька
 waiting_for_wallet = set()
 
+# Чаты в режиме свободного ИИ-диалога («🤖 ИИ чат»)
+ai_chat_mode: set = set()
+
+# Чаты в режиме Jarvis — командный центр
+jarvis_mode: set = set()
+
+# Чаты в режиме тишины — короткие ответы без подсказок
+silence_mode: set = set()
+
 # Чаты, ожидающие голосового ответа (запрос пришёл голосом)
 voice_request_chats: set = set()
 
@@ -246,6 +255,26 @@ def main_menu():
     markup.add("📍 Геопозиция",  "📊 Я Тигр")
     markup.add("📋 ФОП",         "🗑️ Забыть")
     markup.add("🛣️ Маршрут",     "📝 Анкета")
+    markup.add("🤖 ИИ чат",      "⚡ Jarvis")
+    return markup
+
+
+def ai_chat_menu():
+    """Клавиатура внутри режима ИИ-чата — только кнопка выхода."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("🔙 Выйти из чата")
+    return markup
+
+
+def jarvis_menu():
+    """Командный центр Jarvis — быстрые кнопки для всех функций."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("☀️ Бриф",        "🩺 Статус")
+    markup.add("📞 Позвонить",    "💬 ИИ чат")
+    markup.add("🧠 Память",       "📊 Таблицы")
+    markup.add("📋 ФОП",          "💸 Расход ИИ")
+    markup.add("🧠 Что ты умеешь?")
+    markup.add("🔙 Выйти из Jarvis")
     return markup
 
 
@@ -692,6 +721,17 @@ def _ask_grok_and_route(chat_id: int, text: str):
     tz = _ukraine_tz_hours()
     date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{tz}, Украина).\n"
     memory_block = date_line + memory_block
+    # Jarvis mode — стиль уверенного личного ассистента
+    if chat_id in jarvis_mode:
+        memory_block = (
+            "\n[РЕЖИМ: Jarvis — персональный командный центр Руслана]\n"
+            "Ты — умный личный ассистент. Отвечай коротко, уверенно, по делу.\n"
+            "Без воды, без вступлений, без лишних извинений.\n"
+            "Руслан — владелец такси-бизнеса «Я Тигр» в Украине.\n"
+        ) + memory_block
+    # Silence mode — только суть
+    if chat_id in silence_mode:
+        memory_block += "\n[РЕЖИМ ТИШИНЫ]: Отвечай строго 1-2 предложения. Только суть."
     bot.send_chat_action(chat_id, "typing")
     reply = ask_grok(text, history, memory_block=memory_block)
 
@@ -831,6 +871,73 @@ def process_text(chat_id, text):
     # 2. ТОЧНЫЕ МЕТКИ КНОПОК МЕНЮ — только для UI-навигации
     # ══════════════════════════════════════════════════════════════════
 
+    # ══════════════════════════════════════════════════════════════════
+    # 1.7 РЕЖИМ ИИ-ЧАТА — если активен, весь текст идёт в LLM напрямую
+    # ══════════════════════════════════════════════════════════════════
+    if chat_id in ai_chat_mode:
+        if tl.strip() in ("🔙 выйти из чата", "/exit", "выйти", "exit", "стоп", "stop"):
+            ai_chat_mode.discard(chat_id)
+            bot.send_message(chat_id, "👋 Вышли из ИИ-чата. Главное меню:", reply_markup=main_menu())
+            return
+        _ask_grok_and_route(chat_id, t)
+        return
+
+    # ══════════════════════════════════════════════════════════════════
+    # 1.8 JARVIS MODE — командный центр, все команды внутри режима
+    # ══════════════════════════════════════════════════════════════════
+    if chat_id in jarvis_mode:
+        cmd = tl.strip()
+        # Выход
+        if cmd in ("🔙 выйти из jarvis", "/jarvis_off", "выйти из jarvis", "выйти"):
+            jarvis_mode.discard(chat_id)
+            silence_mode.discard(chat_id)
+            bot.send_message(chat_id, "⚡ Jarvis отключён. До встречи, Руслан.", reply_markup=main_menu())
+            return
+        # Тишина
+        if cmd in ("режим тишины", "/тишина", "тишина"):
+            silence_mode.add(chat_id)
+            bot.send_message(chat_id, "🔇 Режим тишины. Отвечаю минимально.", reply_markup=jarvis_menu())
+            return
+        if cmd in ("выйти из тишины", "выйти из режима тишины", "без тишины", "/без тишины"):
+            silence_mode.discard(chat_id)
+            bot.send_message(chat_id, "🔊 Тишина отключена. Работаю в полном режиме.", reply_markup=jarvis_menu())
+            return
+        # Специальные команды
+        if cmd in ("что дальше?", "что дальше", "/дальше", "дальше"):
+            _btn_what_next(chat_id)
+            return
+        if cmd in ("панель управления", "командный центр", "/панель", "/центр", "⚡ jarvis"):
+            _btn_jarvis(chat_id)
+            return
+        # Быстрые кнопки меню Jarvis
+        _JARVIS_SHORTCUTS = {
+            "☀️ бриф": lambda: _btn_morning_brief(chat_id),
+            "бриф": lambda: _btn_morning_brief(chat_id),
+            "🩺 статус": lambda: _btn_status(chat_id),
+            "статус": lambda: _btn_status(chat_id),
+            "🧠 память": lambda: _btn_show_memory(chat_id),
+            "память": lambda: _btn_show_memory(chat_id),
+            "📊 таблицы": lambda: _btn_sheets(chat_id),
+            "таблицы": lambda: _btn_sheets(chat_id),
+            "💸 расход ии": lambda: _btn_ai_budget(chat_id),
+            "расход": lambda: _btn_ai_budget(chat_id),
+            "🧠 что ты умеешь?": lambda: _btn_skills(chat_id),
+            "что ты умеешь?": lambda: _btn_skills(chat_id),
+            "что ты умеешь": lambda: _btn_skills(chat_id),
+            "📞 позвонить": lambda: _btn_call(chat_id),
+            "позвонить": lambda: _btn_call(chat_id),
+            "💬 ии чат": lambda: _btn_ai_chat(chat_id),
+            "📋 фоп": lambda: _show_tax_calendar(chat_id),
+            "фоп": lambda: _show_tax_calendar(chat_id),
+            "🗑️ забыть": lambda: _btn_forget(chat_id),
+        }
+        if cmd in _JARVIS_SHORTCUTS:
+            _JARVIS_SHORTCUTS[cmd]()
+            return
+        # Всё остальное — в LLM с Jarvis-контекстом
+        _ask_grok_and_route(chat_id, t)
+        return
+
     BUTTON_LABELS = {
         "📞 позвонить": lambda: _btn_call(chat_id),
         "🚕 тоха": lambda: bot.send_message(chat_id, "🚕 Что делаем с Тохой?", reply_markup=toha_menu()),
@@ -843,6 +950,15 @@ def process_text(chat_id, text):
         "/податки": lambda: _show_tax_calendar(chat_id),
         "налоги": lambda: _show_tax_calendar(chat_id),
         "податки": lambda: _show_tax_calendar(chat_id),
+        "🤖 ии чат": lambda: _btn_ai_chat(chat_id),
+        "⚡ jarvis": lambda: _btn_jarvis(chat_id),
+        "🩺 статус": lambda: _btn_status(chat_id),
+        "☀️ бриф": lambda: _btn_morning_brief(chat_id),
+        "🧠 что ты умеешь?": lambda: _btn_skills(chat_id),
+        "💸 расход ии": lambda: _btn_ai_budget(chat_id),
+        "🧠 память": lambda: _btn_show_memory(chat_id),
+        "📊 таблицы": lambda: _btn_sheets(chat_id),
+        "🔙 выйти из jarvis": lambda: (_jarvis_exit(chat_id)),
         "🗑️ забыть": lambda: _btn_forget(chat_id),
         "🛣️ маршрут": lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
         "📝 анкета": lambda: _start_anketa(chat_id),
@@ -889,6 +1005,321 @@ def _btn_usdt(chat_id):
                      "Отправь адрес TRC20 кошелька (начинается с T, 34 символа):",
                      parse_mode="Markdown")
 
+
+def _btn_ai_chat(chat_id):
+    ai_chat_mode.add(chat_id)
+    bot.send_message(
+        chat_id,
+        "🤖 *Режим ИИ-чата активен*\n\n"
+        "Пиши или говори — я отвечу как ChatGPT.\n"
+        "История и память сохраняются между сообщениями.\n\n"
+        "Могу выполнять твои команды: SMS, звонки, открыть сайт, запустить программу — "
+        "просто попроси словами.\n\n"
+        "_Нажми «🔙 Выйти из чата» чтобы вернуться в главное меню._",
+        parse_mode="Markdown",
+        reply_markup=ai_chat_menu(),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+# ⚡ JARVIS MODE — функции командного центра
+# ══════════════════════════════════════════════════════════════════
+
+def _jarvis_system_status() -> str:
+    """Генерирует компактный статус-блок всех подсистем."""
+    now = _now_local()
+    tz = _ukraine_tz_hours()
+    lines = []
+
+    # ИИ backend
+    backend = os.environ.get("LLM_BACKEND", "openai").lower()
+    key_map = {
+        "openai":  ("OPENAI_API_KEY", "AI_INTEGRATIONS_OPENAI_API_KEY"),
+        "grok":    ("XAI_API_KEY",),
+        "gemini":  ("GEMINI_API_KEY",),
+        "llama":   (),  # локальный, ключ не нужен
+    }
+    keys = key_map.get(backend, ())
+    ai_icon = "✅" if (not keys or any(os.environ.get(k) for k in keys)) else "⚠️"
+    lines.append(f"🧠 ИИ: *{backend}* {ai_icon}")
+
+    # Звонки
+    tw_ok = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
+    tx_ok = all(os.environ.get(k) for k in ("TELNYX_API_KEY", "TELNYX_FROM_NUMBER"))
+    calls_str = " / ".join(filter(None, [
+        "Twilio ✅" if tw_ok else None,
+        "Telnyx ✅" if tx_ok else None,
+    ])) or "⚠️ не настроены"
+    lines.append(f"📞 Звонки: {calls_str}")
+
+    # Голос/TTS
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    lines.append(f"🎤 Голос/TTS: {'✅' if tts_ok else '⚠️ нет ключа'}")
+
+    # SMS
+    sms_ok = bool(os.environ.get("TOHA_PHONE_NUMBER"))
+    lines.append(f"💬 SMS Тохе: {'✅' if sms_ok else '⚠️ нет номера'}")
+
+    # Память
+    try:
+        facts = get_facts()
+        lines.append(f"💾 Память: {len(facts)} фактов")
+    except Exception:
+        lines.append("💾 Память: ⚠️ недоступна")
+
+    # Напоминания
+    try:
+        pending = list_pending(OWNER_ID)
+        n = len(pending)
+        if n:
+            fire = (pending[0].get("fire_at") or "")[:16].replace("T", " ")
+            lines.append(f"🔔 Напоминания: {n} активных · ближайшее {fire}")
+        else:
+            lines.append("🔔 Напоминания: нет")
+    except Exception:
+        lines.append("🔔 Напоминания: ⚠️ ошибка")
+
+    # ФОП дедлайн
+    try:
+        deadlines = tax_calendar.upcoming_deadlines(now, months_ahead=3)
+        if deadlines:
+            d = deadlines[0]
+            days_left = (d["deadline"].date() - now.date()).days
+            warn = " ⚠️" if days_left <= 14 else ""
+            lines.append(f"📋 ФОП: {d['kind']} {d['quarter']} через {days_left} дн.{warn}")
+        else:
+            lines.append("📋 ФОП: дедлайнов нет")
+    except Exception:
+        lines.append("📋 ФОП: ─")
+
+    # Время
+    silence_mark = " · 🔇 тишина" if OWNER_ID in silence_mode else ""
+    lines.append(f"🕐 Время: {now.strftime('%H:%M')} (UTC+{tz}){silence_mark}")
+
+    return "\n".join(lines)
+
+
+def _btn_jarvis(chat_id):
+    """Активирует Jarvis Mode и показывает командный центр."""
+    jarvis_mode.add(chat_id)
+    now = _now_local()
+    h = now.hour
+    if h < 6:
+        greet = "Ночью не спится"
+    elif h < 12:
+        greet = "Доброе утро"
+    elif h < 17:
+        greet = "Добрый день"
+    else:
+        greet = "Добрый вечер"
+
+    status = _jarvis_system_status()
+    silence_hint = "🔇 _Режим тишины активен_\n" if chat_id in silence_mode else ""
+    text = (
+        "⚡ *КОМАНДНЫЙ ЦЕНТР*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{greet}, Руслан. Системы онлайн.\n\n"
+        f"{status}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{silence_hint}"
+        "Готов. Что делаем, шеф?"
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=jarvis_menu())
+
+
+def _btn_status(chat_id):
+    """Системная диагностика — показывает здоровье всех подсистем."""
+    status = _jarvis_system_status()
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    safe_send(chat_id, f"🩺 *Диагностика системы*\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status}", markup)
+
+
+def _btn_skills(chat_id):
+    """Показывает список доступных функций — только включённые по ключам."""
+    lines = ["🧠 *Что я умею сейчас:*\n"]
+
+    lines.append("✅ ИИ-чат (пиши/говори свободно)")
+    lines.append("✅ Память между сессиями")
+    lines.append("✅ Напоминания и календарь ФОП")
+    lines.append("✅ Google Sheets (читать, писать, анализировать)")
+    lines.append("✅ Утренний бриф (автоматически в 08:00)")
+    lines.append("✅ USDT TRC20 аналитика")
+    lines.append("✅ Геопозиция → SMS Тохе")
+
+    tw = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
+    tx = all(os.environ.get(k) for k in ("TELNYX_API_KEY", "TELNYX_FROM_NUMBER"))
+    if tw or tx:
+        prov = "/".join(filter(None, ["Twilio" if tw else None, "Telnyx" if tx else None]))
+        lines.append(f"✅ Звонки ({prov}) с голосовым сценарием")
+    else:
+        lines.append("⚠️ Звонки (не настроены — добавь TWILIO_* или TELNYX_*)")
+
+    if os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"):
+        lines.append("✅ Голосовые ответы (TTS) и расшифровка голоса (STT)")
+    else:
+        lines.append("⚠️ Голос/TTS (нет OPENAI_API_KEY)")
+
+    lines.append("✅ Управление ПК: запуск/закрытие программ, скриншот")
+    lines.append("✅ Поиск файлов на ПК")
+    lines.append("✅ Открыть сайт в браузере")
+
+    lines.append("\n_Пиши запрос в свободной форме — всё понимаю._")
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    safe_send(chat_id, "\n".join(lines), markup)
+
+
+def _btn_what_next(chat_id):
+    """Предлагает следующий лучший шаг на основе контекста."""
+    now = _now_local()
+    context_parts = [f"Время: {now.strftime('%d.%m.%Y %H:%M')} (Украина)"]
+
+    try:
+        pending = list_pending(OWNER_ID)
+        if pending:
+            fires = [(r.get("fire_at", "")[:16].replace("T", " "), r.get("text", "")[:60]) for r in pending[:3]]
+            context_parts.append("Ближайшие напоминания: " + "; ".join(f"{f} — {tx}" for f, tx in fires))
+        else:
+            context_parts.append("Активных напоминаний нет.")
+    except Exception:
+        pass
+
+    try:
+        deadlines = tax_calendar.upcoming_deadlines(now, months_ahead=2)
+        if deadlines:
+            d = deadlines[0]
+            days = (d["deadline"].date() - now.date()).days
+            context_parts.append(f"ФОП дедлайн: {d['kind']} {d['quarter']} через {days} дн.")
+    except Exception:
+        pass
+
+    prompt = (
+        "Ты — личный ассистент владельца такси-бизнеса «Я Тигр» (Украина).\n"
+        "Вот текущий контекст:\n" + "\n".join(context_parts) + "\n\n"
+        "Предложи 3 конкретных следующих шага, которые стоит сделать прямо сейчас или сегодня. "
+        "Коротко, по делу, без воды. Нумерованный список."
+    )
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    bot.send_chat_action(chat_id, "typing")
+    try:
+        reply = ask_grok(prompt, [], memory_block="")
+        safe_send(chat_id, f"🎯 *Что дальше:*\n\n{reply}", markup)
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Не смог сгенерировать план: {e}", reply_markup=markup)
+
+
+def _btn_morning_brief(chat_id):
+    """Ручной запуск утренней сводки по кнопке."""
+    bot.send_chat_action(chat_id, "typing")
+    now = _now_local()
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+
+    # Погода
+    weather = _fetch_weather_kyiv() if callable(globals().get("_fetch_weather_kyiv")) else "─"
+
+    # ФОП
+    fop_lines = []
+    try:
+        deadlines = tax_calendar.upcoming_deadlines(now, months_ahead=2)
+        for d in deadlines[:2]:
+            days = (d["deadline"].date() - now.date()).days
+            warn = " ⚠️" if days <= 14 else ""
+            fop_lines.append(f"  · {d['kind']} {d['quarter']}: через {days} дн.{warn}")
+    except Exception:
+        pass
+
+    # Напоминания
+    rem_lines = []
+    try:
+        pending = list_pending(OWNER_ID)
+        for r in (pending or [])[:3]:
+            fire = (r.get("fire_at") or "")[:16].replace("T", " ")
+            txt = (r.get("text") or "")[:60]
+            rem_lines.append(f"  · {fire} — {txt}")
+    except Exception:
+        pass
+
+    day_names = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    date_str = f"{day_names[now.weekday()]}, {now.strftime('%d.%m.%Y')}"
+
+    lines = [
+        "☀️ *Утренний бриф*",
+        f"━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 {date_str}",
+        f"🌡 {weather}",
+        "",
+    ]
+    if fop_lines:
+        lines.append("📋 *ФОП дедлайны:*")
+        lines.extend(fop_lines)
+        lines.append("")
+    if rem_lines:
+        lines.append("🔔 *Ближайшие напоминания:*")
+        lines.extend(rem_lines)
+        lines.append("")
+    else:
+        lines.append("🔔 Напоминаний нет.")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("_Хорошего дня, Руслан!_ 🚕")
+
+    safe_send(chat_id, "\n".join(lines), markup)
+
+
+def _btn_ai_budget(chat_id):
+    """Краткая информация о бюджете ИИ и переменных."""
+    monthly = os.environ.get("MONTHLY_AI_BUDGET_USD", "")
+    daily = os.environ.get("DAILY_AI_BUDGET_USD", "")
+    backend = os.environ.get("LLM_BACKEND", "openai").lower()
+
+    cost_info = {
+        "openai":  "gpt-4o-mini ≈ $0.15/1M токенов входящих · $0.60/1M исходящих",
+        "grok":    "grok-3 — см. xai.com/pricing",
+        "gemini":  "gemini-flash ≈ бесплатный лимит + платный",
+        "llama":   "Бесплатно (локальный Ollama)",
+    }
+    lines = [
+        "💸 *Бюджет ИИ*\n",
+        f"Текущий бэкенд: *{backend}*",
+        f"Примерная стоимость: _{cost_info.get(backend, '─')}_",
+        "",
+    ]
+    if monthly:
+        lines.append(f"Месячный лимит: ${monthly} (MONTHLY_AI_BUDGET_USD)")
+    else:
+        lines.append("Месячный лимит: ─ _(не задан — добавь MONTHLY_AI_BUDGET_USD в .env)_")
+    if daily:
+        lines.append(f"Дневной лимит: ${daily} (DAILY_AI_BUDGET_USD)")
+    else:
+        lines.append("Дневной лимит: ─ _(не задан — добавь DAILY_AI_BUDGET_USD в .env)_")
+
+    lines.append("\n_Точный учёт расходов — в дашборде OpenAI/xAI/Google._")
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    safe_send(chat_id, "\n".join(lines), markup)
+
+
+def _btn_show_memory(chat_id):
+    """Показывает сохранённые факты из памяти."""
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    try:
+        text = format_for_display()
+        if not text or not text.strip():
+            text = "💾 Память пуста. Скажи «запомни что...» чтобы добавить факт."
+        safe_send(chat_id, text, markup)
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Ошибка чтения памяти: {e}", reply_markup=markup)
+
+
+def _jarvis_exit(chat_id):
+    """Выход из Jarvis Mode."""
+    jarvis_mode.discard(chat_id)
+    silence_mode.discard(chat_id)
+    bot.send_message(chat_id, "⚡ Jarvis отключён. До встречи, Руслан.", reply_markup=main_menu())
+
+
+# ══════════════════════════════════════════════════════════════════
+# конец блока Jarvis
+# ══════════════════════════════════════════════════════════════════
 
 def _btn_forget(chat_id):
     grok_history.pop(chat_id, None)
@@ -2284,5 +2715,16 @@ if __name__ == "__main__":
         try:
             bot.infinity_polling(timeout=10, long_polling_timeout=5)
         except Exception as e:
-            print(f"Ошибка polling: {e}. Перезапуск через 5 секунд...")
-            time.sleep(5)
+            err = str(e)
+            if "409" in err or "Conflict" in err:
+                print(
+                    "⛔ 409 CONFLICT: бот уже запущен в другом месте!\n"
+                    "   Telegram разрешает ОДИН активный polling на токен.\n"
+                    "   Останови бот на ПК ИЛИ останови Replit-воркфлоу — "
+                    "запускай только в одном месте.\n"
+                    "   Повтор через 30 секунд..."
+                )
+                time.sleep(30)
+            else:
+                print(f"Ошибка polling: {e}. Перезапуск через 5 секунд...")
+                time.sleep(5)

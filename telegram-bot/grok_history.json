@@ -2,118 +2,6 @@
   "7959647798": [
     {
       "role": "user",
-      "content": "Привет"
-    },
-    {
-      "role": "assistant",
-      "content": "Привет, Руслан! Как дела? Что нужно?"
-    },
-    {
-      "role": "user",
-      "content": "Эй"
-    },
-    {
-      "role": "assistant",
-      "content": "Эй! Слушаю, что нужно?"
-    },
-    {
-      "role": "user",
-      "content": "Филатов Павел Олегович \nГород Сасово Рязанская область \nНайди родственников"
-    },
-    {
-      "role": "assistant",
-      "content": "Извини, у меня нет доступа к поиску людей или родственников. Это не моя область. Чем ещё могу помочь?"
-    },
-    {
-      "role": "user",
-      "content": "Ты тут?"
-    },
-    {
-      "role": "assistant",
-      "content": "Да, тут. Что нужно?"
-    },
-    {
-      "role": "user",
-      "content": "Сделай что бы это была твоя область или скажи как расширить твои возможности"
-    },
-    {
-      "role": "assistant",
-      "content": "Не могу я такое сделать, брат. Мои возможности жёстко ограничены твоим бизнесом и тем, что я уже умею. Расширить не получится."
-    },
-    {
-      "role": "user",
-      "content": "Филатов Павел Олегович \nГород Сасово Рязанская область \nНайди родственников"
-    },
-    {
-      "role": "assistant",
-      "content": "Уже говорил, не могу такое искать. Не в моих возможностях."
-    },
-    {
-      "role": "user",
-      "content": "Покажи список своих файлов."
-    },
-    {
-      "role": "assistant",
-      "content": "Сейчас покажу список файлов."
-    },
-    {
-      "role": "user",
-      "content": "Сколько стоит Audi A3 2011 года в России?"
-    },
-    {
-      "role": "assistant",
-      "content": "Хз, не в курсе актуальных цен. На Авито лучше проверить."
-    },
-    {
-      "role": "user",
-      "content": "Ну, как возьми, посмотри на Avito."
-    },
-    {
-      "role": "assistant",
-      "content": "Не могу это. Сам на Авито глянь."
-    },
-    {
-      "role": "user",
-      "content": "audio_data = base64.b64decode(response.choices[0].message.audio.data)\n        audio_bytes = io.BytesIO(audio_data)\n        audio_bytes.name = \"reply.opus\"\n        bot.send_voice(chat_id, audio_bytes)\n    except Exception as e:\n        print(f\"TTS ошибка: {e}\")\n\n# Последняя геопозиция пользователя\nlast_location = {}\n\n# Состояние ожидания ID таблицы / ввода родственников\nwaiting_for_sheet_id = {}\n\n# Состояние ожидания текста для звонка (worker)\nwaiting_for_call_msg = {}\n\n# Состояние звонка владельца\nwaiting_for_owner_call = {}\n\n# Ожидание адреса TRC20 кошелька\nwaiting_for_wallet = set()\n\n# Чаты, ожидающие голосового ответа\nvoice_request_chats: set = set()\n\n# История чата с Grok\nGROK_HISTORY_FILE = \"grok_history.json\"\n\ndef _load_grok_history() -> dict:\n    if os.path.exists(GROK_HISTORY_FILE):\n        try:\n            import json\n            with open(GROK_HISTORY_FILE) as f:\n                return {int(k): v for k, v in json.load(f).items()}\n        except Exception:\n            pass\n    return {}\n\ndef _save_grok_history():\n    import json\n    with open(GROK_HISTORY_FILE, \"w\", encoding=\"utf-8\") as f:\n        json.dump({str(k): v for k, v in grok_history.items()}, f, ensure_ascii=False, indent=2)\n\ngrok_history: dict = _load_grok_history()\n\n# Известные пользователи\nKNOWN_USERS_FILE = \"known_users.json\"\n\ndef _load_known_users() -> dict:\n    if os.path.exists(KNOWN_USERS_FILE):\n        try:\n            import json\n            with open(KNOWN_USERS_FILE) as f:\n                return {k: int(v) for k, v in json.load(f).items()}\n        except Exception:\n            pass\n    return {}\n\ndef _save_known_users():\n    import json\n    with open(KNOWN_USERS_FILE, \"w\", encoding=\"utf-8\") as f:\n        json.dump(known_users, f, ensure_ascii=False, indent=2)\n\nknown_users: dict = _load_known_users()\n\n\ndef main_menu():\n    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)\n    markup.add(\"📞 Позвонить\",   \"🚕 Тоха\")\n    markup.add(\"📍 Геопозиция\",  \"📗 Таблицы\")\n    markup.add(\"💰 USDT крипто\", \"📊 Я Тигр\")\n    markup.add(\"📋 ФОП\",         \"🔍 Родственники\")\n    markup.add(\"🛣️ Маршрут\",     \"📝 Анкета\")\n    markup.add(\"🗑️ Забыть\")\n    return markup\n\n\ndef sheets_menu():\n    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)\n    markup.add(\"📊 Аналитика таблицы\", \"📋 Мои таблицы\")\n    markup.add(\"📖 Читать таблицу\", \"✏️ Записать в таблицу\")\n    markup.add(\"➕ Сохранить таблицу\", \"ℹ️ Инфо о таблице\")\n    markup.add(\"🔙 Назад\")\n    return markup\n\n\ndef toha_menu():\n    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)\n    markup.add(\"📍 Отправить гео Тохе\")\n    markup.add(\"💬 Написать Тохе SMS\")\n    markup.add(\"🔙 Назад\")\n    return markup\n\n\ndef driver_menu():\n    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)\n    markup.add(\"📍 Геопозиция Руслана\")\n    return markup\n\n\ndef worker_menu():\n    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)\n    markup.add(\"📞 Позвонить Руслану\")\n    markup.add(\"📊 Аналитика таблицы\")\n    markup.add(\"📋 Мои таблицы\")\n    return markup\n\n\ndef get_menu_for_role(role: str):\n    if role == \"driver\":\n        return driver_menu()\n    if role == \"worker\":\n        return worker_menu()\n    return main_menu()\n\n\ndef is_toha_geo_command(text: str) -> bool:\n    t = text.lower()\n    keywords = [\"отправь тоше\", \"отправь тохе\", \"скинь тоше\", \"скинь тохе\",\n                \"пошли тоше\", \"пошли тохе\", \"отправь гео тох\", \"скинь гео тох\",\n                \"тоха гео\", \"тоше гео\", \"тохе гео\"]\n    return any(k in t for k in keywords)\n\n\ndef _parse_action(reply: str) -> tuple[str | None, str | None, str]:\n    import re\n    stripped = reply.lstrip()\n    match = re.match(r\"^\\[ACTION:([^\\]]+)\\]\\s*\", stripped)\n    if not match:\n        return None, None, reply\n    tag_content = match.group(1)\n    text_after = reply[match.end():]\n    parts = tag_content.split(\":\", 1)\n    action_type = parts[0].strip()\n    action_param = parts[1].strip() if len(parts) > 1 else None\n    return action_type, action_param, text_after"
-    },
-    {
-      "role": "assistant",
-      "content": "Вижу код. Что с ним надо?"
-    },
-    {
-      "role": "user",
-      "content": "def run_async_search(last_name: str, city_name: str = None):\n    async def _search():\n        results = []\n        if not VK_TOKEN or \"ТВОЙ_\" in VK_TOKEN:\n            return [\"⚠️ На сервере не задан VK_API_TOKEN для глубокого OSINT-анализа.\"]\n            \n        url = \"https://api.vk.com/method/users.search\"\n        params = {\n            \"q\": last_name,\n            \"count\": 15,\n            \"fields\": \"bdate,city,connections\",\n            \"access_token\": VK_TOKEN,\n            \"v\": \"5.131\"\n        }\n        try:\n            async with aiohttp.ClientSession() as session:\n                async with session.get(url, params=params, timeout=8) as response:\n                    data = await response.json()\n                    if \"response\" in data:\n                        for item in data[\"response\"][\"items\"]:\n                            if city_name:\n                                user_city = item.get(\"city\", {}).get(\"title\", \"\").lower()\n                                if city_name.lower() not in user_city:\n                                    continue\n                            name = f\"{item.get('first_name')} {item.get('last_name')}\"\n                            vk_link = f\"https://vk.com/id{item.get('id')}\"\n                            bdate = item.get(\"bdate\", \"не указана\")\n                            results.append(f\"👤 {name}\\n📅 ДР: {bdate}\\n🔗 Ссылка: {vk_link}\")\n        except Exception as e:\n            return [f\"⚠️ Ошибка сети при парсинге OSINT графа: {e}\"]\n        return results\n\n    try:\n        loop = asyncio.get_event_loop()\n    except RuntimeError:\n        loop = asyncio.new_event_loop()\n        asyncio.set_event_loop(loop)\n    return loop.run_until_complete(_search())\n\n\ndef _handle_grok_action(chat_id: int, action_type: str, action_param: str | None):\n    if action_type == \"call_toha\":\n        toha_number = os.environ.get(\"TOHA_PHONE_NUMBER\", \"\")\n        if not toha_number:\n            bot.send_message(chat_id, \"⚠️ Номер Тохи не настроен.\")\n            return\n        msg = action_param or \"Руслан звонит тебе!\"\n        bot.send_message(chat_id, f\"📞 Звоню Тохе...\")\n        ok, info = make_call(toha_number, msg)\n        if ok:\n            bot.send_message(chat_id, f\"✅ Позвонил Тохе! Скажет: «{msg}»\")\n        else:\n            bot.send_message(chat_id, f\"❌ Ошибка звонка: {info}\")\n\n    elif action_type == \"sms_toha\":\n        toha_number = os.environ.get(\"TOHA_PHONE_NUMBER\", \"\")\n        msg = action_param or \"\"\n        if not toha_number:\n            bot.send_message(chat_id, \"⚠️ Номер Тохи не настроен в системе.\")\n        elif not msg:\n            bot.send_message(chat_id, \"⚠️ Текст SMS не указан — напиши что передать Тохе.\")\n        else:\n            sms_link = make_sms_link(toha_number, msg)\n            markup = types.InlineKeyboardMarkup()\n            markup.row(types.InlineKeyboardButton(\"📱 Открыть SMS для Тохи\", url=sms_link))\n            bot.send_message(chat_id, f\"💬 Нажми — откроется SMS с текстом:\\n«{msg}»\", reply_markup=markup)\n\n    elif action_type == \"usdt\":\n        address = action_param or \"\"\n        if not (address.startswith(\"T\") and len(address) == 34):\n            bot.send_message(chat_id, \"⚠️ Некорректный TRC20 адрес в запросе.\")\n            return\n        bot.send_message(chat_id, f\"🔍 Ищу USDT транзакции для {address}...\", parse_mode=\"Markdown\")\n        ok, txs, err = get_usdt_transactions(address, limit=50)\n        if not ok:\n            bot.send_message(chat_id, f\"❌ TronScan: {err}\")\n            return\n        if not txs:\n            bot.send_message(chat_id, \"📭 Транзакции USDT TRC20 не найдены.\")\n            return\n        balance = get_account_balance(address)\n        summary, _, _ = build_tx_summary(address, txs)\n        bot.send_message(chat_id, f\"💹 Баланс: *{balance}* | {len(txs)} транзакций — анализирую...\",\n                         parse_mode=\"Markdown\")\n        prompt = (\n            f\"Проанализируй транзакции USDT TRC20 кошелька, дай бизнес-аналитику на русском.\\n\\n\"\n            f\"{summary}\\n\\n\"\n            f\"1. Резюме активности\\n2. Топ контрагентов\\n3. Паттерны по времени\\n4."
-    },
-    {
-      "role": "assistant",
-      "content": "Вижу код для поиска в VK. Не могу такое добавить или использовать."
-    },
-    {
-      "role": "user",
-      "content": "send_message(chat_id, \"⚠️ Укажи номер факта. Например: забудь факт 2\")\n\n    elif action_type == \"forget_all_facts\":\n        clear_facts()\n        bot.send_message(chat_id, \"🗑️ Вся долгосрочная память очищена.\")\n\n    elif action_type == \"forget\":\n        grok_history.pop(chat_id, None)\n        _save_grok_history()\n        bot.send_message(chat_id, \"🗑️ История разговора очищена. Начинаем с чистого листа!\", reply_markup=main_menu())\n\n    elif action_type == \"remind\":\n        if not action_param or \"|\" not in action_param:\n            bot.send_message(chat_id, \"⚠️ Не удалось разобрать время напоминания. Попробуй уточнить.\")\n            return\n        dt_str, reminder_text = action_param.split(\"|\", 1)\n        dt_str = dt_str.strip()\n        reminder_text = reminder_text.strip()\n        try:\n            fire_at = datetime.strptime(dt_str, \"%Y-%m-%dT%H:%M\")\n        except ValueError:\n            bot.send_message(chat_id, f\"⚠️ Неверный формат даты: «{dt_str}». Попробуй ещё раз.\")\n            return\n        if fire_at <= _now_local():\n            bot.send_message(chat_id, \"⚠️ Время напоминания уже прошло. Укажи будущее время.\")\n            return\n        reminder = add_reminder(chat_id, reminder_text, fire_at)\n        friendly_time = fire_at.strftime(\"%d.%m.%Y в %H:%M\")\n        bot.send_message(chat_id, f\"⏰ Запомнил! Напомню тебе *{friendly_time}*:\\n_{reminder_text}_\",\n                         parse_mode=\"Markdown\")\n\n    elif action_type == \"list_reminders\":\n        pending = list_pending(chat_id)\n        if not pending:\n            bot.send_message(chat_id, \"⏰ Нет предстоящих напоминаний.\")\n        else:\n            lines = []\n            for r in pending:\n                try:\n                    fire_at = datetime.strptime(r[\"fire_at\"], \"%Y-%m-%dT%H:%M\")\n                    when = fire_at.strftime(\"%d.%m.%Y в %H:%M\")\n                except Exception:\n                    when = r.get(\"fire_at\", \"?\")\n                lines.append(f\"• {r.get('id','?')} — {when} — {r['text']}\")\n            bot.send_message(chat_id, \"⏰ *Предстоящие напоминания:*\\n\\n\" + \"\\n\".join(lines) +\n                             \"\\n\\n_Чтобы отменить, скажи «отмени напоминание <id>»._\",\n                             parse_mode=\"Markdown\")\n\n    elif action_type == \"show_code\":\n        _send_code_file(chat_id, action_param or \"\")\n\n    elif action_type == \"list_code\":\n        _send_code_list(chat_id)\n\n    elif action_type == \"cancel_reminder\":\n        reminder_id = (action_param or \"\").strip()\n        if not reminder_id:\n            bot.send_message(chat_id, \"⚠️ Не понял, какое напоминание отменить.\")\n            return\n        pending = list_pending(chat_id)\n        target = next((r for r in pending if r.get(\"id\") == reminder_id), None)\n        if not target:\n            bot.send_message(chat_id, f\"⚠️ Не нашёл активное напоминание с id {reminder_id}.\", parse_mode=\"Markdown\")\n            return\n        if cancel_reminder(reminder_id):\n            try:\n                fire_at = datetime.strptime(target[\"fire_at\"], \"%Y-%m-%dT%H:%M\")\n                when = fire_at.strftime(\"%d.%m.%Y в %H:%M\")\n            except Exception:\n                when = target.get(\"fire_at\", \"?\")\n            bot.send_message(chat_id, f\"🗑️ Отменил напоминание на *{when}*:\\n_{target.get('text','')}_\",\n                             parse_mode=\"Markdown\")\n        else:\n            bot.send_message(chat_id, f\"⚠️ Не удалось отменить напоминание {reminder_id}.\", parse_mode=\"Markdown\")\n\n\ndef _extract_remember_tags(text: str) -> tuple[list, str]:\n    \"\"\"Извлекает [REMEMBER:факт] и [ACTION:remember:факт] теги из текста.\"\"\"\n    import re\n    facts_r = re.findall(r\"\\[REMEMBER:([^\\]]+)\\]\", text, flags=re.IGNORECASE)\n    facts_a = re.findall(r\"\\[ACTION:remember:([^\\]]+)\\]\", text)\n    all_facts = facts_r + facts_a\n    clean = re.sub(r\"\\[REMEMBER:[^\\]]+\\]\\s*\", \"\", text, flags=re.IGNORECASE)\n    clean = re.sub(r\"\\[ACTION:remember:[^\\]]+\\]\\s*\", \"\", clean).strip()\n    return all_facts, clean\n\n\ndef _ask_grok_and_route(chat_id: int, text: str):"
-    },
-    {
-      "role": "assistant",
-      "content": "Вижу код обработчика. Что дальше с ним делать?"
-    },
-    {
-      "role": "user",
-      "content": "Риски\\n5. Итог\"\n        )\n        analysis = ask_grok(prompt, [])\n        safe_send(chat_id, f\"💰 *Аналитика USDT TRC20*\\n\\n{analysis}\", main_menu())\n\n    elif action_type == \"sheet_analytics\":\n        name = action_param or \"\"\n        sheet_id = find_sheet_id(name.lower())\n        if not sheet_id:\n            saved = list_sheets()\n            names = \"\\n\".join([f\"• {n}\" for n in saved.keys()]) if saved else \"нет\"\n            bot.send_message(chat_id, f\"⚠️ Таблица «{name}» не найдена.\\n\\nДоступные:\\n{names}\")\n            return\n        bot.send_message(chat_id, f\"🤖 Анализирую «{name}»...\")\n        bot.send_chat_action(chat_id, \"typing\")\n        result = analyze_sheet_with_ai(sheet_id)\n        safe_send(chat_id, result, reply_markup=main_menu())\n\n    elif action_type == \"sheets_list\":\n        saved = list_sheets()\n        inline = types.InlineKeyboardMarkup(row_width=1)\n        if saved:\n            for name, sid in saved.items():\n                url = f\"https://docs.google.com/spreadsheets/d/{sid}\"\n                inline.add(types.InlineKeyboardButton(f\"📄 {name.title()}\", url=url))\n        inline.add(types.InlineKeyboardButton(\"➕ Добавить таблицу\", callback_data=\"add_sheet\"))\n        text = \"📗 *Мои таблицы:*\" if saved else \"📗 Пока нет таблиц.\"\n        bot.send_message(chat_id, text, parse_mode=\"Markdown\", reply_markup=inline)\n\n    elif action_type == \"list_users\":\n        roles_data = list_roles()\n        if not known_users:\n            bot.send_message(chat_id, \"👥 Пока никто не запускал бота.\")\n        else:\n            role_names = {\"owner\": \"Владелец\", \"driver\": \"Водитель\", \"worker\": \"Работник\", \"guest\": \"Гость\"}\n            lines = [f\"• @{u} — {role_names.get(roles_data.get(str(uid), 'guest'), 'Гость')}\"\n                     for u, uid in known_users.items()]\n            bot.send_message(chat_id, \"👥 *Пользователи бота:*\\n\\n\" + \"\\n\".join(lines),\n                             parse_mode=\"Markdown\")\n\n    elif action_type == \"assign_role\":\n        if not action_param or \":\" not in action_param:\n            bot.send_message(chat_id, \"⚠️ Укажи @username и роль. Пример: назначь @toha водителем\")\n            return\n        username_raw, role = action_param.split(\":\", 1)\n        username = username_raw.lstrip(\"@\").lower().strip()\n        role = role.strip()\n        valid_roles = {\"driver\", \"worker\", \"guest\", \"owner\"}\n        if role not in valid_roles:\n            bot.send_message(chat_id, f\"⚠️ Неверная роль «{role}». Допустимые: driver, worker, guest.\")\n            return\n        if username not in known_users:\n            bot.send_message(chat_id, f\"⚠️ @{username} ещё не запускал бота. Попроси его написать /start.\")\n            return\n        target_id = known_users[username]\n        grant_access(target_id)\n        set_role(target_id, role)\n        role_labels = {\"driver\": \"Водитель\", \"worker\": \"Работник\", \"guest\": \"Гость\", \"owner\": \"Владелец\"}\n        bot.send_message(chat_id, f\"✅ @{username} назначен как *{role_labels.get(role, role)}*.\",\n                         parse_mode=\"Markdown\")\n\n    elif action_type == \"remember\":\n        fact = action_param or \"\"\n        if fact:\n            added = add_fact(fact)\n            if added:\n                bot.send_message(chat_id, f\"🧠 Запомнил: «{fact}»\")\n\n    elif action_type == \"recall\":\n        facts = get_facts()\n        if not facts:\n            bot.send_message(chat_id, \"🧠 Пока ничего не запомнено. Скажи мне что запомнить!\")\n        else:\n            lines = \"\\n\".join(f\"{i + 1}. {f}\" for i, f in enumerate(facts))\n            bot.send_message(chat_id, f\"🧠 *Запомненные факты:*\\n\\n{lines}\", parse_mode=\"Markdown\")\n\n    elif action_type == \"forget_fact\":\n        try:\n            idx = int(action_param or \"0\") - 1\n            removed = delete_fact(idx)\n            if removed:\n                bot.send_message(chat_id, f\"🗑️ Забыл: «{removed}»\")\n            else:\n                facts = get_facts()\n                bot.send_message(chat_id, f\"⚠️ Нет факта с номером {(idx + 1)}. Всего запомнено: {len(facts)}.\")\n        except (ValueError, TypeError):\n            bot."
-    },
-    {
-      "role": "assistant",
-      "content": "Вижу кусок обработчика экшенов. Что с этим кодом делать?"
-    },
-    {
-      "role": "user",
-      "content": "\"\"\"Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ.\"\"\"\n    history = grok_history.get(chat_id, [])\n    memory_block = format_for_prompt()\n    now = _now_local()\n    date_line = f\"\\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{TZ_HOURS}, Украина).\\n\"\n    memory_block = date_line + memory_block\n    bot.send_chat_action(chat_id, \"typing\")\n    reply = ask_grok(text, history, memory_block=memory_block)\n\n    new_facts, reply_without_remember = _extract_remember_tags(reply)\n    remember_matches = []  \n    saved_count = 0\n    if chat_id == OWNER_ID:\n        for fact in new_facts:\n            if add_fact(fact.strip()):\n                saved_count += 1\n\n    action_type, action_param, clean_reply = _parse_action(reply_without_remember)\n\n    history.append({\"role\": \"user\", \"content\": text})\n    history.append({\"role\": \"assistant\", \"content\": clean_reply or reply_without_remember})\n    grok_history[chat_id] = history\n    _save_grok_history()\n\n    for fact in remember_matches:\n        add_fact(fact.strip())\n\n    is_voice = chat_id in voice_request_chats\n    if is_voice:\n        voice_request_chats.discard(chat_id)\n\n    if action_type == \"forget\":\n        _handle_grok_action(chat_id, action_type, action_param)\n        return  \n    if action_type:\n        _handle_grok_action(chat_id, action_type, action_param)\n\n    if clean_reply and clean_reply.strip():\n        if is_voice:\n            _tts_send_voice(chat_id, clean_reply)\n        safe_send(chat_id, clean_reply, main_menu())\n\n    if saved_count > 0:\n        noun = \"факт\" if saved_count == 1 else (\"факта\" if saved_count < 5 else \"фактов\")\n        bot.send_message(chat_id, f\"🧠 Запомнил {saved_count} {noun}.\")\n\n\ndef process_text(chat_id, text):\n    import re\n    t = text.strip()\n    tl = t.lower()\n\n    # ══════════════════════════════════════════════════════════════════\n    # 1. СОСТОЯНИЯ ОЖИДАНИЯ — мультишаговые диалоги\n    # ══════════════════════════════════════════════════════════════════\n\n    if chat_id in waiting_for_owner_call:\n        state = waiting_for_owner_call[chat_id]\n        if state[\"step\"] == \"number\":\n            number = re.sub(r\"[\\s\\-\\(\\)]\", \"\", t)\n            if not re.match(r\"^\\+?\\d{7,15}$\", number):\n                bot.send_message(chat_id, \"⚠️ Не похоже на номер. Напиши в формате +380XXXXXXXXX:\")\n                return\n            waiting_for_owner_call[chat_id] = {\"step\": \"message\", \"number\": number}\n            bot.send_message(chat_id, f\"✅ Номер: *{number}*\\n\\nЧто сказать голосом?\",\n                             parse_mode=\"Markdown\")\n            return\n        elif state[\"step\"] == \"message\":\n            number = state[\"number\"]\n            waiting_for_owner_call.pop(chat_id)\n            bot.send_message(chat_id, f\"📞 Звоню на {number}...\")\n            ok, info = make_call(number, t)\n            if ok:\n                bot.send_message(chat_id, f\"✅ Позвонил на *{number}*!\\nГолосом скажет: _{t}_\",\n                                 parse_mode=\"Markdown\", reply_markup=main_menu())\n            else:\n                bot.send_message(chat_id, f\"❌ Ошибка звонка: {info}\", reply_markup=main_menu())\n            return\n\n    if chat_id in waiting_for_sheet_id:\n        mode = waiting_for_sheet_id.pop(chat_id)\n        if mode == \"toha_sms\":\n            toha_number = os.environ.get(\"TOHA_PHONE_NUMBER\", \"\")\n            sms_link = make_sms_link(toha_number, t)\n            markup = types.InlineKeyboardMarkup()\n            markup.row(types.InlineKeyboardButton(\"📱 Открыть SMS и отправить Тохе\", url=sms_link))\n            bot.send_message(chat_id, f\"💬 Нажми — откроется SMS с текстом для Тохи:\\n«{t}»\",\n                             reply_markup=markup)\n        elif mode == \"relative_search\":\n            parts = t.split(maxsplit=1)\n            last_name = parts[0]\n            city = parts[1] if len(parts) > 1 else None\n            \n            status_msg = bot.send_message(chat_id, \"🔍 Подключаюсь к OSINT-графам и ищу совпадения...\")\n            res = run_async_search(last_name, city)\n            \n            if not res:\n                bot."
-    },
-    {
-      "role": "assistant",
-      "content": "Вижу, как поиск родственников через VK сделан. Что именно нужно поправить или добавить?"
-    },
-    {
-      "role": "user",
       "content": "send_message(chat_id, \"❌ По заданным критериям возможных родственников не обнаружено.\")\n            else:\n                out = \"📋 **Найденные связи и потенциальные родственники:**\\n\\n\" + \"\\n\\n\".join(res[:8])\n                safe_send(chat_id, out, main_menu())\n            return\n        else:\n            handle_sheet_command(chat_id, t, mode)\n        return\n\n    if chat_id in waiting_for_wallet:\n        waiting_for_wallet.discard(chat_id)\n        address = t\n        if not (address.startswith(\"T\") and len(address) == 34):\n            bot.send_message(chat_id,\n                             \"⚠️ Некорректный TRC20 адрес.\\nНажми *💰 USDT крипто* и попробуй снова.\",\n                             parse_mode=\"Markdown\")\n            return\n        _handle_grok_action(chat_id, \"usdt\", address)\n        return\n\n    # ══════════════════════════════════════════════════════════════════\n    # 1.5 ЯВНЫЕ КОМАНДЫ ПАМЯТИ\n    # ══════════════════════════════════════════════════════════════════\n\n    if chat_id == OWNER_ID:\n        remember_prefixes = [\n            \"запомни что \", \"запомни: \", \"запомни \",\n            \"сохрани что \", \"сохрани: \", \"сохрани факт \",\n            \"не забудь что \", \"не забудь: \",\n            \"запиши что \", \"запиши: \",\n        ]\n        for prefix in remember_prefixes:\n            if tl.startswith(prefix):\n                fact = t[len(prefix):].strip()\n                if fact:\n                    added = add_fact(fact)\n                    if added:\n                        bot.send_message(chat_id, f\"🧠 Запомнил: {fact}\",\n                                         reply_markup=main_menu())\n                    else:\n                        bot.send_message(chat_id, f\"🧠 Уже знаю это: {fact}\",\n                                         reply_markup=main_menu())\n                else:\n                    bot.send_message(chat_id, \"⚠️ Что именно запомнить?\")\n                return\n\n    # ══════════════════════════════════════════════════════════════════\n    # 2. ТОЧНЫЕ МЕТКИ КНОПОК МЕНЮ — UI-навигация\n    # ══════════════════════════════════════════════════════════════════\n\n    BUTTON_LABELS = {\n        \"📞 позвонить\": lambda: _btn_call(chat_id),\n        \"🚕 тоха\": lambda: bot.send_message(chat_id, \"🚕 Что делаем с Тохой?\", reply_markup=toha_menu()),\n        \"📍 геопозиция\": lambda: bot.send_message(chat_id, \"📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция\"),\n        \"📗 таблицы\": lambda: _btn_sheets(chat_id),\n        \"💰 usdt крипто\": lambda: _btn_usdt(chat_id),\n        \"📊 я тигр\": lambda: _ask_grok_and_route(chat_id, \"Сделай полную статистику по бизнесу Я Тигр\"),\n        \"📋 фоп\": lambda: _show_tax_calendar(chat_id),\n        \"/налоги\": lambda: _show_tax_calendar(chat_id),\n        \"налоги\": lambda: _show_tax_calendar(chat_id),\n        \"🔍 родственники\": lambda: _btn_relatives(chat_id),\n        \"родословная\": lambda: _btn_relatives(chat_id),\n        \"поиск родственников\": lambda: _btn_relatives(chat_id),\n        \"🗑️ забыть\":"
     },
     {
@@ -167,6 +55,110 @@
     {
       "role": "assistant",
       "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "Эй"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "ПСС"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "ПСС"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "Эй"
+    },
+    {
+      "role": "assistant",
+      "content": "Да, что-то нужно?"
+    },
+    {
+      "role": "user",
+      "content": "Ты живой"
+    },
+    {
+      "role": "assistant",
+      "content": "Да, живой! Что-то нужно?"
+    },
+    {
+      "role": "user",
+      "content": "Сделай полную статистику по бизнесу Я Тигр"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+    },
+    {
+      "role": "user",
+      "content": "Таблицы проверь"
+    },
+    {
+      "role": "assistant",
+      "content": "Сейчас проверю таблицы."
+    },
+    {
+      "role": "user",
+      "content": "Только мы"
+    },
+    {
+      "role": "assistant",
+      "content": "Понял, гляну только на ваши таблицы."
+    },
+    {
+      "role": "user",
+      "content": "Как день твой ?"
+    },
+    {
+      "role": "assistant",
+      "content": "Все нормально, спасибо! А у тебя как?"
+    },
+    {
+      "role": "user",
+      "content": "Живем"
+    },
+    {
+      "role": "assistant",
+      "content": "Это хорошо! Главное, чтобы все было в порядке. Как дела с бизнесом?"
+    },
+    {
+      "role": "user",
+      "content": "Позвонить можешь кому то ?"
+    },
+    {
+      "role": "assistant",
+      "content": "Да, кого позвонить?"
+    },
+    {
+      "role": "user",
+      "content": "Маршрут сделай до буковкой"
+    },
+    {
+      "role": "assistant",
+      "content": "Не могу это. Уточни, куда именно нужно проложить маршрут."
+    },
+    {
+      "role": "user",
+      "content": "Буковель"
+    },
+    {
+      "role": "assistant",
+      "content": "❌ Не могу это."
     }
   ]
 }
