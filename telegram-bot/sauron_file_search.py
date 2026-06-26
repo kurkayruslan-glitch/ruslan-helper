@@ -1357,41 +1357,162 @@ def build_xlsx_report(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# CSV запасной вариант
+# CSV / ZIP отчёт (основной экспорт)
 # ═════════════════════════════════════════════════════════════════════════════
+
+def _make_csv(headers: list[str], rows: list[list]) -> bytes:
+    """Один CSV-файл: UTF-8 BOM + точка-с-запятой (корректно открывается в Excel RU)."""
+    out = io.StringIO()
+    w   = csv.writer(out, delimiter=';', quoting=csv.QUOTE_ALL)
+    w.writerow(headers)
+    for row in rows:
+        w.writerow([str(v) if v is not None else '' for v in row])
+    return out.getvalue().encode('utf-8-sig')
+
+
+def _csv_people(persons: list[PersonRecord]) -> bytes:
+    headers = [
+        "Строка №", "Исходное ФИО", "Дата рождения", "Дата смерти",
+        "Найдено", "Найденное ФИО",
+        "Адреса", "Лучшие телефоны", "Email",
+        "ВКонтакте", "Одноклассники", "Другие соцсети",
+        "Есть в Максе", "Источник Макса",
+        "Источники", "Родственников найдено", "Ошибка / Комментарий",
+    ]
+    rows = []
+    for p in persons:
+        rows.append([
+            p.row_num, p.source_fio, p.dob, p.dod,
+            "Да" if p.found else "Нет", p.found_fio,
+            p.addresses, p.phones, p.emails,
+            p.vk, p.ok, p.other_social,
+            "Да" if p.in_maxim else "Нет", p.maxim_source,
+            p.sources[:300] if p.sources else '',
+            p.rel_count,
+            p.error or p.comment,
+        ])
+    return _make_csv(headers, rows)
+
+
+def _csv_relatives(relatives: list[RelativeRecord]) -> bytes:
+    headers = [
+        "Исходное ФИО", "Найденный человек",
+        "Родственник ФИО", "Дата рождения родственника",
+        "Прежняя / другая фамилия", "Тип родства / причина",
+        "Адрес родственника", "Действующие телефоны",
+        "Проверка номера",
+        "ВКонтакте", "Одноклассники", "Другие соцсети",
+        "Есть в Максе", "Источник Макса",
+        "Доказательство родства", "Уверенность", "Комментарий",
+    ]
+    rows = []
+    for r in relatives:
+        rows.append([
+            r.source_fio, r.main_fio,
+            r.fio, r.dob,
+            r.alt_fio, r.relation,
+            r.address, '; '.join(r.phones),
+            r.phone_note,
+            r.vk, r.ok, r.other_social,
+            "Да" if r.in_maxim else "Нет", r.maxim_source,
+            r.evidence, r.confidence, r.comment,
+        ])
+    return _make_csv(headers, rows)
+
+
+def _csv_phones(phones: list[PhoneCheck]) -> bytes:
+    headers = [
+        "Кому принадлежит", "Тип (основной / родственник)",
+        "Номер (нормализованный)", "Тип номера",
+        "Найден в Sauron", "Есть в Максе",
+        "Соцсети", "Свежие источники (2024-2026)",
+        "Статус", "Причина отбора / отброса",
+    ]
+    rows = []
+    for pc in phones:
+        is_mob = _is_mobile(pc.phone_norm)
+        rows.append([
+            pc.owner_fio, pc.owner_type,
+            pc.phone_norm,
+            "мобильный" if is_mob else "городской",
+            "Да" if pc.in_sauron else "Нет",
+            "Да" if pc.in_maxim else "Нет",
+            pc.social_links,
+            "Да" if pc.fresh_src else "Нет",
+            pc.status,
+            pc.reject_reason or ("Топ по скорингу" if pc.status == "действующий" else ""),
+        ])
+    return _make_csv(headers, rows)
+
+
+def _csv_errors(errors: list[ErrorRecord]) -> bytes:
+    headers = ["Строка №", "ФИО / Файл", "Тип ошибки", "Детали"]
+    rows = [[e.row_num, e.source_fio, e.error_type, e.detail] for e in errors]
+    return _make_csv(headers, rows)
+
+
+def build_zip_report(
+    persons:   list[PersonRecord],
+    relatives: list[RelativeRecord],
+    phones:    list[PhoneCheck],
+    errors:    list[ErrorRecord],
+    base_name: str = "sauron",
+) -> bytes:
+    """
+    Собирает ZIP-архив с 4 CSV-файлами:
+      people_summary.csv   — Итог по людям
+      relatives.csv        — Родственники
+      phone_checks.csv     — Проверка номеров
+      errors_limits.csv    — Ошибки и лимиты
+
+    Кодировка: UTF-8 BOM, разделитель «;» (корректно открывается в Excel RU).
+    """
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{base_name}_people_summary.csv",  _csv_people(persons))
+        zf.writestr(f"{base_name}_relatives.csv",       _csv_relatives(relatives))
+        zf.writestr(f"{base_name}_phone_checks.csv",    _csv_phones(phones))
+        zf.writestr(f"{base_name}_errors_limits.csv",   _csv_errors(errors))
+    return buf.getvalue()
+
 
 def build_csv_report(
     persons:   list[PersonRecord],
     relatives: list[RelativeRecord],
 ) -> bytes:
-    cols = [
-        "Исходное ФИО","Строка №","Дата рождения","Дата смерти","Найдено",
-        "Найденное ФИО","Адреса","Телефоны","Email","ВК","ОК",
-        "В Максе","Источник Макса","Источники","Родственников","Ошибка",
-        "Родств. ФИО","Родств. ДР","Прежняя фамилия","Тип родства",
-        "Адрес родств.","Тел. родств.","Родств. ВК","Родств. ОК",
-        "Родств. в Максе","Доказательство","Уверенность",
-    ]
-    out = io.StringIO()
-    w   = csv.writer(out, quoting=csv.QUOTE_ALL)
-    w.writerow(cols)
+    """Устаревший единый CSV (для обратной совместимости). Предпочитай build_zip_report."""
+    return _make_csv(
+        [
+            "Исходное ФИО", "Строка №", "Дата рождения", "Дата смерти", "Найдено",
+            "Найденное ФИО", "Адреса", "Телефоны", "Email", "ВК", "ОК",
+            "В Максе", "Источник Макса", "Источники", "Родственников", "Ошибка",
+            "Родств. ФИО", "Родств. ДР", "Прежняя фамилия", "Тип родства",
+            "Адрес родств.", "Тел. родств.", "Родств. ВК", "Родств. ОК",
+            "Родств. в Максе", "Доказательство", "Уверенность",
+        ],
+        _flat_rows(persons, relatives),
+    )
 
-    # persons без родственников
-    rel_by_source: dict[str, list[RelativeRecord]] = {}
+
+def _flat_rows(persons, relatives):
+    rel_by = {}
     for r in relatives:
-        rel_by_source.setdefault(r.source_fio.lower(), []).append(r)
-
+        rel_by.setdefault(r.source_fio.lower(), []).append(r)
+    rows = []
     for p in persons:
-        rels = rel_by_source.get(p.source_fio.lower(), [])
+        rels = rel_by.get(p.source_fio.lower(), [])
+        base = [
+            p.source_fio, p.row_num, p.dob, p.dod,
+            "Да" if p.found else "Нет", p.found_fio,
+            p.addresses, p.phones, p.emails, p.vk, p.ok,
+            "Да" if p.in_maxim else "Нет", p.maxim_source,
+            p.sources, p.rel_count, p.error or p.comment,
+        ]
         if rels:
             for r in rels:
-                w.writerow([
-                    p.source_fio, p.row_num, p.dob, p.dod,
-                    "Да" if p.found else "Нет", p.found_fio,
-                    p.addresses, p.phones, p.emails,
-                    p.vk, p.ok,
-                    "Да" if p.in_maxim else "Нет", p.maxim_source,
-                    p.sources, p.rel_count, p.error or p.comment,
+                rows.append(base + [
                     r.fio, r.dob, r.alt_fio, r.relation,
                     r.address, '; '.join(r.phones),
                     r.vk, r.ok,
@@ -1399,17 +1520,8 @@ def build_csv_report(
                     r.evidence, r.confidence,
                 ])
         else:
-            w.writerow([
-                p.source_fio, p.row_num, p.dob, p.dod,
-                "Да" if p.found else "Нет", p.found_fio,
-                p.addresses, p.phones, p.emails,
-                p.vk, p.ok,
-                "Да" if p.in_maxim else "Нет", p.maxim_source,
-                p.sources, p.rel_count, p.error or p.comment,
-                *([''] * 11),
-            ])
-
-    return out.getvalue().encode('utf-8-sig')
+            rows.append(base + [''] * 11)
+    return rows
 
 
 # ═════════════════════════════════════════════════════════════════════════════

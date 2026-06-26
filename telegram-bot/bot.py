@@ -2688,31 +2688,42 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
         base      = filename.rsplit('.', 1)[0]
         found_cnt = sum(1 for p in persons if p.found)
         rel_cnt   = len(relatives)
-        xlsx_bytes = sauron_file_search.build_xlsx_report(persons, relatives, phone_checks, errors)
+        caption_base = (
+            f"✅ Найдено: {found_cnt} / {len(persons)} чел.\n"
+            f"👨‍👩‍👧 Родственников: {rel_cnt}"
+            + (f"\n⚠️ Пропущено: {skipped}" if skipped else "")
+        )
+
+        # ── Основной формат: ZIP с 4 CSV ──────────────────────────────────
+        zip_bytes = sauron_file_search.build_zip_report(
+            persons, relatives, phone_checks, errors, base_name=base,
+        )
+        zip_bio = io.BytesIO(zip_bytes)
+        zip_bio.name = base + "_sauron.zip"
+        bot.send_document(
+            chat_id, zip_bio,
+            caption=(
+                f"📦 Отчёт «{filename}» — CSV архив (4 файла)\n"
+                + caption_base
+                + "\n\n📂 Внутри архива:\n"
+                "  • people_summary.csv — итог по людям\n"
+                "  • relatives.csv — родственники\n"
+                "  • phone_checks.csv — номера\n"
+                "  • errors_limits.csv — ошибки"
+            ),
+            reply_markup=markup,
+        )
+
+        # ── Опционально: XLSX если openpyxl доступен ──────────────────────
+        xlsx_bytes = sauron_file_search.build_xlsx_report(
+            persons, relatives, phone_checks, errors,
+        )
         if xlsx_bytes:
-            report_name = base + "_sauron.xlsx"
-            bio = io.BytesIO(xlsx_bytes)
-            bio.name = report_name
-            caption = (
-                f"📊 Отчёт «{filename}» — 4 листа\n"
-                f"✅ Найдено: {found_cnt} / {len(persons)} чел.\n"
-                f"👨‍👩‍👧 Родственников: {rel_cnt}"
-                + (f"\n⚠️ Пропущено: {skipped}" if skipped else "")
-            )
-            bot.send_document(chat_id, bio, caption=caption, reply_markup=markup)
-        else:
-            csv_bytes = sauron_file_search.build_csv_report(persons, relatives)
-            report_name = base + "_sauron.csv"
-            bio = io.BytesIO(csv_bytes)
-            bio.name = report_name
+            xlsx_bio = io.BytesIO(xlsx_bytes)
+            xlsx_bio.name = base + "_sauron.xlsx"
             bot.send_document(
-                chat_id, bio,
-                caption=(
-                    f"📊 Отчёт «{filename}»\n"
-                    f"✅ Найдено: {found_cnt} / {len(persons)} чел.\n"
-                    f"👨‍👩‍👧 Родственников: {rel_cnt}"
-                ),
-                reply_markup=markup,
+                chat_id, xlsx_bio,
+                caption=f"📊 То же — в XLSX (4 листа, для удобного просмотра)\n" + caption_base,
             )
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
