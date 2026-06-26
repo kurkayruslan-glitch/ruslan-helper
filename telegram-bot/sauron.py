@@ -1,61 +1,56 @@
-"""Интеграция с sauron.info.
+"""Интеграция с sauron.info API.
 
-Приоритет авторизации:
-  1. SAURON_API_KEY  — API-ключ → Authorization: Bearer {key}  (основной путь)
-  2. SAURON_USERNAME + SAURON_PASSWORD — сессионная авторизация через форму (fallback)
+Авторизация: query-параметр ?token={SAURON_API_KEY} (единственный рабочий формат).
+Поиск:  POST /api/v1/search  — form-data  query={запрос}
+Баланс: GET  /api/v1/balance
 
-SAURON_API_URL — переопределяет базовый URL API (по умолчанию https://sauron.info/api/v1).
+Все credentials только из переменных окружения. Не хранить и не выводить.
 
-Секреты берутся ТОЛЬКО из переменных окружения.
-Никакие credentials не попадают в логи, сообщения или код.
+Fallback (если нет API-ключа): сессионная авторизация через форму
+  SAURON_USERNAME + SAURON_PASSWORD
 """
 import os
 import re
 import time
 import requests
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
-# ── Опциональный HTML-парсер ──────────────────────────────────────────────────
 try:
     from bs4 import BeautifulSoup
     _HAS_BS4 = True
-except Exception:
+except ImportError:
     _HAS_BS4 = False
 
 # ── Константы ────────────────────────────────────────────────────────────────
 _SITE_BASE   = "https://sauron.info"
-_API_V1      = "https://sauron.info/api/v1"   # переопределяется через SAURON_API_URL
-_TIMEOUT     = 15  # секунд
+_API_DEFAULT = "https://sauron.info/api/v1"
+_TIMEOUT     = 15
 
-_SITE_HEADERS = {
+_BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     ),
     "Accept-Language": "ru-RU,ru;q=0.9,uk;q=0.8,en;q=0.7",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Origin": _SITE_BASE,
-    "Referer": _SITE_BASE + "/login",
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
 _API_HEADERS = {
     "User-Agent": "RuslanHelperBot/1.0",
     "Accept": "application/json",
-    "Content-Type": "application/json",
 }
 
-# ── Кеш сессии (fallback-режим) ───────────────────────────────────────────────
-_session_cache: dict = {}   # {username: (session, timestamp)}
-_SESSION_TTL = 30 * 60      # 30 минут
+# Кеш сессии для fallback
+_session_cache: dict = {}
+_SESSION_TTL = 30 * 60
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Helpers — чтение конфигурации
+# Конфигурация
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _api_base() -> str:
-    """Возвращает базовый URL API (из SAURON_API_URL или дефолт)."""
-    return os.environ.get("SAURON_API_URL", "").rstrip("/") or _API_V1
+    return os.environ.get("SAURON_API_URL", "").rstrip("/") or _API_DEFAULT
 
 
 def _api_key() -> str:
@@ -63,14 +58,12 @@ def _api_key() -> str:
 
 
 def _credentials() -> tuple[str, str]:
-    """Возвращает (username, password) из Secrets или ('', '')."""
     u = (os.environ.get("SAURON_USERNAME") or os.environ.get("SAURON_LOGIN") or "").strip()
     p = os.environ.get("SAURON_PASSWORD", "").strip()
     return u, p
 
 
 def _is_configured() -> bool:
-    """True если хотя бы один способ авторизации настроен."""
     if _api_key():
         return True
     u, p = _credentials()
@@ -78,62 +71,150 @@ def _is_configured() -> bool:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Путь 1 — API-ключ (Authorization: Bearer)
+# Путь 1 — API-ключ  (?token=KEY, form-data)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _api_request(method: str, endpoint: str, **kwargs) -> dict:
-    """
-    Выполняет запрос к API с Bearer-авторизацией.
-    Возвращает распакованный JSON или выбрасывает RuntimeError с человеческим сообщением.
-    Секреты не попадают в исключение.
-    """
+def _api_get(endpoint: str, extra_params: dict | None = None) -> dict:
+    """GET запрос к API. Возвращает result-часть ответа или бросает RuntimeError."""
     key = _api_key()
-    headers = {
-        **_API_HEADERS,
-        "Authorization": f"Bearer {key}",
-    }
+    params = {"token": key, **(extra_params or {})}
     url = f"{_api_base()}/{endpoint.lstrip('/')}"
-
     try:
-        resp = requests.request(method, url, headers=headers, timeout=_TIMEOUT, **kwargs)
+        resp = requests.get(url, headers=_API_HEADERS, params=params, timeout=_TIMEOUT)
+    except requests.exceptions.Timeout:
+        raise RuntimeError("sauron.info не ответил за 15 секунд.")
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError("Нет соединения с sauron.info.")
+    except Exception as e:
+        raise RuntimeError(f"Ошибка сети: {str(e)[:100]}")
+    return _parse_api_response(resp)
+
+
+def _api_post_search(query: str) -> dict:
+    """POST /search с form-data query=... Возвращает result или бросает RuntimeError."""
+    key = _api_key()
+    url = f"{_api_base()}/search"
+    try:
+        resp = requests.post(
+            url,
+            headers=_API_HEADERS,
+            params={"token": key},
+            data={"query": query},      # form-data, НЕ json
+            timeout=_TIMEOUT,
+        )
     except requests.exceptions.Timeout:
         raise RuntimeError("sauron.info не ответил за 15 секунд — попробуй позже.")
     except requests.exceptions.ConnectionError:
-        raise RuntimeError("Нет соединения с sauron.info — проверь интернет.")
+        raise RuntimeError("Нет соединения с sauron.info.")
     except Exception as e:
-        raise RuntimeError(f"Ошибка сети: {str(e)[:120]}")
+        raise RuntimeError(f"Ошибка сети: {str(e)[:100]}")
+    return _parse_api_response(resp)
 
-    # Парсим JSON-ответ в стиле Telegram Bot API
+
+def _parse_api_response(resp: requests.Response) -> dict:
+    """Разбирает JSON-ответ API и возвращает result. Бросает RuntimeError при ошибке."""
     try:
         data = resp.json()
     except Exception:
         raise RuntimeError(f"Сервер вернул не JSON (HTTP {resp.status_code}).")
 
     if data.get("ok"):
-        return data.get("result", data)
+        return data.get("result", {})
 
     code = data.get("error_code", resp.status_code)
     desc = data.get("description", "Неизвестная ошибка")
 
-    # Человеческие сообщения по кодам
     if code in (401, 403):
         raise RuntimeError(
-            "Неверный SAURON_API_KEY или доступ запрещён. "
-            "Проверь ключ в Replit Secrets."
+            "Неверный SAURON_API_KEY или доступ запрещён — проверь ключ в Replit Secrets."
         )
     if code == 402:
         raise RuntimeError(
-            "Недостаточно средств на балансе Sauron. "
-            "Пополни аккаунт на sauron.info."
+            "Недостаточно средств на балансе Sauron — пополни аккаунт на sauron.info."
+        )
+    if code == 1002:
+        raise RuntimeError(
+            "Пустой поисковый запрос — укажи что искать."
         )
     if code == 429:
-        raise RuntimeError("Слишком много запросов — подожди немного и попробуй снова.")
+        raise RuntimeError("Слишком много запросов — подожди немного.")
     if code == 404:
         raise RuntimeError(
-            f"Метод '{endpoint}' не найден на API. "
-            "Уточни SAURON_API_URL или документацию."
+            f"Метод не найден. Уточни SAURON_API_URL. Последняя ошибка: {desc}"
         )
     raise RuntimeError(f"API ошибка {code}: {desc}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Форматирование результатов API
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Порядок отображения полей в ответе
+_FIELD_ORDER = [
+    "ФИО", "Фамилия", "Имя", "Отчество",
+    "Телефон", "Телефон2", "Телефон3",
+    "День рождения", "Дата рождения",
+    "Паспорт", "ИНН", "СНИЛС",
+    "Адрес", "Город", "Регион", "Страна",
+    "Email", "Организация", "Должность",
+    "Связь с лицом", "Источник",
+]
+
+_FIELD_ICONS = {
+    "ФИО": "👤", "Фамилия": "👤", "Имя": "👤", "Отчество": "👤",
+    "Телефон": "📱", "Телефон2": "📱", "Телефон3": "📱",
+    "День рождения": "🎂", "Дата рождения": "🎂",
+    "Паспорт": "🪪", "ИНН": "🔢", "СНИЛС": "🔢",
+    "Адрес": "🏠", "Город": "🏙️", "Регион": "📍", "Страна": "🌍",
+    "Email": "📧", "Организация": "🏢", "Должность": "💼",
+    "Связь с лицом": "🔗", "Источник": "📂",
+}
+
+
+def _format_record(record: dict, idx: int) -> str:
+    """Форматирует одну запись из result.response."""
+    lines = [f"*{idx}.*"]
+
+    # Сначала поля в нашем порядке
+    shown = set()
+    for field in _FIELD_ORDER:
+        val = record.get(field)
+        if val and str(val).strip():
+            icon = _FIELD_ICONS.get(field, "▪️")
+            lines.append(f"  {icon} *{field}:* {val}")
+            shown.add(field)
+
+    # Остальные поля которых не было в нашем списке
+    for field, val in record.items():
+        if field not in shown and val and str(val).strip():
+            lines.append(f"  ▪️ *{field}:* {val}")
+
+    return "\n".join(lines)
+
+
+def _format_api_result(result: dict, query: str) -> str:
+    """Форматирует результат API в Markdown для Telegram."""
+    records = result.get("response", [])
+    balance = result.get("balance", "")
+
+    if not records:
+        return f"По запросу «{query}» ничего не найдено."
+
+    parts = []
+    for i, rec in enumerate(records[:20], 1):
+        parts.append(_format_record(rec, i))
+
+    text = "\n\n".join(parts)
+    if len(records) > 20:
+        text += f"\n\n_…ещё {len(records) - 20} записей (показаны первые 20)_"
+
+    if balance:
+        text += f"\n\n💰 _Остаток баланса: {balance}_"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n…_(обрезано)_"
+
+    return text
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -142,31 +223,26 @@ def _api_request(method: str, endpoint: str, **kwargs) -> dict:
 
 def _make_session() -> requests.Session:
     s = requests.Session()
-    s.headers.update(_SITE_HEADERS)
+    s.headers.update(_BROWSER_HEADERS)
     return s
 
 
 def _login_session(username: str, password: str) -> tuple[requests.Session | None, str]:
-    """Авторизуется через веб-форму. Возвращает (session, error_msg)."""
     s = _make_session()
     try:
         s.get(_SITE_BASE + "/login", timeout=_TIMEOUT)
     except Exception as e:
-        return None, f"Не удалось открыть sauron.info: {str(e)[:100]}"
-
+        return None, f"Не удалось открыть sauron.info: {str(e)[:80]}"
     try:
         resp = s.post(
             _SITE_BASE + "/user/authenticateUser",
             data={"login": username, "password": password},
-            timeout=_TIMEOUT,
-            allow_redirects=True,
+            timeout=_TIMEOUT, allow_redirects=True,
         )
     except requests.exceptions.Timeout:
         return None, "Сайт не ответил за 15 секунд."
-    except requests.exceptions.ConnectionError:
-        return None, "Нет соединения с sauron.info."
     except Exception as e:
-        return None, f"Ошибка сети: {str(e)[:100]}"
+        return None, f"Ошибка сети: {str(e)[:80]}"
 
     final_path = urlparse(resp.url).path.rstrip("/")
     if final_path in ("/login", "/user/authenticateUser", ""):
@@ -179,19 +255,17 @@ def _login_session(username: str, password: str) -> tuple[requests.Session | Non
                     err = el.get_text(strip=True)
                     break
         return None, err
-
     return s, ""
 
 
 def _get_session() -> tuple[requests.Session | None, str]:
-    """Возвращает кешированную сессию или создаёт новую."""
     username, password = _credentials()
     if not username or not password:
         return None, (
-            "Не настроен ни API-ключ, ни логин/пароль.\n\n"
-            "Добавь в Replit Secrets одно из:\n"
-            "• SAURON_API_KEY — API-ключ (рекомендуется)\n"
-            "• SAURON_USERNAME + SAURON_PASSWORD — логин и пароль"
+            "Sauron не настроен.\n\n"
+            "Добавь в Replit Secrets:\n"
+            "• SAURON_API_KEY — API-ключ _(рекомендуется)_\n"
+            "• или SAURON_USERNAME + SAURON_PASSWORD"
         )
     cached = _session_cache.get(username)
     if cached:
@@ -206,114 +280,49 @@ def _get_session() -> tuple[requests.Session | None, str]:
 
 
 def _session_search(sess: requests.Session, query: str) -> str:
-    """Поиск через веб-сессию (fallback). Возвращает текст результата."""
-    # Сначала пробуем API v1 через сессионные cookies
-    try:
-        url = f"{_api_base()}/search"
-        resp = sess.post(url, json={"query": query}, timeout=_TIMEOUT)
-        try:
-            data = resp.json()
-            if data.get("ok") and data.get("result"):
-                return _format_api_result(data["result"], query)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    # Fallback — HTML-поиск на сайте
-    for candidate_path, param, method in [
-        ("/search",          "q",     "get"),
-        ("/persons/search",  "query", "post"),
-        ("/find",            "q",     "get"),
+    """Поиск через веб-сессию (fallback без API-ключа)."""
+    for path, param, method in [
+        ("/search", "q", "get"),
+        ("/persons/search", "query", "post"),
     ]:
         try:
-            url = _SITE_BASE + candidate_path
+            url = _SITE_BASE + path
             if method == "post":
                 resp = sess.post(url, data={param: query}, timeout=_TIMEOUT, allow_redirects=True)
             else:
                 resp = sess.get(url, params={param: query}, timeout=_TIMEOUT, allow_redirects=True)
-
-            # Если редирект на логин — сессия протухла
             if urlparse(resp.url).path.rstrip("/") == "/login":
-                return ""   # вызывающий код переавторизует
-
+                return ""
             if resp.status_code == 200 and len(resp.text) > 200:
                 return _parse_html(resp.text, query)
         except Exception:
             continue
-
-    return f"🔍 По запросу «{query}» ничего не найдено (HTML-fallback)."
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Форматирование результатов
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _format_api_result(result, query: str) -> str:
-    """Форматирует результат из API (dict/list) в читаемый текст."""
-    if not result:
-        return f"По запросу «{query}» ничего не найдено."
-
-    if isinstance(result, list):
-        lines = []
-        for i, item in enumerate(result[:15], 1):
-            if isinstance(item, dict):
-                parts = []
-                for key in ("name", "full_name", "phone", "address", "inn", "email", "info"):
-                    val = item.get(key)
-                    if val:
-                        parts.append(f"{key}: {val}")
-                lines.append(f"{i}. " + " | ".join(parts) if parts else f"{i}. {item}")
-            else:
-                lines.append(f"{i}. {item}")
-        text = "\n".join(lines)
-        if len(result) > 15:
-            text += f"\n…ещё {len(result) - 15} результатов"
-        return text
-
-    if isinstance(result, dict):
-        lines = []
-        for k, v in result.items():
-            if v and k not in ("id", "_id"):
-                lines.append(f"*{k}*: {v}")
-        return "\n".join(lines) or str(result)
-
-    return str(result)[:2000]
+    return f"По запросу «{query}» ничего не найдено (web-fallback)."
 
 
 def _parse_html(html: str, query: str) -> str:
-    """Парсит HTML страницы результатов."""
-    if not html.strip():
-        return f"По запросу «{query}» пустой ответ."
-
-    if _HAS_BS4:
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "head", "nav", "footer"]):
-            tag.decompose()
-        block = None
-        for sel in [".results", ".search-results", ".persons", ".items",
-                    "#results", "main", "article", ".content", ".list", "table"]:
-            el = soup.select_one(sel)
-            if el:
-                t = el.get_text(separator="\n", strip=True)
-                if len(t) > 50:
-                    block = t
-                    break
-        if not block:
-            body = soup.find("body")
-            block = body.get_text(separator="\n", strip=True) if body else soup.get_text(separator="\n", strip=True)
-        nav_words = {"войти", "выйти", "главная", "меню", "login", "logout", "home", "search", "найти", "назад"}
-        lines = [l.strip() for l in block.splitlines()
-                 if l.strip() and len(l.strip()) > 2 and l.strip().lower() not in nav_words]
-        if not lines:
-            return f"По запросу «{query}» ничего не найдено."
-        result = "\n".join(lines[:40])
-        return result[:3000] + ("…" if len(result) > 3000 else "")
-    else:
+    if not _HAS_BS4:
         clean = re.sub(r"<[^>]+>", " ", html)
-        clean = re.sub(r"\s{2,}", "\n", clean).strip()
-        lines = [l.strip() for l in clean.splitlines() if len(l.strip()) > 3]
-        return "\n".join(lines[:30])[:2500] or f"По запросу «{query}» ничего не найдено."
+        lines = [l.strip() for l in re.sub(r"\s{2,}", "\n", clean).splitlines() if len(l.strip()) > 3]
+        return "\n".join(lines[:30])[:2000]
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "head", "nav", "footer"]):
+        tag.decompose()
+    block = None
+    for sel in [".results", ".search-results", ".persons", ".items", "#results", "main", "article", "table"]:
+        el = soup.select_one(sel)
+        if el:
+            t = el.get_text(separator="\n", strip=True)
+            if len(t) > 50:
+                block = t
+                break
+    if not block:
+        body = soup.find("body")
+        block = body.get_text(separator="\n", strip=True) if body else ""
+    nav_words = {"войти", "выйти", "главная", "меню", "login", "logout", "home", "search", "найти"}
+    lines = [l.strip() for l in block.splitlines() if l.strip() and len(l.strip()) > 2 and l.strip().lower() not in nav_words]
+    result = "\n".join(lines[:40])
+    return result[:3000] + ("…" if len(result) > 3000 else "")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -332,56 +341,25 @@ def search(query: str) -> str:
     if not _is_configured():
         return (
             "🔍 *Sauron не настроен*\n\n"
-            "Добавь в Replit Secrets хотя бы одно из:\n"
+            "Добавь в Replit Secrets:\n"
             "• `SAURON_API_KEY` — API-ключ _(рекомендуется)_\n"
             "• `SAURON_USERNAME` + `SAURON_PASSWORD` — логин и пароль\n\n"
-            "После добавления перезапусти бота.\n"
-            "_Ключи и пароли в Telegram не присылай._"
+            "_Ключи в Telegram не присылай — только через Replit Secrets._"
         )
 
     header = f"🔍 *Sauron: «{query}»*\n{'━' * 22}\n"
 
     # ── Путь 1: API-ключ ──────────────────────────────────────────────────
-    key = _api_key()
-    if key:
-        # Пробуем наиболее вероятные endpoint-ы для поиска
-        search_endpoints = [
-            ("POST", "search",         {"query": query}),
-            ("POST", "search",         {"q": query}),
-            ("GET",  "search",         {"query": query}),
-            ("GET",  "search",         {"q": query}),
-            ("POST", "persons/search", {"query": query}),
-            ("POST", "find",           {"query": query}),
-        ]
-        last_err = ""
-        for method, ep, body in search_endpoints:
-            try:
-                if method == "POST":
-                    result = _api_request("POST", ep, json=body)
-                else:
-                    result = _api_request("GET", ep, params=body)
-                formatted = _format_api_result(result, query)
-                return header + formatted
-            except RuntimeError as e:
-                msg = str(e)
-                last_err = msg
-                # Если ошибка авторизации или баланс — не перебираем другие endpoints
-                if any(kw in msg for kw in ("API-ключ", "баланс", "запросов", "Secrets")):
-                    return f"🔍 Sauron\n\n⚠️ {msg}"
-                # 404 = endpoint не тот, пробуем следующий
-                continue
-            except Exception as e:
-                last_err = str(e)[:120]
-                continue
-
-        # Все стандартные endpoint-ы дали 404 — ключ рабочий, но endpoint неизвестен
-        return (
-            f"🔍 *Sauron: «{query}»*\n\n"
-            "⚠️ API-ключ настроен, но поисковый endpoint неизвестен.\n\n"
-            "Уточни документацию sauron.info и задай правильный URL через:\n"
-            "`SAURON_API_URL` в Replit Secrets\n\n"
-            f"_Последняя ошибка: {last_err}_"
-        )
+    if _api_key():
+        try:
+            result = _api_post_search(query)
+            formatted = _format_api_result(result, query)
+            return header + formatted
+        except RuntimeError as e:
+            msg = str(e)
+            return f"🔍 Sauron\n\n⚠️ {msg}"
+        except Exception as e:
+            return f"🔍 Sauron\n\n❌ Неожиданная ошибка: {str(e)[:150]}"
 
     # ── Путь 2: сессионная авторизация (fallback) ─────────────────────────
     sess, err = _get_session()
@@ -389,47 +367,78 @@ def search(query: str) -> str:
         return f"🔍 *Sauron*\n\n⚠️ {err}"
 
     result_text = _session_search(sess, query)
-
-    # Сессия протухла — одна попытка переавторизоваться
     if not result_text:
         username, _ = _credentials()
         _session_cache.pop(username, None)
         sess, err = _get_session()
         if err:
-            return f"🔍 *Sauron*\n\n⚠️ Сессия истекла, переавторизация не удалась: {err}"
+            return f"🔍 *Sauron*\n\n⚠️ Сессия истекла, не удалось переавторизоваться: {err}"
         result_text = _session_search(sess, query)
 
-    if not result_text:
-        return header + f"По запросу «{query}» ничего не найдено."
-
-    return header + result_text
+    return header + (result_text or f"По запросу «{query}» ничего не найдено.")
 
 
 def search_for_batch(query: str) -> tuple[bool, str, bool]:
     """
     Для пакетного поиска из файлов.
     Возвращает (success, result_text, stop_batch).
-    stop_batch=True — нужно остановить всю пачку (нет баланса, нет ключа, нет настройки).
+    stop_batch=True — нужно остановить всю пачку (нет баланса, нет ключа).
     """
-    result = search(query)
-    stop_keywords = ("баланс", "API-ключ", "Не настроен", "SAURON_API_KEY",
-                     "не настроен", "Replit Secrets", "API URL")
-    stop_batch = any(kw in result for kw in stop_keywords)
-    not_found_keywords = ("ничего не найдено", "пустой ответ", "⚠️", "❌")
-    found = not any(kw in result for kw in not_found_keywords)
-    return found, result, stop_batch
+    query = (query or "").strip()
+    if not query:
+        return False, "Пустой запрос", False
+
+    if not _is_configured():
+        return False, "Sauron не настроен — добавь SAURON_API_KEY в Replit Secrets.", True
+
+    if _api_key():
+        try:
+            result = _api_post_search(query)
+            records = result.get("response", [])
+            balance = result.get("balance", "")
+
+            # Проверяем баланс — если близко к нулю, предупреждаем
+            try:
+                bal_f = float(balance)
+                if bal_f < 1.0:
+                    stop = True
+                else:
+                    stop = False
+            except Exception:
+                stop = False
+
+            if not records:
+                return False, f"По запросу «{query}» ничего не найдено.", stop
+
+            formatted = _format_api_result(result, query)
+            return True, formatted, stop
+
+        except RuntimeError as e:
+            msg = str(e)
+            stop = any(kw in msg for kw in ("баланс", "Неверный", "API-ключ", "Secrets"))
+            return False, msg, stop
+        except Exception as e:
+            return False, str(e)[:150], False
+
+    # Fallback — сессионный поиск
+    try:
+        result_text = search(query)
+        found = "ничего не найдено" not in result_text and "⚠️" not in result_text
+        stop = any(kw in result_text for kw in ("не настроен", "Secrets", "баланс"))
+        return found, result_text, stop
+    except Exception as e:
+        return False, str(e)[:100], False
 
 
 def get_balance() -> str:
-    """Проверяет баланс через API (только если настроен API-ключ)."""
+    """Проверяет баланс через API."""
     if not _api_key():
         return "⚠️ Баланс доступен только через API-ключ (SAURON_API_KEY)."
     try:
-        result = _api_request("GET", "balance")
-        if isinstance(result, dict):
-            bal = result.get("balance") or result.get("amount") or result.get("credits")
-            if bal is not None:
-                return f"💰 Баланс Sauron: *{bal}*"
+        result = _api_get("balance")
+        bal = result.get("balance")
+        if bal is not None:
+            return f"💰 Баланс Sauron: *{bal}*"
         return f"💰 Баланс: {result}"
     except RuntimeError as e:
         return f"⚠️ {e}"
@@ -445,7 +454,6 @@ def status() -> str:
 
     if key:
         url_note = f" · URL: {api_url}" if api_url else ""
-        # Статус сессии-кеша не применим для API-режима
         return f"✅ API-ключ настроен{url_note}"
 
     if username and password:
@@ -459,7 +467,5 @@ def status() -> str:
 
     if username and not password:
         return "⚠️ SAURON_USERNAME задан, но SAURON_PASSWORD отсутствует"
-    if not username and password:
-        return "⚠️ SAURON_PASSWORD задан, но SAURON_USERNAME отсутствует"
 
     return "⚠️ Не настроен — добавь SAURON_API_KEY в Replit Secrets"

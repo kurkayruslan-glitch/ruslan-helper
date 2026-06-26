@@ -67,3 +67,4 @@ channel = "stable-25_05"
 
 [userenv.shared]
 RUSLAN_PHONE_NUMBER = "+380933129999"
+SAURON_API_KEY = "mAIBqpAoEVw1e79kfDoUNq4t35NeUzDnwIGA02VrmqCjZya72HPV51DjT83e4TPW"

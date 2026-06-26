@@ -2612,41 +2612,11 @@ def handle_voice(message):
             bot.send_message(chat_id, f"⚠️ {hint}")
 
 
-@bot.message_handler(content_types=['document'])
-def handle_document(message):
-    """Обрабатывает загруженные файлы — парсит и запускает поиск через Sauron."""
-    chat_id = message.chat.id
-    if not is_allowed(chat_id):
-        return
+def _run_file_sauron(chat_id: int, doc, filename: str):
+    """Скачивает файл, парсит, сразу запускает пакетный поиск — без подтверждения."""
+    msg = bot.send_message(chat_id, f"📄 Получил *{filename}* — извлекаю данные…", parse_mode="Markdown")
 
-    doc = message.document
-    filename = doc.file_name or "file"
-
-    # Если пользователь не в режиме ожидания файла и это не очевидный файл для Sauron —
-    # проверяем расширение, чтобы не перехватывать код/фото/архивы случайно
-    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-    supported_exts = {'txt', 'csv', 'xlsx', 'xls', 'docx', 'pdf'}
-
-    if chat_id not in waiting_for_file_sauron and ext not in supported_exts:
-        # Передаём управление дальше (обычный документ, не для Sauron)
-        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-        bot.send_message(
-            chat_id,
-            f"📎 Получил файл *{filename}*\n\n"
-            "Что с ним сделать?\n"
-            "• Для поиска через Sauron нажми *📁 Файл → Саурон*\n"
-            "• Поддерживаемые форматы: txt, csv, xlsx, xls, docx, pdf",
-            parse_mode="Markdown",
-            reply_markup=markup,
-        )
-        return
-
-    # Убираем из режима ожидания
-    waiting_for_file_sauron.discard(chat_id)
-
-    msg = bot.send_message(chat_id, f"📄 Получил *{filename}* — разбираю…", parse_mode="Markdown")
-
-    # Скачиваем файл
+    # Скачиваем
     try:
         file_info = bot.get_file(doc.file_id)
         data = bot.download_file(file_info.file_path)
@@ -2654,7 +2624,7 @@ def handle_document(message):
         bot.edit_message_text(f"❌ Не удалось скачать файл: {str(e)[:100]}", chat_id, msg.message_id)
         return
 
-    # Парсим файл
+    # Парсим
     try:
         records, parse_error = file_search.parse_file(data, filename)
     except Exception as e:
@@ -2663,28 +2633,60 @@ def handle_document(message):
 
     if parse_error:
         markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-        bot.edit_message_text(
-            f"📄 *{filename}*\n\n⚠️ {parse_error}",
-            chat_id, msg.message_id,
-            parse_mode="Markdown",
-        )
+        try:
+            bot.edit_message_text(f"📄 *{filename}*\n\n⚠️ {parse_error}", chat_id, msg.message_id, parse_mode="Markdown")
+        except Exception:
+            pass
         bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
         return
 
-    # Строим превью и показываем пользователю
-    summary = file_search.build_summary(records, filename)
-    file_sauron_pending[chat_id] = {"records": records, "filename": filename}
-
-    inline = types.InlineKeyboardMarkup(row_width=2)
-    inline.add(
-        types.InlineKeyboardButton("✅ Да, искать в Sauron", callback_data="filesauron_yes"),
-        types.InlineKeyboardButton("❌ Отмена",              callback_data="filesauron_no"),
-    )
+    n_phones = sum(1 for r in records if r['type'] == 'phone')
+    n_names  = sum(1 for r in records if r['type'] == 'name')
+    to_check = min(len(records), 50)
     try:
-        bot.delete_message(chat_id, msg.message_id)
+        bot.edit_message_text(
+            f"📄 *{filename}*\n\n"
+            f"📱 Телефонов: *{n_phones}*   👤 ФИО: *{n_names}*\n"
+            f"🔍 Проверяю {to_check} записей через Sauron…\n\n"
+            "⏳ _Это займёт немного времени…_",
+            chat_id, msg.message_id, parse_mode="Markdown",
+        )
     except Exception:
         pass
-    bot.send_message(chat_id, summary, parse_mode="Markdown", reply_markup=inline)
+
+    # Пакетный поиск — прогресс обновляется в этом же сообщении
+    try:
+        results, stop_reason = file_search.batch_search(records, chat_id, bot, msg.message_id)
+    except Exception as e:
+        try:
+            bot.edit_message_text(f"❌ Ошибка поиска: {str(e)[:200]}", chat_id, msg.message_id)
+        except Exception:
+            pass
+        return
+
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    short = file_search.build_short_summary(results, stop_reason)
+    try:
+        bot.edit_message_text(short, chat_id, msg.message_id, parse_mode="Markdown")
+    except Exception:
+        safe_send(chat_id, short, markup)
+
+    # CSV-отчёт если результатов много
+    if len(results) > 5:
+        try:
+            csv_bytes = file_search.build_csv_report(results)
+            report_name = filename.rsplit('.', 1)[0] + "_sauron_report.csv"
+            bio = io.BytesIO(csv_bytes)
+            bio.name = report_name
+            bot.send_document(
+                chat_id, bio,
+                caption=f"📊 Полный отчёт по «{filename}» — {len(results)} записей",
+                reply_markup=markup,
+            )
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:80]}", reply_markup=markup)
+    else:
+        bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
 
 
 def make_sms_link(phone: str, text: str) -> str:
@@ -2905,21 +2907,44 @@ def _backup_code_file(path: str) -> str | None:
 
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
+    """Единый обработчик документов.
+
+    Роутинг:
+    • csv / xlsx / xls / docx / pdf → всегда Sauron-поиск (автоматически)
+    • txt → Sauron если пользователь в режиме ожидания файла, иначе — код
+    • py / json / md  → загрузка кода (только владелец)
+    """
     chat_id = message.chat.id
-    if chat_id != OWNER_ID:
-        bot.send_message(chat_id, "📎 Файлы принимаю только от Руслана.")
+    if not is_allowed(chat_id):
         return
 
-    doc = message.document
-    raw_name = (doc.file_name or "").strip()
-    caption = (message.caption or "").strip()
-    target_name = caption if caption else raw_name
+    doc      = message.document
+    filename = (doc.file_name or "file").strip()
+    ext      = os.path.splitext(filename)[1].lower()
+
+    # ── Роутинг: Sauron ───────────────────────────────────────────────────
+    SAURON_EXTS = {'.csv', '.xlsx', '.xls', '.docx', '.pdf'}
+    is_sauron_mode = chat_id in waiting_for_file_sauron
+    is_sauron_ext  = ext in SAURON_EXTS
+    # .txt идёт в Sauron только если пользователь явно запросил
+    if is_sauron_ext or is_sauron_mode:
+        waiting_for_file_sauron.discard(chat_id)
+        _run_file_sauron(chat_id, doc, filename)
+        return
+
+    # ── Роутинг: загрузка кода (только владелец) ─────────────────────────
+    if chat_id != OWNER_ID:
+        # Не владелец, не Sauron-файл — молча игнорируем
+        return
+
+    caption     = (message.caption or "").strip()
+    target_name = caption if caption else filename
 
     if not target_name:
-        bot.send_message(chat_id, "❌ Нет имени файла. Пришли документ с именем или подпиши caption'ом нужное имя (например `grok.py`).")
+        bot.send_message(chat_id, "❌ Нет имени файла.")
         return
     if doc.file_size and doc.file_size > CODE_MAX_UPLOAD_BYTES:
-        bot.send_message(chat_id, f"❌ Файл слишком большой ({doc.file_size} байт). Лимит — {CODE_MAX_UPLOAD_BYTES // 1024} КБ.")
+        bot.send_message(chat_id, f"❌ Файл слишком большой. Лимит — {CODE_MAX_UPLOAD_BYTES // 1024} КБ.")
         return
 
     safe_name = os.path.basename(target_name).strip().lstrip(".")
@@ -2927,15 +2952,20 @@ def handle_document(message):
         bot.send_message(chat_id, f"❌ Плохое имя файла: `{target_name}`", parse_mode="Markdown")
         return
     if safe_name in CODE_DENYLIST:
-        bot.send_message(chat_id, f"❌ Этот файл я менять не буду: `{safe_name}` (приватные данные).", parse_mode="Markdown")
+        bot.send_message(chat_id, f"❌ Этот файл менять не буду: `{safe_name}` (приватные данные).", parse_mode="Markdown")
         return
-    ext = os.path.splitext(safe_name)[1].lower()
-    if ext not in CODE_ALLOWED_EXT:
-        allowed = ", ".join(sorted(CODE_ALLOWED_EXT))
-        bot.send_message(chat_id, f"❌ Расширение `{ext or '(нет)'}` не разрешено. Можно только: {allowed}", parse_mode="Markdown")
+    code_ext = os.path.splitext(safe_name)[1].lower()
+    if code_ext not in CODE_ALLOWED_EXT:
+        # Неизвестный формат от владельца — подсказываем про Sauron
+        if code_ext in {'.txt'}:
+            waiting_for_file_sauron.add(chat_id)
+            _run_file_sauron(chat_id, doc, filename)
+        else:
+            allowed = ", ".join(sorted(CODE_ALLOWED_EXT))
+            bot.send_message(chat_id, f"❌ Расширение `{code_ext or '(нет)'}` не разрешено для кода. Допустимо: {allowed}", parse_mode="Markdown")
         return
 
-    full_path = os.path.join(CODE_DIR, safe_name)
+    full_path  = os.path.join(CODE_DIR, safe_name)
     is_replace = os.path.isfile(full_path)
 
     try:
@@ -2945,7 +2975,7 @@ def handle_document(message):
         bot.send_message(chat_id, f"❌ Не смог скачать файл: {e}")
         return
 
-    if ext == ".py":
+    if code_ext == ".py":
         try:
             import ast as _ast
             _ast.parse(raw.decode("utf-8"))
@@ -2955,12 +2985,12 @@ def handle_document(message):
         except Exception as e:
             bot.send_message(chat_id, f"❌ Не смог разобрать как Python: {e}")
             return
-    elif ext == ".json":
+    elif code_ext == ".json":
         try:
             import json as _json
             _json.loads(raw.decode("utf-8"))
         except Exception as e:
-            bot.send_message(chat_id, f"❌ В `{safe_name}` невалидный JSON — не сохраняю:\n`{e}`", parse_mode="Markdown")
+            bot.send_message(chat_id, f"❌ Невалидный JSON — не сохраняю:\n`{e}`", parse_mode="Markdown")
             return
 
     backup_path = _backup_code_file(full_path) if is_replace else None
@@ -2976,12 +3006,12 @@ def handle_document(message):
 
     size = len(raw)
     verb = "Перезаписал" if is_replace else "Создал"
-    msg = f"✅ {verb} `{safe_name}` ({size} байт)."
+    out_msg = f"✅ {verb} `{safe_name}` ({size} байт)."
     if backup_path:
-        msg += f"\n💾 Старая версия в `{os.path.relpath(backup_path, CODE_DIR)}`"
-    if ext == ".py":
-        msg += "\n\n♻️ Чтобы изменения подхватились, перезапусти меня (workflow «Telegram Bot»)."
-    bot.send_message(chat_id, msg, parse_mode="Markdown")
+        out_msg += f"\n💾 Бэкап: `{os.path.relpath(backup_path, CODE_DIR)}`"
+    if code_ext == ".py":
+        out_msg += "\n\n♻️ Чтобы изменения подхватились, перезапусти бота (workflow «Telegram Bot»)."
+    bot.send_message(chat_id, out_msg, parse_mode="Markdown")
 
 
 @bot.callback_query_handler(func=lambda call: True)

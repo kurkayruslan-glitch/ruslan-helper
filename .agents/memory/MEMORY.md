@@ -1,2 +1,1 @@
-- [Voice STT/TTS setup](voice-tts.md) — whisper-1 + tts-1/onyx via openai_client; gpt-audio-mini did not exist.
-- [Bot night upgrade decisions](bot-upgrade-decisions.md) — key UX/safety patterns applied across the big upgrade.
+- [Sauron API format](sauron-api.md) — POST form-data ?token=KEY + data={query:...}; NOT Bearer/JSON/GET
