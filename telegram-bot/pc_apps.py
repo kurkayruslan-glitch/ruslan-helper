@@ -2,6 +2,8 @@
 
 Сканирует ярлыки (.lnk) в меню Пуск и на рабочем столе, чтобы найти
 программу по нечёткому совпадению («фотошоп» -> «Adobe Photoshop 2024»).
+Для приложений удалённого доступа (TeamViewer, AnyDesk) — проверяет
+стандартные пути установки напрямую, без ярлыков.
 Работает на Windows; на Mac/Linux — упрощённый fallback.
 """
 
@@ -13,6 +15,77 @@ import difflib
 
 IS_WINDOWS = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
+
+# ──────────────────────────────────────────────────────────────────
+# Прямые пути приложений удалённого доступа (не всегда есть ярлык)
+# ──────────────────────────────────────────────────────────────────
+
+def _expand(path: str) -> str:
+    return os.path.expandvars(os.path.expanduser(path))
+
+_REMOTE_APPS_DIRECT: dict[str, list[str]] = {
+    "teamviewer": [
+        r"C:\Program Files\TeamViewer\TeamViewer.exe",
+        r"C:\Program Files (x86)\TeamViewer\TeamViewer.exe",
+        _expand(r"%LOCALAPPDATA%\TeamViewer\TeamViewer.exe"),
+    ],
+    "anydesk": [
+        r"C:\Program Files (x86)\AnyDesk\AnyDesk.exe",
+        r"C:\Program Files\AnyDesk\AnyDesk.exe",
+        _expand(r"%APPDATA%\AnyDesk\AnyDesk.exe"),
+        _expand(r"%LOCALAPPDATA%\AnyDesk\AnyDesk.exe"),
+    ],
+}
+
+_REMOTE_APP_EXE: dict[str, str] = {
+    "teamviewer": "TeamViewer.exe",
+    "anydesk": "AnyDesk.exe",
+}
+
+# Нормализатор русских/вариантных названий → ключ _REMOTE_APPS_DIRECT
+_REMOTE_NAME_MAP: dict[str, str] = {
+    "teamviewer": "teamviewer",
+    "team viewer": "teamviewer",
+    "тимвьюер": "teamviewer",
+    "тим вьюер": "teamviewer",
+    "тим": "teamviewer",
+    "anydesk": "anydesk",
+    "any desk": "anydesk",
+    "аньдеск": "anydesk",
+    "ани деск": "anydesk",
+    "аниdesc": "anydesk",
+}
+
+
+def find_remote_app_path(name: str) -> str | None:
+    """Ищет исполняемый файл приложения удалённого доступа по прямым путям.
+    Возвращает путь к .exe если найден, иначе None.
+    Работает только на Windows; на других ОС всегда None."""
+    if not IS_WINDOWS:
+        return None
+    key = _REMOTE_NAME_MAP.get(name.strip().lower(), name.strip().lower())
+    for path in _REMOTE_APPS_DIRECT.get(key, []):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def is_remote_app_running(name: str) -> bool:
+    """Проверяет запущен ли процесс удалённого доступа (только Windows)."""
+    if not IS_WINDOWS:
+        return False
+    key = _REMOTE_NAME_MAP.get(name.strip().lower(), name.strip().lower())
+    exe = _REMOTE_APP_EXE.get(key, "")
+    if not exe:
+        return False
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+        return exe.lower() in out.lower()
+    except Exception:
+        return False
 
 
 # ---------- поиск ярлыков ----------
@@ -83,6 +156,14 @@ _ALIASES = {
     "файрфокс": "firefox",
     "опера": "opera",
     "эдж": "edge",
+    # удалённый доступ
+    "тимвьюер": "teamviewer",
+    "тим вьюер": "teamviewer",
+    "тим": "teamviewer",
+    "team viewer": "teamviewer",
+    "аньдеск": "anydesk",
+    "ани деск": "anydesk",
+    "any desk": "anydesk",
 }
 
 
@@ -115,6 +196,21 @@ def launch_app(name: str) -> str:
     if not name:
         return "❌ Не понял какую программу открыть."
 
+    # Шаг 1: для приложений удалённого доступа сначала ищем по прямым путям Windows
+    if IS_WINDOWS:
+        direct_path = find_remote_app_path(name)
+        if direct_path:
+            try:
+                os.startfile(direct_path)  # type: ignore[attr-defined]
+                app_display = os.path.splitext(os.path.basename(direct_path))[0]
+                return f"🚀 Запускаю {app_display}.\n_Путь: {direct_path}_"
+            except Exception as e:
+                return (
+                    f"❌ Нашёл {name} по пути {direct_path}, "
+                    f"но не смог запустить: {e}"
+                )
+
+    # Шаг 2: поиск по ярлыкам Start Menu / Desktop
     apps = _scan_apps()
     hit = _find_best(name, apps)
 
@@ -131,7 +227,7 @@ def launch_app(name: str) -> str:
         except Exception as e:
             return f"❌ Не получилось открыть «{title}»: {e}"
 
-    # Fallback: попробовать как команду shell (chrome, notepad, calc и т.д.)
+    # Шаг 3 (fallback Windows): cmd /c start
     if IS_WINDOWS:
         try:
             subprocess.Popen(
@@ -140,7 +236,22 @@ def launch_app(name: str) -> str:
             )
             return f"🚀 Пробую открыть «{name}» через системный поиск."
         except Exception as e:
+            # Если это приложение удалённого доступа — даём понятную подсказку
+            norm = _REMOTE_NAME_MAP.get(name.strip().lower(), "")
+            if norm in _REMOTE_APPS_DIRECT:
+                known_paths = "\n".join(
+                    f"• {p}" for p in _REMOTE_APPS_DIRECT[norm]
+                )
+                return (
+                    f"⚠️ {name} не найден ни в одном стандартном месте.\n\n"
+                    f"Проверил пути:\n{known_paths}\n\n"
+                    f"Что сделать:\n"
+                    f"1. Убедись что {name} установлен\n"
+                    f"2. Если установлен нестандартно — укажи путь через настройки бота\n"
+                    f"3. Скачать: teamviewer.com / anydesk.com"
+                )
             return f"❌ Не нашёл «{name}» среди установленных программ ({e})."
+
     return f"❌ Не нашёл «{name}» среди установленных программ."
 
 

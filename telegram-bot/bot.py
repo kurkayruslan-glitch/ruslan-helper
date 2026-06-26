@@ -155,29 +155,28 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
 
 
 def _tts_send_voice(chat_id: int, text: str):
-    """Конвертирует текст в голос через gpt-audio-mini и отправляет как голосовое сообщение."""
-    import re, base64
+    """Конвертирует текст в голос через OpenAI TTS и отправляет как голосовое сообщение."""
+    import re
     try:
         clean = re.sub(r"\[ACTION:[^\]]*\]", "", text)
-        clean = re.sub(r"[*_`#>]", "", clean).strip()
+        clean = re.sub(r"[*_`#>~]", "", clean).strip()
+        # Обрезаем если слишком длинный (лимит TTS ~4096 символов)
+        if len(clean) > 3800:
+            clean = clean[:3800] + "…"
         if not clean:
             return
-        response = openai_client.chat.completions.create(
-            model="gpt-audio-mini",
-            modalities=["text", "audio"],
-            audio={"voice": "onyx", "format": "opus"},
-            messages=[
-                {"role": "system", "content": "Прочитай текст вслух естественно и живо, по-русски."},
-                {"role": "user", "content": clean},
-            ],
+        response = openai_client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=clean,
+            response_format="opus",
         )
-        audio_data = base64.b64decode(response.choices[0].message.audio.data)
-        audio_bytes = io.BytesIO(audio_data)
-        audio_bytes.name = "reply.opus"
+        audio_bytes = io.BytesIO(response.content)
+        audio_bytes.name = "reply.ogg"
         bot.send_voice(chat_id, audio_bytes)
     except Exception as e:
         print(f"TTS ошибка: {e}")
-        # Graceful fallback — текстовый ответ уже будет отправлен
+        # Graceful fallback — текстовый ответ уже отправлен выше
 
 # Последняя геопозиция пользователя
 last_location = {}
@@ -268,32 +267,34 @@ known_users: dict = _load_known_users()
 
 
 def main_menu():
+    """Главное меню — красиво, чисто, без лишнего."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("📞 Позвонить",   "🚕 Тоха")
-    markup.add("📍 Геопозиция",  "📊 Я Тигр")
-    markup.add("📋 ФОП",         "🗑️ Забыть")
-    markup.add("🛣️ Маршрут",     "📝 Анкета")
-    markup.add("🤖 ИИ чат",      "⚡ Jarvis")
-    markup.add("💻 Мой ПК")
+    markup.add("⚡ Jarvis",       "🩺 Статус")
+    markup.add("💬 Поговорить",   "🎤 Голос")
+    markup.add("📞 Звонок",       "🏨 Бронирование")
+    markup.add("📋 Задачи",       "🚕 Тоха")
+    markup.add("💻 Мой ПК",       "🎮 Dota 2")
+    markup.add("📊 Я Тигр",       "📋 ФОП")
     return markup
 
 
 def ai_chat_menu():
-    """Клавиатура внутри режима ИИ-чата — только кнопка выхода."""
+    """Клавиатура внутри режима разговора — только выход."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add("🔙 Выйти из чата")
     return markup
 
 
 def jarvis_menu():
-    """Командный центр Jarvis — быстрые кнопки для всех функций."""
+    """Командный центр Jarvis — все функции под рукой."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("☀️ Бриф",        "🩺 Статус")
-    markup.add("📞 Позвонить",    "💬 ИИ чат")
-    markup.add("🧠 Память",       "📊 Таблицы")
-    markup.add("📋 ФОП",          "💸 Расход ИИ")
-    markup.add("🧠 Что ты умеешь?")
-    markup.add("💻 Мой ПК",          "🔙 Выйти из Jarvis")
+    markup.add("☀️ Бриф",          "🩺 Статус")
+    markup.add("💬 Поговорить",     "📞 Звонок")
+    markup.add("📋 Задачи",         "🧠 Память")
+    markup.add("📊 Таблицы",        "🚕 Тоха")
+    markup.add("💻 Мой ПК",         "🎮 Dota 2")
+    markup.add("📋 ФОП",            "💸 Расход ИИ")
+    markup.add("🧠 Что умею?",      "🔙 Выйти из Jarvis")
     return markup
 
 
@@ -762,17 +763,31 @@ def _ask_grok_and_route(chat_id: int, text: str):
     tz = _ukraine_tz_hours()
     date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{tz}, Украина).\n"
     memory_block = date_line + memory_block
-    # Jarvis mode — стиль уверенного личного ассистента
+    # Базовая личность — всегда активна
+    personality = (
+        "Ты — Jarvis, персональный ИИ-ассистент Руслана. "
+        "Руслан — украинец, владелец такси-бизнеса «Я Тигр» (Украина, 2024–2025). "
+        "Он занятой человек: управляет водителями, клиентами, финансами. "
+        "Общайся на русском языке, дружелюбно но чётко. "
+        "Без лишней воды, без извинений, без вступлений «Конечно!», «Отличный вопрос!». "
+        "Отвечай умно, коротко, по делу — как лучший друг и эксперт одновременно. "
+        "Если чего-то не знаешь — говори прямо и предлагай альтернативу. "
+        "Никогда не проси пароли, коды SMS, токены или личные данные. "
+    )
+    memory_block = "\n" + personality + "\n" + memory_block
+
+    # Jarvis mode — командный центр, ещё более чёткий стиль
     if chat_id in jarvis_mode:
         memory_block = (
-            "\n[РЕЖИМ: Jarvis — персональный командный центр Руслана]\n"
-            "Ты — умный личный ассистент. Отвечай коротко, уверенно, по делу.\n"
-            "Без воды, без вступлений, без лишних извинений.\n"
-            "Руслан — владелец такси-бизнеса «Я Тигр» в Украине.\n"
+            "[КОМАНДНЫЙ ЦЕНТР JARVIS АКТИВЕН]\n"
+            "Ты управляешь всеми функциями бота. "
+            "Отвечай как Iron Man's Jarvis: лаконично, умно, с уверенностью. "
+            "При необходимости сам предлагай следующий шаг. "
         ) + memory_block
+
     # Silence mode — только суть
     if chat_id in silence_mode:
-        memory_block += "\n[РЕЖИМ ТИШИНЫ]: Отвечай строго 1-2 предложения. Только суть."
+        memory_block += "\n[ТИШИНА]: Только факт или ответ. Максимум 2 предложения."
     bot.send_chat_action(chat_id, "typing")
     reply = ask_grok(text, history, memory_block=memory_block)
 
@@ -845,14 +860,36 @@ def process_text(chat_id, text):
             return
         elif state["step"] == "message":
             number = state["number"]
+            msg = t
+            # Показываем план и просим подтверждение ПЕРЕД реальным звонком
+            waiting_for_owner_call[chat_id] = {"step": "confirm", "number": number, "message": msg}
+            bot.send_message(
+                chat_id,
+                f"📞 *Готов позвонить*\n\n"
+                f"Номер: `{number}`\n"
+                f"Скажу: _{msg}_\n\n"
+                f"⚠️ Это *реальный звонок*. Подтвердить?\n"
+                f"Напиши *да* чтобы позвонить, *нет* чтобы отменить.",
+                parse_mode="Markdown",
+            )
+            return
+        elif state["step"] == "confirm":
+            number = state["number"]
+            message = state["message"]
             waiting_for_owner_call.pop(chat_id)
-            bot.send_message(chat_id, f"📞 Звоню на {number}...")
-            ok, info = make_call(number, t)
-            if ok:
-                bot.send_message(chat_id, f"✅ Позвонил на *{number}*!\nГолосом скажет: _{t}_",
-                                 parse_mode="Markdown", reply_markup=main_menu())
+            if tl.strip() in ("да", "yes", "давай", "подтверждаю", "звони", "ok", "ок"):
+                bot.send_message(chat_id, f"📞 Звоню на {number}...")
+                ok, info = make_call(number, message)
+                if ok:
+                    bot.send_message(
+                        chat_id,
+                        f"✅ Позвонил на *{number}*\nГолосом скажет: _{message}_",
+                        parse_mode="Markdown", reply_markup=main_menu(),
+                    )
+                else:
+                    bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
             else:
-                bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
+                bot.send_message(chat_id, "✅ Звонок отменён. Ничего не произошло.", reply_markup=main_menu())
             return
 
     # Ожидаем ввод для таблиц / SMS Тохе / роли
@@ -1006,59 +1043,69 @@ def process_text(chat_id, text):
         return
 
     BUTTON_LABELS = {
-        "📞 позвонить": lambda: _btn_call(chat_id),
-        "🚕 тоха": lambda: bot.send_message(chat_id, "🚕 Что делаем с Тохой?", reply_markup=toha_menu()),
-        "📍 геопозиция": lambda: bot.send_message(chat_id, "📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция"),
-        "📗 таблицы": lambda: _btn_sheets(chat_id),
-        "💰 usdt крипто": lambda: _btn_usdt(chat_id),
-        "📊 я тигр": lambda: _ask_grok_and_route(chat_id, "Сделай полную статистику по бизнесу Я Тигр"),
-        "📋 фоп": lambda: _show_tax_calendar(chat_id),
-        "/налоги": lambda: _show_tax_calendar(chat_id),
-        "/податки": lambda: _show_tax_calendar(chat_id),
-        "налоги": lambda: _show_tax_calendar(chat_id),
-        "податки": lambda: _show_tax_calendar(chat_id),
-        "🤖 ии чат": lambda: _btn_ai_chat(chat_id),
-        "⚡ jarvis": lambda: _btn_jarvis(chat_id),
-        "🩺 статус": lambda: _btn_status(chat_id),
-        "☀️ бриф": lambda: _btn_morning_brief(chat_id),
-        "🧠 что ты умеешь?": lambda: _btn_skills(chat_id),
-        "💸 расход ии": lambda: _btn_ai_budget(chat_id),
-        "🧠 память": lambda: _btn_show_memory(chat_id),
-        "📊 таблицы": lambda: _btn_sheets(chat_id),
-        "🔙 выйти из jarvis": lambda: (_jarvis_exit(chat_id)),
-        # ── Мой ПК ──────────────────────────────────────────────
-        "💻 мой пк": lambda: _btn_remote_access(chat_id),
-        "🖥 статус пк": lambda: _btn_remote_status(chat_id),
-        "🔑 id подключения": lambda: _btn_remote_ids(chat_id),
-        "🚀 запустить anydesk": lambda: _btn_remote_launch(chat_id, "AnyDesk"),
+        # ── Главное меню ─────────────────────────────────────────
+        "⚡ jarvis":             lambda: _btn_jarvis(chat_id),
+        "🩺 статус":             lambda: _btn_status(chat_id),
+        "💬 поговорить":         lambda: _btn_talk(chat_id),
+        "🎤 голос":              lambda: _btn_voice_help(chat_id),
+        "📞 звонок":             lambda: _btn_call(chat_id),
+        "📞 позвонить":          lambda: _btn_call(chat_id),       # legacy
+        "🏨 бронирование":       lambda: _btn_booking(chat_id),
+        "📋 задачи":             lambda: _btn_tasks(chat_id),
+        "🚕 тоха":               lambda: bot.send_message(chat_id, "🚕 Что делаем с Тохой?", reply_markup=toha_menu()),
+        "💻 мой пк":             lambda: _btn_remote_access(chat_id),
+        "🎮 dota 2":             lambda: _btn_dota(chat_id),
+        "📊 я тигр":             lambda: _ask_grok_and_route(chat_id, "Сделай полную статистику по бизнесу Я Тигр"),
+        "📋 фоп":                lambda: _show_tax_calendar(chat_id),
+        # ── Jarvis-меню ──────────────────────────────────────────
+        "☀️ бриф":               lambda: _btn_morning_brief(chat_id),
+        "📊 таблицы":            lambda: _btn_sheets(chat_id),
+        "🧠 память":             lambda: _btn_show_memory(chat_id),
+        "💸 расход ии":          lambda: _btn_ai_budget(chat_id),
+        "🧠 что умею?":          lambda: _btn_skills(chat_id),
+        "🧠 что ты умеешь?":     lambda: _btn_skills(chat_id),    # legacy
+        "🔙 выйти из jarvis":    lambda: _jarvis_exit(chat_id),
+        # ── Раздел «Мой ПК» ──────────────────────────────────────
+        "🖥 статус пк":          lambda: _btn_remote_status(chat_id),
+        "🔑 id подключения":     lambda: _btn_remote_ids(chat_id),
+        "🚀 запустить anydesk":  lambda: _btn_remote_launch(chat_id, "AnyDesk"),
         "🚀 запустить teamviewer": lambda: _btn_remote_launch(chat_id, "TeamViewer"),
         "🌐 chrome remote desktop": lambda: _btn_remote_crd(chat_id),
         "📖 инструкции по настройке": lambda: bot.send_message(
             chat_id, "📖 Выбери приложение:", reply_markup=remote_instructions_menu()),
-        "📖 anydesk — инструкция": lambda: _btn_remote_instructions(chat_id, "anydesk"),
+        "📖 anydesk — инструкция":    lambda: _btn_remote_instructions(chat_id, "anydesk"),
         "📖 teamviewer — инструкция": lambda: _btn_remote_instructions(chat_id, "teamviewer"),
         "📖 chrome remote desktop — инструкция": lambda: _btn_remote_instructions(chat_id, "crd"),
         "📄 журнал действий пк": lambda: _btn_remote_log(chat_id),
-        "🔒 безопасность": lambda: _btn_remote_safety(chat_id),
-        "🔙 назад к пк": lambda: _btn_remote_access(chat_id),
-        "🗑️ забыть": lambda: _btn_forget(chat_id),
-        "🛣️ маршрут": lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
-        "📝 анкета": lambda: _start_anketa(chat_id),
-        "анкета": lambda: _start_anketa(chat_id),
-        "/анкета": lambda: _start_anketa(chat_id),
-        "/anketa": lambda: _start_anketa(chat_id),
-        "/profile": lambda: _start_anketa(chat_id),
-        # Toha sub-menu
+        "🔒 безопасность":       lambda: _btn_remote_safety(chat_id),
+        "🔙 назад к пк":         lambda: _btn_remote_access(chat_id),
+        # ── Тоха под-меню ────────────────────────────────────────
         "📍 отправить гео тохе": lambda: _btn_geo_toha(chat_id),
-        "💬 написать тохе sms": lambda: _btn_sms_toha(chat_id),
-        # Sheets sub-menu
-        "📊 аналитика таблицы": lambda: _btn_analytics(chat_id),
-        "📋 мои таблицы": lambda: _btn_my_sheets(chat_id),
-        "➕ сохранить таблицу": lambda: _btn_save_sheet(chat_id),
-        "📖 читать таблицу": lambda: _btn_read_sheet(chat_id),
+        "💬 написать тохе sms":  lambda: _btn_sms_toha(chat_id),
+        # ── Таблицы под-меню ─────────────────────────────────────
+        "📊 аналитика таблицы":  lambda: _btn_analytics(chat_id),
+        "📋 мои таблицы":        lambda: _btn_my_sheets(chat_id),
+        "➕ сохранить таблицу":  lambda: _btn_save_sheet(chat_id),
+        "📖 читать таблицу":     lambda: _btn_read_sheet(chat_id),
         "✏️ записать в таблицу": lambda: _btn_write_sheet(chat_id),
-        "ℹ️ инфо о таблице": lambda: _btn_info_sheet(chat_id),
-        "🔙 назад": lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
+        "ℹ️ инфо о таблице":     lambda: _btn_info_sheet(chat_id),
+        # ── Разное ───────────────────────────────────────────────
+        "📍 геопозиция":         lambda: bot.send_message(chat_id, "📍 Отправь геопозицию — скрепка 📎 → Геопозиция"),
+        "💰 usdt крипто":        lambda: _btn_usdt(chat_id),
+        "🤖 ии чат":             lambda: _btn_talk(chat_id),       # legacy → новое название
+        "📗 таблицы":            lambda: _btn_sheets(chat_id),     # legacy
+        "🗑️ забыть":             lambda: _btn_forget(chat_id),
+        "🛣️ маршрут":            lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
+        "📝 анкета":             lambda: _start_anketa(chat_id),
+        "анкета":                lambda: _start_anketa(chat_id),
+        "/анкета":               lambda: _start_anketa(chat_id),
+        "/anketa":               lambda: _start_anketa(chat_id),
+        "/profile":              lambda: _start_anketa(chat_id),
+        "/налоги":               lambda: _show_tax_calendar(chat_id),
+        "/податки":              lambda: _show_tax_calendar(chat_id),
+        "налоги":                lambda: _show_tax_calendar(chat_id),
+        "податки":               lambda: _show_tax_calendar(chat_id),
+        "🔙 назад":              lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
     }
 
     label_key = tl.strip()
@@ -1119,28 +1166,37 @@ def _jarvis_system_status() -> str:
         "openai":  ("OPENAI_API_KEY", "AI_INTEGRATIONS_OPENAI_API_KEY"),
         "grok":    ("XAI_API_KEY",),
         "gemini":  ("GEMINI_API_KEY",),
-        "llama":   (),  # локальный, ключ не нужен
+        "llama":   (),
     }
     keys = key_map.get(backend, ())
-    ai_icon = "✅" if (not keys or any(os.environ.get(k) for k in keys)) else "⚠️"
-    lines.append(f"🧠 ИИ: *{backend}* {ai_icon}")
+    ai_ok = not keys or any(os.environ.get(k) for k in keys)
+    lines.append(f"🧠 ИИ: *{backend}* {'✅' if ai_ok else '⚠️ нет ключа'}")
+
+    # Голос/TTS (OpenAI Whisper + TTS)
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    lines.append(f"🎤 Голос (STT/TTS): {'✅' if tts_ok else '⚠️ нет OPENAI_API_KEY'}")
 
     # Звонки
     tw_ok = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
     tx_ok = all(os.environ.get(k) for k in ("TELNYX_API_KEY", "TELNYX_FROM_NUMBER"))
-    calls_str = " / ".join(filter(None, [
-        "Twilio ✅" if tw_ok else None,
-        "Telnyx ✅" if tx_ok else None,
-    ])) or "⚠️ не настроены"
-    lines.append(f"📞 Звонки: {calls_str}")
+    calls_str = " + ".join(filter(None, [
+        "Twilio" if tw_ok else None,
+        "Telnyx" if tx_ok else None,
+    ]))
+    lines.append(f"📞 Звонки: {('✅ ' + calls_str) if calls_str else '⚠️ не настроены'}")
 
-    # Голос/TTS
-    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
-    lines.append(f"🎤 Голос/TTS: {'✅' if tts_ok else '⚠️ нет ключа'}")
-
-    # SMS
+    # SMS Тоха
     sms_ok = bool(os.environ.get("TOHA_PHONE_NUMBER"))
-    lines.append(f"💬 SMS Тохе: {'✅' if sms_ok else '⚠️ нет номера'}")
+    lines.append(f"💬 SMS Тохе: {'✅' if sms_ok else '⚠️ нет TOHA_PHONE_NUMBER'}")
+
+    # Google Sheets
+    try:
+        from sheets import list_sheets
+        saved = list_sheets()
+        n = len(saved) if saved else 0
+        lines.append(f"📊 Google Sheets: {'✅ ' + str(n) + ' таблиц' if n else '✅ подключено (0 таблиц)'}")
+    except Exception:
+        lines.append("📊 Google Sheets: ⚠️ ошибка")
 
     # Память
     try:
@@ -1218,34 +1274,66 @@ def _btn_status(chat_id):
 
 def _btn_skills(chat_id):
     """Показывает список доступных функций — только включённые по ключам."""
-    lines = ["🧠 *Что я умею сейчас:*\n"]
+    lines = [
+        "🤖 *Jarvis — полный список возможностей*\n",
+        "💬 *Разговор и голос*",
+    ]
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    if tts_ok:
+        lines.append("  ✅ Свободный диалог на русском — текстом и голосом")
+        lines.append("  ✅ Голосовой ввод → Whisper AI → ответ голосом (TTS)")
+    else:
+        lines.append("  ✅ Свободный диалог на русском")
+        lines.append("  ⚠️ Голос/TTS: нужен OPENAI_API_KEY")
 
-    lines.append("✅ ИИ-чат (пиши/говори свободно)")
-    lines.append("✅ Память между сессиями")
-    lines.append("✅ Напоминания и календарь ФОП")
-    lines.append("✅ Google Sheets (читать, писать, анализировать)")
-    lines.append("✅ Утренний бриф (автоматически в 08:00)")
-    lines.append("✅ USDT TRC20 аналитика")
-    lines.append("✅ Геопозиция → SMS Тохе")
+    lines.append("\n🧠 *Память и контекст*")
+    try:
+        from memory import get_facts
+        n = len(get_facts())
+        lines.append(f"  ✅ Долгосрочная память — {n} фактов о тебе")
+    except Exception:
+        lines.append("  ✅ Долгосрочная память (SQLite)")
+    lines.append("  ✅ История разговора в рамках сессии")
 
+    lines.append("\n📋 *Бизнес «Я Тигр»*")
+    lines.append("  ✅ Статистика и аналитика бизнеса")
+    lines.append("  ✅ Google Sheets — читать, писать, анализировать")
+    lines.append("  ✅ Налоговый календарь ФОП + дедлайны")
+    lines.append("  ✅ Утренний бриф — автоматически в 08:00")
+    lines.append("  ✅ USDT TRC20 — аналитика кошелька")
+
+    lines.append("\n📞 *Звонки и коммуникация*")
     tw = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
     tx = all(os.environ.get(k) for k in ("TELNYX_API_KEY", "TELNYX_FROM_NUMBER"))
     if tw or tx:
         prov = "/".join(filter(None, ["Twilio" if tw else None, "Telnyx" if tx else None]))
-        lines.append(f"✅ Звонки ({prov}) с голосовым сценарием")
+        lines.append(f"  ✅ Звонки через {prov} — голосовой сценарий + подтверждение")
     else:
-        lines.append("⚠️ Звонки (не настроены — добавь TWILIO_* или TELNYX_*)")
+        lines.append("  ⚠️ Звонки: добавь TWILIO_* или TELNYX_* в Secrets")
+    sms_ok = bool(os.environ.get("TOHA_PHONE_NUMBER"))
+    lines.append(f"  {'✅' if sms_ok else '⚠️'} SMS Тохе{'✅' if sms_ok else ' (нет TOHA_PHONE_NUMBER)'}")
+    lines.append("  ✅ Геопозиция → отправка Тохе")
+    lines.append("  ✅ Бронирование (план → подтверждение → звонок)")
 
-    if os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"):
-        lines.append("✅ Голосовые ответы (TTS) и расшифровка голоса (STT)")
-    else:
-        lines.append("⚠️ Голос/TTS (нет OPENAI_API_KEY)")
+    lines.append("\n💻 *Удалённый доступ (Мой ПК)*")
+    lines.append("  ✅ TeamViewer / AnyDesk / Chrome Remote Desktop")
+    lines.append("  ✅ Поиск по прямым путям Windows + инструкции")
+    lines.append("  ✅ Статус ПК: CPU, RAM, диск")
+    lines.append("  🔒 Без кейлоггера, без паролей, без произвольных команд")
 
-    lines.append("✅ Управление ПК: запуск/закрытие программ, скриншот")
-    lines.append("✅ Поиск файлов на ПК")
-    lines.append("✅ Открыть сайт в браузере")
+    lines.append("\n🎮 *Dota 2 Coach*")
+    lines.append("  ✅ Герои, counter-pick, билды, мета 2024–2025")
+    lines.append("  ✅ Разбор ситуаций, советы по ролям")
 
-    lines.append("\n_Пиши запрос в свободной форме — всё понимаю._")
+    lines.append("\n🔔 *Задачи и напоминания*")
+    lines.append("  ✅ Голосовые и текстовые напоминания")
+    lines.append("  ✅ Проверка каждую минуту — ни одно не пропустит")
+
+    lines.append(
+        "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        "_Просто пиши или говори — всё понимаю._\n"
+        "_Если что-то не работает — жми «🩺 Статус»._"
+    )
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
     safe_send(chat_id, "\n".join(lines), markup)
 
@@ -1514,21 +1602,61 @@ def _btn_remote_ids(chat_id: int):
 
 
 def _btn_remote_launch(chat_id: int, app_name: str):
-    """Пробует запустить приложение удалённого доступа."""
+    """Запускает приложение удалённого доступа — сначала ищет по прямым путям Windows."""
     if not _remote_owner_check(chat_id):
         return
-    _log_remote(chat_id, f"запустил приложение: {app_name}")
+    _log_remote(chat_id, f"запрос запуска: {app_name}")
+
+    # ── Бот на Replit-сервере — проверяем статус, не запускаем ──
     if DEPLOYMENT_MODE == "production":
-        bot.send_message(
-            chat_id,
-            f"☁️ Бот работает на Replit-сервере и не может запустить {app_name} на твоём ПК.\n\n"
-            f"Чтобы запускать приложения удалённо:\n"
-            f"1. Установи {app_name} на свой ПК\n"
-            f"2. Открой его вручную или через ярлык\n"
-            f"3. Подключайся с телефона/другого устройства",
-            reply_markup=remote_access_menu(),
-        )
+        app_key = app_name.lower()
+        found_path = pc_apps.find_remote_app_path(app_key)
+        is_running = pc_apps.is_remote_app_running(app_key) if found_path else False
+        if found_path:
+            status = "🟢 запущен" if is_running else "🟡 установлен, но не запущен"
+            text = (
+                f"💻 *{app_name}*\n"
+                f"Статус: {status}\n"
+                f"Путь: `{found_path}`\n\n"
+                f"☁️ Бот работает на Replit — запускать приложения на *твоём ПК* он не может.\n\n"
+                f"Что сделать:\n"
+                f"• Открой {app_name} на ПК вручную (ярлык на рабочем столе)\n"
+                f"• Или запусти bot.py *локально* — тогда бот сможет запускать за тебя\n\n"
+                f"Подключайся с телефона/планшета через ID 👇"
+            )
+        else:
+            # Сообщаем куда скачать
+            download = {
+                "teamviewer": "https://teamviewer.com → Скачать",
+                "anydesk": "https://anydesk.com → Скачать",
+            }.get(app_key, "официальный сайт")
+            text = (
+                f"⚠️ *{app_name}* не найден по стандартным путям.\n\n"
+                f"Проверил:\n"
+                + "\n".join(
+                    f"• `{p}`"
+                    for p in pc_apps._REMOTE_APPS_DIRECT.get(app_key, [])
+                )
+                + f"\n\n"
+                f"📥 Установи: {download}\n"
+                f"После установки нажми эту кнопку снова — я найду автоматически."
+            )
+        bot.send_message(chat_id, text, parse_mode="Markdown",
+                         reply_markup=remote_access_menu())
         return
+
+    # ── Бот локально на ПК — запускаем напрямую ──
+    _log_remote(chat_id, f"запускаю локально: {app_name}")
+    found_path = pc_apps.find_remote_app_path(app_name)
+    is_running = pc_apps.is_remote_app_running(app_name) if found_path else False
+
+    if found_path and is_running:
+        safe_send(chat_id,
+                  f"✅ *{app_name}* уже запущен.\n`{found_path}`\n\n"
+                  f"Подключайся — программа активна.",
+                  remote_access_menu())
+        return
+
     result = pc_apps.launch_app(app_name)
     safe_send(chat_id, result, remote_access_menu())
 
@@ -1663,6 +1791,134 @@ def _btn_remote_safety(chat_id: int):
 
 # ══════════════════════════════════════════════════════════════════
 # конец блока «Мой ПК»
+# ══════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════
+# 💬 ПОГОВОРИТЬ / 🎤 ГОЛОС / 📋 ЗАДАЧИ / 🏨 БРОНЬ / 🎮 DOTA 2
+# ══════════════════════════════════════════════════════════════════
+
+def _btn_talk(chat_id: int):
+    """Активирует режим свободного разговора с ИИ."""
+    ai_chat_mode.add(chat_id)
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    voice_hint = "🎤 Или отправь голосовое — отвечу голосом." if tts_ok else "🎤 Голосовые принимаю, но TTS-ответа нет (нет OPENAI_API_KEY)."
+    text = (
+        "💬 *Режим разговора*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Пиши всё что угодно — вопросы, задачи, идеи, анализ.\n"
+        f"{voice_hint}\n\n"
+        "Темы которые знаю хорошо:\n"
+        "• Такси-бизнес, водители, клиенты\n"
+        "• Финансы ФОП, налоги Украины\n"
+        "• Dota 2 — герои, билды, мета\n"
+        "• Маршруты, бронирование, переговоры\n"
+        "• Что угодно ещё — попробуй!\n\n"
+        "_Нажми «🔙 Выйти из чата» чтобы вернуться в меню._"
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=ai_chat_menu())
+
+
+def _btn_voice_help(chat_id: int):
+    """Объясняет как работает голосовой режим."""
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    if tts_ok:
+        status_line = "✅ Голос *включён* — принимаю голосовые, отвечаю голосом."
+        how = (
+            "1. Нажми 🎤 в поле ввода Telegram → запиши сообщение\n"
+            "2. Я расшифрую через Whisper AI\n"
+            "3. Придумаю умный ответ\n"
+            "4. Отвечу голосовым сообщением (TTS)\n\n"
+            "💡 *Совет:* говори чётко, по-русски, с контекстом — «позвони Тохе и скажи...»"
+        )
+    else:
+        status_line = "⚠️ Голос частично работает — расшифровываю, но голосовых ответов нет."
+        how = (
+            "1. Нажми 🎤 → запиши сообщение\n"
+            "2. Я расшифрую и отвечу *текстом*\n\n"
+            "Для голосовых ответов добавь в Replit Secrets:\n"
+            "`OPENAI_API_KEY` — ключ OpenAI"
+        )
+    text = (
+        f"🎤 *Голосовой режим*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{status_line}\n\n"
+        f"*Как пользоваться:*\n{how}"
+    )
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+
+
+def _btn_tasks(chat_id: int):
+    """Показывает активные задачи / напоминания и предлагает добавить."""
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    lines = ["📋 *Задачи и напоминания*\n"]
+    try:
+        pending = list_pending(OWNER_ID)
+        if pending:
+            now = _now_local()
+            for r in pending[:10]:
+                fire_raw = (r.get("fire_at") or "")[:16].replace("T", " ")
+                txt = r.get("text", "")[:60]
+                lines.append(f"🔔 {fire_raw} — {txt}")
+            if len(pending) > 10:
+                lines.append(f"_…и ещё {len(pending) - 10} напоминаний_")
+        else:
+            lines.append("_Активных задач нет._")
+    except Exception as e:
+        lines.append(f"_Ошибка загрузки: {e}_")
+
+    lines.append(
+        "\n💡 *Добавить напоминание:*\n"
+        "Напиши мне в чате, например:\n"
+        "«напомни завтра в 10 утра позвонить клиенту»\n"
+        "«напоминание через 2 часа — проверить водителя»"
+    )
+    safe_send(chat_id, "\n".join(lines), markup)
+
+
+def _btn_booking(chat_id: int):
+    """Безопасный сценарий бронирования — сначала план, потом подтверждение."""
+    ai_chat_mode.add(chat_id)
+    text = (
+        "🏨 *Бронирование и звонки*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Помогу с:\n"
+        "• Отель — поиск, бронирование через сайт/телефон\n"
+        "• Ресторан — столик по телефону\n"
+        "• Сервис — договориться, уточнить, перенести\n\n"
+        "⚠️ *Важно:* я сначала соберу данные → покажу тебе план → "
+        "спрошу подтверждение → только потом звоню или бронирую.\n\n"
+        "🔒 Никаких автоплатежей без явного *да* от тебя.\n\n"
+        "Расскажи что нужно — куда, когда, что?"
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=ai_chat_menu())
+
+
+def _btn_dota(chat_id: int):
+    """Dota 2 Coach — анализ, советы, мета."""
+    ai_chat_mode.add(chat_id)
+    text = (
+        "🎮 *Dota 2 Coach*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Твой персональный тренер по Dota 2. Спрашивай:\n\n"
+        "⚔️ *Герои и counter-pick:*\n"
+        "«что взять против Pudge + Axe?»\n"
+        "«лучший carry для solo-ranked?»\n\n"
+        "🛡️ *Сборки и предметы:*\n"
+        "«билд на Phantom Assassin в текущем патче»\n"
+        "«когда покупать Black King Bar?»\n\n"
+        "🗺️ *Стратегия и мета:*\n"
+        "«как играть trilane в 2024?»\n"
+        "«объясни роль 4-ки»\n\n"
+        "📊 *Разбор игр:*\n"
+        "Опиши ситуацию — разберём что пошло не так.\n\n"
+        "_Нажми «🔙 Выйти из чата» когда закончишь._"
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=ai_chat_menu())
+
+
+# ══════════════════════════════════════════════════════════════════
+# конец новых хендлеров
 # ══════════════════════════════════════════════════════════════════
 
 def _btn_forget(chat_id):
@@ -2100,12 +2356,26 @@ def start(message):
     if chat_id == OWNER_ID:
         set_role(chat_id, "owner")
         history = grok_history.get(chat_id, [])
-        mem_note = f"\n_Помню {len(history) // 2} сообщений из прошлого разговора._" if history else ""
+        now = _now_local()
+        h = now.hour
+        if h < 6:
+            greet = "Ночь продуктивная"
+        elif h < 12:
+            greet = "Доброе утро"
+        elif h < 18:
+            greet = "Добрый день"
+        else:
+            greet = "Добрый вечер"
+        mem_note = f" Помню {len(history)//2} сообщений из прошлой сессии." if history else ""
+        tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+        voice_tip = "🎤 Можешь говорить — отвечу голосом." if tts_ok else "💬 Пиши что нужно."
         bot.send_message(
             chat_id,
-            f"👋 Привет, Руслан! Я твой личный AI-ассистент 🔥\n\n"
-            f"Пиши или говори что нужно — позвоню, проанализирую, найду транзакции, "
-            f"открою таблицу. Просто скажи.{mem_note}",
+            f"⚡ *{greet}, Руслан.*\n\n"
+            f"Jarvis онлайн и готов.{mem_note}\n\n"
+            f"{voice_tip}\n\n"
+            f"Нажми *⚡ Jarvis* для командного центра\n"
+            f"или просто пиши/говори — пойму сам.",
             parse_mode="Markdown",
             reply_markup=main_menu()
         )
@@ -2123,27 +2393,70 @@ def handle_voice(message):
     chat_id = message.chat.id
     if not is_allowed(chat_id):
         return
-    bot.send_message(chat_id, "🎤 Расшифровываю...")
+
+    # Проверяем наличие OpenAI ключа ДО попытки расшифровки
+    openai_ok = bool(
+        os.environ.get("OPENAI_API_KEY") or
+        os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
+    )
+    if not openai_ok:
+        bot.send_message(
+            chat_id,
+            "⚠️ *Голосовые сообщения не работают*\n\n"
+            "Для расшифровки голоса нужен `OPENAI_API_KEY`.\n"
+            "Добавь его в Replit Secrets и перезапусти бота.",
+            parse_mode="Markdown",
+            reply_markup=main_menu(),
+        )
+        return
+
+    msg = bot.send_message(chat_id, "🎤 Слушаю...")
     try:
         file_info = bot.get_file(message.voice.file_id)
         downloaded = bot.download_file(file_info.file_path)
         audio_file = io.BytesIO(downloaded)
         audio_file.name = "voice.ogg"
+
+        # STT — Whisper через OpenAI API
         transcript = openai_client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
+            model="whisper-1",
             file=audio_file,
-            response_format="json",
+            response_format="text",
+            language="ru",
         )
-        text = transcript.text
-        bot.send_message(chat_id, f"🗣️ Ты сказал: «{text}»")
+        text = transcript.strip() if isinstance(transcript, str) else transcript.text.strip()
+
+        if not text:
+            bot.edit_message_text("⚠️ Не смог расшифровать. Говори чётче или ближе к микрофону.",
+                                  chat_id, msg.message_id)
+            return
+
+        # Показываем что услышал
+        bot.edit_message_text(f"🗣️ «{text}»", chat_id, msg.message_id)
+
+        # Обрабатываем как текст, помечаем что запрос голосовой → ответим голосом
         voice_request_chats.add(chat_id)
         try:
             process_text(chat_id, text)
         finally:
             voice_request_chats.discard(chat_id)
+
     except Exception as e:
-        print(f"Ошибка расшифровки: {e}")
-        bot.send_message(chat_id, "⚠️ Не удалось расшифровать голосовое. Попробуй ещё раз.")
+        err_str = str(e)
+        print(f"Ошибка voice: {err_str}")
+        # Понятное сообщение об ошибке
+        if "model" in err_str.lower() or "404" in err_str:
+            hint = "Модель расшифровки недоступна. Проверь OPENAI_API_KEY в Secrets."
+        elif "timeout" in err_str.lower():
+            hint = "Сервер не ответил вовремя. Попробуй ещё раз."
+        elif "rate" in err_str.lower():
+            hint = "Слишком много запросов. Подожди секунду."
+        else:
+            hint = "Попробуй ещё раз или напиши текстом."
+        try:
+            bot.edit_message_text(f"⚠️ Не смог расшифровать. {hint}", chat_id, msg.message_id)
+        except Exception:
+            bot.send_message(chat_id, f"⚠️ Ошибка голоса: {hint}")
 
 
 def make_sms_link(phone: str, text: str) -> str:
