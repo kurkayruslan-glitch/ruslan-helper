@@ -1,3 +1,4 @@
 - [Sauron API format](sauron-api.md) — POST form-data ?token=KEY + data={query:...}; NOT Bearer/JSON/GET
 - [Sauron FINAL_MERGED.xlsx report](sauron-final-merged-report.md) — single Excel, 1 row = 1 relative; map by source_row not name; MAX is relative-level.
 - [VK API enrichment](vk-api-enrichment.md) — official VK kinship evidence; force lang=0 for Cyrillic names; resolve relatives via batch users.get; high confidence only via explicit relatives or 2+ independent signals.
+- [Deployment architecture](deployment-architecture.md) — bot runs as background sidecar inside api-server prod run; deps in root pyproject.toml; MUST be Reserved VM not Autoscale (else 409 token fight); never run 2 pollers.
