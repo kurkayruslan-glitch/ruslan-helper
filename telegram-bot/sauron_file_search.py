@@ -1322,13 +1322,22 @@ def run_file_search(
                 try:
                     import vk_api_client as _vk
                     if _vk.is_available():
-                        vk_data = _vk.enrich_relative(rel_vk, fio, cand_fio, cand_dob) or {}
+                        vk_data = _vk.enrich_relative(
+                            rel_vk, fio, cand_fio, cand_dob,
+                            rel_phones   = rel_liquid,
+                            main_address = fields.get('addresses', ''),
+                            rel_address  = rel_fields.get('addresses', ''),
+                        ) or {}
                         if vk_data.get('vk_score_bonus', 0) > 0:
                             score    += vk_data['vk_score_bonus']
-                            evidence += ('; VK: ' + vk_data['vk_evidence']) if vk_data.get('vk_evidence') else ''
-                            if score >= 18:
-                                confidence = 'высокая'
+                            evidence += ('; ' + vk_data['vk_evidence']) if vk_data.get('vk_evidence') else ''
                             ev_src = (ev_src + '; VK API').strip('; ')
+                        # Высокая уверенность по VK ТОЛЬКО по строгому правилу
+                        # (явный relatives или ≥2 независимых признака).
+                        # Sauron-уверенность уже выставлена в _gather_evidence,
+                        # слабый VK-бонус её не поднимает.
+                        if vk_data.get('vk_high_confidence'):
+                            confidence = 'высокая'
                 except Exception as _ve:
                     logger.debug(f"VK enrich skipped: {_ve}")
 
@@ -1790,7 +1799,7 @@ def build_final_merged_xlsx(
             r.snils,
             max_cell,
             _fm_social_links(r),
-            "",   # ошибок по строке родственника нет
+            r.vk_evidence,   # VK-доказательства родства / «VK закрыт/нет доступа»
         ])
         ri += 1
 
