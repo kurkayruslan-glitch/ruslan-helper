@@ -28,6 +28,7 @@ import price_search
 import crm
 import sauron
 import file_search
+import sauron_file_search
 
 # ──────────────────────────────────────────────────────────────────
 # РЕЖИМ ЗАПУСКА
@@ -2613,10 +2614,15 @@ def handle_voice(message):
 
 
 def _run_file_sauron(chat_id: int, doc, filename: str):
-    """Скачивает файл, парсит, сразу запускает пакетный поиск — без подтверждения."""
-    msg = bot.send_message(chat_id, f"📄 Получил *{filename}* — извлекаю данные…", parse_mode="Markdown")
+    """Скачивает файл и запускает полный Sauron-поиск через sauron_file_search."""
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    msg = bot.send_message(
+        chat_id,
+        f"📄 Получил *{filename}* — читаю файл…",
+        parse_mode="Markdown",
+    )
 
-    # Скачиваем
+    # ── Скачиваем ─────────────────────────────────────────────────────────
     try:
         file_info = bot.get_file(doc.file_id)
         data = bot.download_file(file_info.file_path)
@@ -2624,41 +2630,41 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
         bot.edit_message_text(f"❌ Не удалось скачать файл: {str(e)[:100]}", chat_id, msg.message_id)
         return
 
-    # Парсим
+    # ── Превью-парсинг для показа что нашли в файле ──────────────────────
     try:
-        records, parse_error = file_search.parse_file(data, filename)
+        inp_records, parse_err = sauron_file_search.parse_input_file(data, filename)
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка при разборе файла: {str(e)[:150]}", chat_id, msg.message_id)
+        bot.edit_message_text(f"❌ Ошибка чтения файла: {str(e)[:150]}", chat_id, msg.message_id)
         return
 
-    if parse_error:
-        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    if parse_err:
         try:
-            bot.edit_message_text(f"📄 *{filename}*\n\n⚠️ {parse_error}", chat_id, msg.message_id, parse_mode="Markdown")
+            bot.edit_message_text(
+                f"📄 *{filename}*\n\n⚠️ {parse_err}", chat_id, msg.message_id, parse_mode="Markdown",
+            )
         except Exception:
             pass
         bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
         return
 
-    n_persons = len(records)
-    max_q     = file_search.DEFAULT_MAX_FIO
-    to_check  = min(n_persons, max_q)
-    skipped   = n_persons - to_check
-    skip_note = f"\n⚠️ _По лимиту ({max_q}) пропущено: {skipped}_" if skipped else ""
+    # Показываем превью файла
+    preview = sauron_file_search.build_preview(inp_records, filename)
+    n = len(inp_records)
+    to_check = min(n, sauron_file_search.MAX_FIO)
+    skipped  = n - to_check
     try:
         bot.edit_message_text(
-            f"📄 *{filename}*\n\n"
-            f"👤 ФИО найдено в файле: *{n_persons}*{skip_note}\n"
-            f"🔍 Проверяю *{to_check}* человек через Sauron…\n\n"
-            "⏳ _Это может занять несколько минут…_",
+            preview + f"\n\n🔍 _Запускаю поиск по {to_check} ФИО…_",
             chat_id, msg.message_id, parse_mode="Markdown",
         )
     except Exception:
         pass
 
-    # Пакетный поиск — прогресс обновляется в том же сообщении
+    # ── Основной поиск ────────────────────────────────────────────────────
     try:
-        results, stop_reason = file_search.batch_search(records, chat_id, bot, msg.message_id)
+        persons, relatives, phone_checks, errors, stop_reason = sauron_file_search.run_file_search(
+            data, filename, chat_id, bot, msg.message_id,
+        )
     except Exception as e:
         try:
             bot.edit_message_text(f"❌ Ошибка поиска: {str(e)[:200]}", chat_id, msg.message_id)
@@ -2666,53 +2672,50 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
             pass
         return
 
-    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-    short  = file_search.build_short_summary(results, stop_reason)
+    # ── Краткая сводка в чате ─────────────────────────────────────────────
+    summary = sauron_file_search.build_chat_summary(persons, relatives, phone_checks, errors, stop_reason)
     try:
-        bot.edit_message_text(short, chat_id, msg.message_id, parse_mode="Markdown")
+        bot.edit_message_text(summary, chat_id, msg.message_id, parse_mode="Markdown")
     except Exception:
-        safe_send(chat_id, short, markup)
+        safe_send(chat_id, summary, markup)
 
-    # Отчёт-файл: XLSX (два листа) если openpyxl доступен, иначе CSV
-    if len(results) >= 1:
-        try:
-            base_name  = filename.rsplit('.', 1)[0]
-            found_cnt  = sum(1 for r in results if r.found)
-            rel_cnt    = sum(len(r.related) for r in results if r.found)
-            xlsx_bytes = file_search.build_xlsx_report(results)
-            if xlsx_bytes:
-                report_name = base_name + "_sauron_report.xlsx"
-                bio = io.BytesIO(xlsx_bytes)
-                bio.name = report_name
-                bot.send_document(
-                    chat_id, bio,
-                    caption=(
-                        f"📊 Отчёт по «{filename}» (2 листа)\n"
-                        f"Найдено: {found_cnt} / {len(results)} чел.\n"
-                        f"Связанных лиц: {rel_cnt}"
-                        + (f"\n⚠️ Пропущено по лимиту: {skipped}" if skipped else "")
-                    ),
-                    reply_markup=markup,
-                )
-            else:
-                csv_bytes   = file_search.build_csv_report(results)
-                report_name = base_name + "_sauron_report.csv"
-                bio = io.BytesIO(csv_bytes)
-                bio.name = report_name
-                bot.send_document(
-                    chat_id, bio,
-                    caption=(
-                        f"📊 Отчёт по «{filename}»\n"
-                        f"Найдено: {found_cnt} / {len(results)} чел.\n"
-                        f"Связанных лиц: {rel_cnt}"
-                        + (f"\n⚠️ Пропущено по лимиту: {skipped}" if skipped else "")
-                    ),
-                    reply_markup=markup,
-                )
-        except Exception as e:
-            bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:80]}", reply_markup=markup)
-    else:
+    # ── Отчёт-файл ───────────────────────────────────────────────────────
+    if not persons:
         bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
+        return
+
+    try:
+        base      = filename.rsplit('.', 1)[0]
+        found_cnt = sum(1 for p in persons if p.found)
+        rel_cnt   = len(relatives)
+        xlsx_bytes = sauron_file_search.build_xlsx_report(persons, relatives, phone_checks, errors)
+        if xlsx_bytes:
+            report_name = base + "_sauron.xlsx"
+            bio = io.BytesIO(xlsx_bytes)
+            bio.name = report_name
+            caption = (
+                f"📊 Отчёт «{filename}» — 4 листа\n"
+                f"✅ Найдено: {found_cnt} / {len(persons)} чел.\n"
+                f"👨‍👩‍👧 Родственников: {rel_cnt}"
+                + (f"\n⚠️ Пропущено: {skipped}" if skipped else "")
+            )
+            bot.send_document(chat_id, bio, caption=caption, reply_markup=markup)
+        else:
+            csv_bytes = sauron_file_search.build_csv_report(persons, relatives)
+            report_name = base + "_sauron.csv"
+            bio = io.BytesIO(csv_bytes)
+            bio.name = report_name
+            bot.send_document(
+                chat_id, bio,
+                caption=(
+                    f"📊 Отчёт «{filename}»\n"
+                    f"✅ Найдено: {found_cnt} / {len(persons)} чел.\n"
+                    f"👨‍👩‍👧 Родственников: {rel_cnt}"
+                ),
+                reply_markup=markup,
+            )
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
 
 
 def make_sms_link(phone: str, text: str) -> str:
@@ -3045,68 +3048,15 @@ def handle_callback(call):
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id)
 
-    # ── Поиск по файлу — подтверждение ───────────────────────────────────
+    # ── Поиск по файлу — подтверждение (legacy callback) ─────────────────
     if call.data == "filesauron_yes":
-        pending = file_sauron_pending.pop(chat_id, None)
-        if not pending:
-            bot.send_message(chat_id, "⚠️ Данные устарели — отправь файл снова.")
-            return
-        records  = pending["records"]
-        filename = pending["filename"]
-        prog_msg = bot.send_message(
+        file_sauron_pending.pop(chat_id, None)
+        # Теперь поиск запускается автоматически при получении файла.
+        # Этот callback оставлен для совместимости.
+        bot.send_message(
             chat_id,
-            f"🔍 *Начинаю поиск по файлу «{filename}»…*\n\n"
-            f"Записей к проверке: *{min(len(records), 50)}*\n"
-            "Это займёт некоторое время — не отправляй новые команды.",
-            parse_mode="Markdown",
+            "📁 Отправь файл снова — поиск запустится автоматически.",
         )
-        try:
-            results, stop_reason = file_search.batch_search(
-                records, chat_id, bot, prog_msg.message_id,
-            )
-        except Exception as e:
-            try:
-                bot.edit_message_text(f"❌ Критическая ошибка поиска: {str(e)[:200]}", chat_id, prog_msg.message_id)
-            except Exception:
-                pass
-            return
-        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-        short = file_search.build_short_summary(results, stop_reason)
-        try:
-            bot.edit_message_text(short, chat_id, prog_msg.message_id, parse_mode="Markdown")
-        except Exception:
-            safe_send(chat_id, short, markup)
-        if len(results) >= 1:
-            try:
-                found_cnt2 = sum(1 for r in results if r.found)
-                rel_cnt2   = sum(len(r.related) for r in results if r.found)
-                base2      = filename.rsplit('.', 1)[0]
-                xlsx2      = file_search.build_xlsx_report(results)
-                if xlsx2:
-                    bio = io.BytesIO(xlsx2)
-                    bio.name = base2 + "_sauron_report.xlsx"
-                    bot.send_document(
-                        chat_id, bio,
-                        caption=(
-                            f"📊 Отчёт Sauron: «{filename}» (2 листа)\n"
-                            f"Найдено: {found_cnt2} / {len(results)} чел.\n"
-                            f"Связанных лиц: {rel_cnt2}"
-                        ),
-                        reply_markup=markup,
-                    )
-                else:
-                    csv2 = file_search.build_csv_report(results)
-                    bio  = io.BytesIO(csv2)
-                    bio.name = base2 + "_sauron_report.csv"
-                    bot.send_document(
-                        chat_id, bio,
-                        caption=f"📊 Полный отчёт Sauron: «{filename}» ({len(results)} записей)",
-                        reply_markup=markup,
-                    )
-            except Exception as e:
-                bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
-        else:
-            bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
         return
 
     elif call.data == "filesauron_no":
