@@ -97,13 +97,22 @@ def _now_local() -> datetime:
 OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
 OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
 
+# Клиент для текстового ИИ-чата — через Replit proxy (если есть) или прямой ключ
 if OpenAI and OPENAI_API_KEY:
     openai_client = OpenAI(
         base_url=OPENAI_BASE_URL,
         api_key=OPENAI_API_KEY,
     )
 else:
-    openai_client = None  # TTS/STT недоступны, бот всё равно работает
+    openai_client = None
+
+# Клиент ТОЛЬКО для голоса (STT/TTS) — исключительно прямой OPENAI_API_KEY.
+# Replit AI proxy НЕ поддерживает audio-эндпоинты (whisper, tts-1) → UNSUPPORTED_MODEL.
+_DIRECT_OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
+if OpenAI and _DIRECT_OPENAI_KEY:
+    voice_openai_client = OpenAI(api_key=_DIRECT_OPENAI_KEY)
+else:
+    voice_openai_client = None  # голос недоступен; текстовый чат продолжает работать
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -155,17 +164,18 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
 
 
 def _tts_send_voice(chat_id: int, text: str):
-    """Конвертирует текст в голос через OpenAI TTS и отправляет как голосовое сообщение."""
+    """Конвертирует текст в голос через OpenAI TTS (прямой ключ) и отправляет голосовым."""
+    if not voice_openai_client:
+        return  # голос не настроен — текстовый ответ уже отправлен выше
     import re
     try:
         clean = re.sub(r"\[ACTION:[^\]]*\]", "", text)
         clean = re.sub(r"[*_`#>~]", "", clean).strip()
-        # Обрезаем если слишком длинный (лимит TTS ~4096 символов)
         if len(clean) > 3800:
             clean = clean[:3800] + "…"
         if not clean:
             return
-        response = openai_client.audio.speech.create(
+        response = voice_openai_client.audio.speech.create(
             model="tts-1",
             voice="onyx",
             input=clean,
@@ -1172,9 +1182,12 @@ def _jarvis_system_status() -> str:
     ai_ok = not keys or any(os.environ.get(k) for k in keys)
     lines.append(f"🧠 ИИ: *{backend}* {'✅' if ai_ok else '⚠️ нет ключа'}")
 
-    # Голос/TTS (OpenAI Whisper + TTS)
-    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
-    lines.append(f"🎤 Голос (STT/TTS): {'✅' if tts_ok else '⚠️ нет OPENAI_API_KEY'}")
+    # Голос/TTS — только прямой OPENAI_API_KEY (Replit proxy audio не поддерживает)
+    voice_ok = bool(os.environ.get("OPENAI_API_KEY"))
+    if voice_ok:
+        lines.append("🎤 Голос (STT/TTS): ✅ настроен")
+    else:
+        lines.append("🎤 Голос (STT/TTS): ⚠️ не настроен — добавь OPENAI_API_KEY в Secrets")
 
     # Звонки
     tw_ok = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
@@ -1278,7 +1291,7 @@ def _btn_skills(chat_id):
         "🤖 *Jarvis — полный список возможностей*\n",
         "💬 *Разговор и голос*",
     ]
-    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY"))  # только прямой ключ, proxy audio не поддерживает
     if tts_ok:
         lines.append("  ✅ Свободный диалог на русском — текстом и голосом")
         lines.append("  ✅ Голосовой ввод → Whisper AI → ответ голосом (TTS)")
@@ -1800,7 +1813,7 @@ def _btn_remote_safety(chat_id: int):
 def _btn_talk(chat_id: int):
     """Активирует режим свободного разговора с ИИ."""
     ai_chat_mode.add(chat_id)
-    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY"))  # только прямой ключ, proxy audio не поддерживает
     voice_hint = "🎤 Или отправь голосовое — отвечу голосом." if tts_ok else "🎤 Голосовые принимаю, но TTS-ответа нет (нет OPENAI_API_KEY)."
     text = (
         "💬 *Режим разговора*\n"
@@ -1820,7 +1833,7 @@ def _btn_talk(chat_id: int):
 
 def _btn_voice_help(chat_id: int):
     """Объясняет как работает голосовой режим."""
-    tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+    tts_ok = bool(os.environ.get("OPENAI_API_KEY"))  # только прямой ключ, proxy audio не поддерживает
     if tts_ok:
         status_line = "✅ Голос *включён* — принимаю голосовые, отвечаю голосом."
         how = (
@@ -2367,7 +2380,7 @@ def start(message):
         else:
             greet = "Добрый вечер"
         mem_note = f" Помню {len(history)//2} сообщений из прошлой сессии." if history else ""
-        tts_ok = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY"))
+        tts_ok = bool(os.environ.get("OPENAI_API_KEY"))  # только прямой ключ, proxy audio не поддерживает
         voice_tip = "🎤 Можешь говорить — отвечу голосом." if tts_ok else "💬 Пиши что нужно."
         bot.send_message(
             chat_id,
@@ -2394,31 +2407,27 @@ def handle_voice(message):
     if not is_allowed(chat_id):
         return
 
-    # Проверяем наличие OpenAI ключа ДО попытки расшифровки
-    openai_ok = bool(
-        os.environ.get("OPENAI_API_KEY") or
-        os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
-    )
-    if not openai_ok:
+    # Голос работает ТОЛЬКО через прямой OPENAI_API_KEY — Replit proxy не поддерживает audio.
+    if not voice_openai_client:
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
         bot.send_message(
             chat_id,
-            "⚠️ *Голосовые сообщения не работают*\n\n"
-            "Для расшифровки голоса нужен `OPENAI_API_KEY`.\n"
-            "Добавь его в Replit Secrets и перезапусти бота.",
-            parse_mode="Markdown",
-            reply_markup=main_menu(),
+            "🎤 Голос пока не включён: нужно добавить OPENAI_API_KEY в Replit Secrets "
+            "и перезапустить бота.\n\n"
+            "Ключи и пароли в Telegram не присылай — только через Replit Secrets.",
+            reply_markup=markup,
         )
         return
 
-    msg = bot.send_message(chat_id, "🎤 Слушаю...")
+    msg = bot.send_message(chat_id, "🎤 Слушаю…")
     try:
         file_info = bot.get_file(message.voice.file_id)
         downloaded = bot.download_file(file_info.file_path)
         audio_file = io.BytesIO(downloaded)
         audio_file.name = "voice.ogg"
 
-        # STT — Whisper через OpenAI API
-        transcript = openai_client.audio.transcriptions.create(
+        # STT — Whisper через прямой OpenAI API (не proxy)
+        transcript = voice_openai_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
             response_format="text",
@@ -2427,14 +2436,14 @@ def handle_voice(message):
         text = transcript.strip() if isinstance(transcript, str) else transcript.text.strip()
 
         if not text:
-            bot.edit_message_text("⚠️ Не смог расшифровать. Говори чётче или ближе к микрофону.",
-                                  chat_id, msg.message_id)
+            bot.edit_message_text(
+                "⚠️ Не смог расшифровать. Говори чётче или ближе к микрофону.",
+                chat_id, msg.message_id,
+            )
             return
 
-        # Показываем что услышал
         bot.edit_message_text(f"🗣️ «{text}»", chat_id, msg.message_id)
 
-        # Обрабатываем как текст, помечаем что запрос голосовой → ответим голосом
         voice_request_chats.add(chat_id)
         try:
             process_text(chat_id, text)
@@ -2444,19 +2453,18 @@ def handle_voice(message):
     except Exception as e:
         err_str = str(e)
         print(f"Ошибка voice: {err_str}")
-        # Понятное сообщение об ошибке
-        if "model" in err_str.lower() or "404" in err_str:
-            hint = "Модель расшифровки недоступна. Проверь OPENAI_API_KEY в Secrets."
-        elif "timeout" in err_str.lower():
-            hint = "Сервер не ответил вовремя. Попробуй ещё раз."
+        if "timeout" in err_str.lower():
+            hint = "Сервер не ответил вовремя — попробуй ещё раз."
         elif "rate" in err_str.lower():
-            hint = "Слишком много запросов. Подожди секунду."
+            hint = "Слишком много запросов — подожди секунду."
+        elif "auth" in err_str.lower() or "401" in err_str or "403" in err_str:
+            hint = "Неверный OPENAI_API_KEY — проверь ключ в Replit Secrets."
         else:
             hint = "Попробуй ещё раз или напиши текстом."
         try:
-            bot.edit_message_text(f"⚠️ Не смог расшифровать. {hint}", chat_id, msg.message_id)
+            bot.edit_message_text(f"⚠️ {hint}", chat_id, msg.message_id)
         except Exception:
-            bot.send_message(chat_id, f"⚠️ Ошибка голоса: {hint}")
+            bot.send_message(chat_id, f"⚠️ {hint}")
 
 
 def make_sms_link(phone: str, text: str) -> str:
