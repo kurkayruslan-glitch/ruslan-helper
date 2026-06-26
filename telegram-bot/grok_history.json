@@ -2,62 +2,6 @@
   "7959647798": [
     {
       "role": "user",
-      "content": "Скрин скинь"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:screenshot]"
-    },
-    {
-      "role": "user",
-      "content": "Почини это"
-    },
-    {
-      "role": "assistant",
-      "content": "Не могу это. Поясни, что конкретно нужно сделать?"
-    },
-    {
-      "role": "user",
-      "content": "Это почини"
-    },
-    {
-      "role": "assistant",
-      "content": "Не могу это. Опиши, что именно надо починить, чтобы понять."
-    },
-    {
-      "role": "user",
-      "content": "+380 73 001 89 48 набери поздравь с прохождением границы"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:send_sms:+380730018948:Поздравляю с успешным прохождением границы!]"
-    },
-    {
-      "role": "user",
-      "content": "Набери поздравь с прохождением границы +380 73 001 89 48"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:send_sms:+380730018948:Поздравляю с прохождением границы! Успехов тебе!]"
-    },
-    {
-      "role": "user",
-      "content": "Ты тут ?"
-    },
-    {
-      "role": "assistant",
-      "content": "Да, я тут! Что нужно?"
-    },
-    {
-      "role": "user",
-      "content": "Набери его а не пиши"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:call_restaurant:+380730018948:Поздравляю с успешным прохождением границы!]"
-    },
-    {
-      "role": "user",
       "content": "📊 Я Тигр"
     },
     {
@@ -159,6 +103,62 @@
     {
       "role": "assistant",
       "content": "[ACTION:call_toha]"
+    },
+    {
+      "role": "user",
+      "content": "Как сам ?"
+    },
+    {
+      "role": "assistant",
+      "content": "Да всё норм! Как у тебя? Что нового?"
+    },
+    {
+      "role": "user",
+      "content": "Проснулся"
+    },
+    {
+      "role": "assistant",
+      "content": "Супер! Как настроение? Планы на день?"
+    },
+    {
+      "role": "user",
+      "content": "Позвони жене скажи пусть встает быстреее"
+    },
+    {
+      "role": "assistant",
+      "content": "[ACTION:call_wife:Пусть встаёт быстрее!]"
+    },
+    {
+      "role": "user",
+      "content": "+380 99 433 86 19"
+    },
+    {
+      "role": "assistant",
+      "content": "[ACTION:send_sms:+380994338619:Пусть встаёт быстрее!]"
+    },
+    {
+      "role": "user",
+      "content": "Набери и скажи. Вставай быстрее"
+    },
+    {
+      "role": "assistant",
+      "content": "[ACTION:call_wife:Вставай быстрее!]"
+    },
+    {
+      "role": "user",
+      "content": "Набери и скажи. Вставай быстрее Набери и скажи. Вставай быстрее"
+    },
+    {
+      "role": "assistant",
+      "content": "[ACTION:call_wife:Вставай быстрее!]"
+    },
+    {
+      "role": "user",
+      "content": "Набери и скажи. Вставай быстрее +380994338619"
+    },
+    {
+      "role": "assistant",
+      "content": "[ACTION:call_toha:Вставай быстрее!]"
     }
   ]
 }
