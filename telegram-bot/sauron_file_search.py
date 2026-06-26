@@ -93,23 +93,35 @@ class PhoneCheck:
 @dataclass
 class RelativeRecord:
     """Один вероятный родственник для листа «Родственники»."""
-    source_fio:  str = ""   # исходное ФИО из файла
-    main_fio:    str = ""   # найденный основной человек
-    fio:         str = ""   # ФИО родственника
-    dob:         str = ""
-    alt_fio:     str = ""   # прежняя/девичья фамилия
-    relation:    str = ""   # тип родства
-    address:     str = ""
-    phones:      list[str] = field(default_factory=list)
-    phone_note:  str = ""
-    vk:          str = ""
-    ok:          str = ""
-    other_social:str = ""
-    in_maxim:    bool = False
-    maxim_source:str = ""
-    evidence:    str = ""   # доказательство родства
-    confidence:  str = ""   # высокая/средняя/низкая
-    comment:     str = ""
+    source_fio:      str   = ""   # исходное ФИО из файла
+    main_fio:        str   = ""   # найденный основной человек
+    fio:             str   = ""   # ФИО родственника
+    dob:             str   = ""   # ТОЛЬКО дата в формате DD.MM.YYYY
+    variants_fio:    str   = ""   # варианты ФИО / алиасы (отдельно от даты!)
+    alt_fio:         str   = ""   # прежняя/девичья фамилия (устарело, используй variants_fio)
+    relation:        str   = ""   # тип родства — всегда заполнен человекочитаемо
+    address:         str   = ""
+    phones:          list[str] = field(default_factory=list)
+    phone_note:      str   = ""
+    vk:              str   = ""
+    ok:              str   = ""
+    other_social:    str   = ""
+    in_maxim:        bool  = False
+    maxim_source:    str   = ""
+    evidence:        str   = ""   # все доказательства родства
+    confidence:      str   = ""   # высокая/средняя/низкая
+    social_evidence: str   = ""   # доказательства из соцсетей
+    common_signs:    str   = ""   # общие признаки (телефон, адрес, email…)
+    score:           float = 0.0  # числовой скоринг родства
+    evidence_source: str   = ""   # источник: Sauron, ВКонтакте, ОК и т.д.
+    # VK API поля (заполняются если VK_API_TOKEN настроен)
+    vk_profile_url:  str   = ""
+    vk_full_name:    str   = ""
+    vk_maiden_name:  str   = ""
+    vk_city:         str   = ""
+    vk_relatives_str:str   = ""
+    vk_evidence:     str   = ""
+    comment:         str   = ""
 
 @dataclass
 class PersonRecord:
@@ -628,7 +640,11 @@ def _extract_fields(api_result: dict) -> dict:
 
         conn = _val(rec, 'Связь с лицом','Связанные лица','Связи','Родственники')
         if conn:
-            conn_counts[conn] = conn_counts.get(conn, 0) + 1
+            # Разбиваем многолюдные строки «ФИО1; ФИО2; ФИО3» на отдельные записи
+            for part in re.split(r'\s*;\s*', conn):
+                part = part.strip()
+                if part and len(part) > 3:
+                    conn_counts[part] = conn_counts.get(part, 0) + 1
 
         # Алиасы / предыдущие фамилии
         for af in _ALIAS_FIELDS:
@@ -671,17 +687,41 @@ def _extract_fields(api_result: dict) -> dict:
 
 
 _CONN_RE = re.compile(
-    r'^([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,25}\s+[А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20}'
-    r'(?:\s+[А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20})?)'
+    r'^([А-ЯЁІЇЄа-яёіїє][А-ЯЁІЇЄа-яёіїє\'\-]{1,25}\s+'
+    r'[А-ЯЁІЇЄа-яёіїє][А-ЯЁІЇЄа-яёіїє\'\-]{1,20}'
+    r'(?:\s+[А-ЯЁІЇЄа-яёіїє][А-ЯЁІЇЄа-яёіїє\'\-]{1,20})?)'
     r'(?:\s*[\(\[](.*?)[\)\]])?'
 )
 
 
+def _to_title(s: str) -> str:
+    """МУКАШОВ ВЛАДИМИР → Мукашов Владимир (для regex-совместимости)."""
+    if s == s.upper() and re.search(r'[А-ЯЁ]{2,}', s):
+        return ' '.join(w.capitalize() for w in s.split())
+    return s
+
+
 def _parse_conn(conn: str) -> tuple[str, str, str]:
-    """«Иванов ИО (01.01.1980/супруг)» → (fio, dob, relation)."""
-    m = _CONN_RE.match(conn.strip())
+    """
+    «Иванов ИО (01.01.1980/супруг)» → (fio, dob, relation).
+    Обрабатывает ALL-CAPS строки типа «МУКАШОВ ВЛАДИМИР ИВАНОВИЧ».
+    Дата возвращается ТОЛЬКО если есть цифровой паттерн DD.MM.YYYY.
+    Алиасы/варианты ФИО — НЕ попадают в dob.
+    """
+    raw = conn.strip()
+    normalized = _to_title(raw)
+
+    m = _CONN_RE.match(normalized)
     if not m:
-        return conn.strip(), '', ''
+        # Fallback: попробуем вытащить ФИО через _extract_fios
+        dm = _DATE_RE.search(raw)
+        dob = dm.group(1) if dm else ''
+        fios = _extract_fios(normalized) or _extract_fios(raw)
+        if fios:
+            return fios[0], dob, ''
+        # Если нет ФИО — возвращаем title-версию, дата пустая
+        return normalized, dob, ''
+
     fio   = m.group(1).strip()
     extra = (m.group(2) or '').strip()
     dob   = ''
@@ -727,84 +767,258 @@ def _check_maxim(sources: str, raw_records: Optional[list[dict]] = None) -> tupl
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Скоринг родства
+# Вспомогательные функции для скоринга
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _family_score(
+_DOB_RAW_KEYS = (
+    'Дата рождения','ДР','Рождение','Birth','DOB','birthday',
+    'дата_рождения','birth_date','Год рождения','Дата рожд',
+)
+
+def _extract_dob_from_raw(raw_records: list[dict]) -> str:
+    """Ищет дату рождения в полях ответа Sauron. Возвращает DD.MM.YYYY или ''."""
+    for rec in raw_records:
+        for k in _DOB_RAW_KEYS:
+            v = _val(rec, k)
+            if v:
+                dm = _DATE_RE.search(str(v))
+                if dm:
+                    raw_d = dm.group(1)
+                    parts = re.split(r'[./]', raw_d)
+                    if len(parts) == 3:
+                        d, mo, y = parts
+                        if len(y) == 2:
+                            y = ('19' if int(y) > 30 else '20') + y
+                        return f"{d.zfill(2)}.{mo.zfill(2)}.{y}"
+                    return raw_d
+    return ''
+
+
+def _split_field(s: str) -> set[str]:
+    """Разбивает поле по ';' в set нижнего регистра для сравнения."""
+    if not s:
+        return set()
+    return {v.strip().lower() for v in s.split(';') if v.strip()}
+
+
+def _human_relation(rel_str: str, evidence: str) -> str:
+    """
+    Строит читаемое объяснение типа родства.
+    Если rel_str пустой или выглядит как ФИО — берём из evidence.
+    """
+    if rel_str and rel_str not in ('alias/прежнее ФИО',):
+        r_low = rel_str.lower()
+        if any(kw in r_low for kw in _FAMILY_KWS):
+            return rel_str
+        # Если строка выглядит как ФИО (нормальный или ALL-CAPS регистр) — игнорируем как тип
+        _norm = _to_title(rel_str)  # нормализуем ALL-CAPS для regex
+        _looks_fio = (
+            len(rel_str) > 15
+            and not re.search(r'\d', rel_str)
+            and bool(re.search(r'[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ][а-яё]{1,}', _norm))
+        )
+        if not _looks_fio and rel_str:
+            return rel_str
+        # иначе — падаем ниже, строим из evidence
+
+    parts: list[str] = []
+    m = re.search(r'явная связь «([^»]+)»', evidence)
+    if m:
+        parts.append(m.group(1))
+    if 'общая фамилия' in evidence:
+        parts.append('общая фамилия')
+    if 'совпадает отчество' in evidence:
+        parts.append('совпадение отчества')
+    if 'общий адрес регистрации' in evidence:
+        parts.append('общий адрес регистрации')
+    if 'общий город' in evidence:
+        m2 = re.search(r'общий город/регион:\s*([^;]+)', evidence)
+        parts.append(f"общий регион ({m2.group(1).strip()})" if m2 else 'общий регион')
+    if 'семейный источник' in evidence:
+        m3 = re.search(r'семейный источник:\s*(\S+)', evidence)
+        parts.append(f"семейный источник ({m3.group(1)})" if m3 else 'семейный источник')
+    if 'общий телефон' in evidence:
+        parts.append('общий телефон')
+    if 'общий профиль ВКонтакте' in evidence:
+        parts.append('общий ВКонтакте')
+    if 'общий профиль Одноклассники' in evidence:
+        parts.append('общие Одноклассники')
+    if 'общий email' in evidence:
+        parts.append('общий email')
+    if rel_str == 'alias/прежнее ФИО' or 'девичья' in evidence.lower() or 'alias' in rel_str.lower():
+        parts.append('смена фамилии / алиас')
+    if 'VK' in evidence:
+        parts.append('подтверждено ВКонтакте')
+
+    return '; '.join(parts) if parts else (
+        'смена фамилии / алиас' if rel_str == 'alias/прежнее ФИО'
+        else 'связь по данным Sauron'
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Расширенный скоринг родства
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _gather_evidence(
     relation:      str,
     main_fio:      str,
     rel_fio:       str,
     shared_addr:   bool,
-    sources:       str,
+    rel_sources:   str,
     shared_phones: bool,
     confirm_count: int,
-) -> tuple[float, str, str]:
+    main_fields:   Optional[dict] = None,
+    rel_fields:    Optional[dict] = None,
+) -> tuple[float, str, str, str, str, str]:
     """
-    Возвращает (score, evidence, confidence).
-    score >= FAMILY_SCORE_MIN → вероятный родственник.
-    """
-    score    = 0.0
-    evidence: list[str] = []
-    rel_low  = relation.lower()
+    Расширенный анализ родства — все доступные поля Sauron + соцсети.
 
-    # 1. Явное родственное ключевое слово
+    Returns:
+        (score, evidence, confidence, social_evidence, common_signs, evidence_sources)
+
+    score >= FAMILY_SCORE_MIN → вероятный родственник.
+    Высокая уверенность: score >= 18.
+    """
+    score        = 0.0
+    evidence:    list[str] = []
+    social_ev:   list[str] = []
+    common_signs:list[str] = []
+    ev_sources:  list[str] = []
+    rel_low      = relation.lower()
+
+    # ── 1. Явное родственное ключевое слово ──────────────────────────────
     for kw in _FAMILY_KWS:
         if kw in rel_low:
             score += 15.0
             evidence.append(f"явная связь «{relation}»")
+            ev_sources.append('Sauron: поле связи')
             break
 
-    # 2. Нейтральное поле «Связь с лицом» без явного типа — небольшой бонус
+    # ── 2. Нейтральный тип связи без семейного кw ────────────────────────
     if relation and not any(kw in rel_low for kw in _FAMILY_KWS | _NON_FAMILY_KWS):
         score += 3.0
         evidence.append(f"поле связи: «{relation}»")
 
-    # 3. Штраф за нерод. связи
+    # ── 3. Штраф за неродственную связь ──────────────────────────────────
     for kw in _NON_FAMILY_KWS:
         if kw in rel_low:
             score -= 12.0
             evidence.append(f"неродственная связь: {kw}")
             break
 
-    # 4. Общая фамилия
+    # ── 4. Общая фамилия ──────────────────────────────────────────────────
     ml, rl = _fio_last(main_fio), _fio_last(rel_fio)
     if ml and rl and ml == rl:
         score += 8.0
         evidence.append("общая фамилия")
+        common_signs.append(f"фамилия: {ml}")
 
-    # 5. Общее отчество (один отец → брат/сестра или тот же человек)
+    # ── 5. Общее отчество ────────────────────────────────────────────────
     mp, rp = _fio_patron(main_fio), _fio_patron(rel_fio)
     if mp and rp and mp == rp and mp != ml:
         score += 5.0
         evidence.append("совпадает отчество")
+        common_signs.append(f"отчество: {mp}")
 
-    # 6. Общий адрес
+    # ── 6. Общий адрес регистрации ────────────────────────────────────────
     if shared_addr:
         score += 5.0
         evidence.append("общий адрес регистрации")
+        common_signs.append("общий адрес")
+        ev_sources.append('Sauron: адрес')
 
-    # 7. Семейный источник
-    src_low = sources.lower()
+    # ── 7. Семейный источник ──────────────────────────────────────────────
+    src_low = rel_sources.lower()
     for kw in _FAMILY_SRC_KWS:
         if kw in src_low:
             score += 6.0
             evidence.append(f"семейный источник: {kw}")
+            ev_sources.append(f'Sauron: {kw}')
             break
 
-    # 8. Общий телефон
+    # ── 8. Общий телефон ─────────────────────────────────────────────────
     if shared_phones:
         score += 4.0
         evidence.append("общий телефон")
+        common_signs.append("общий телефон")
+        ev_sources.append('Sauron: телефон')
 
-    # 9. Несколько подтверждений
+    # ── 9. Количество подтверждений ───────────────────────────────────────
     if confirm_count >= 2:
         score += 3.0
-        evidence.append(f"{confirm_count}× подтверждений")
+        evidence.append(f"{confirm_count}× подтверждений в базе")
+
+    # ── Расширенный анализ из полей Sauron ──────────────────────────────
+    if main_fields and rel_fields:
+        # 10. Общий ВКонтакте
+        sh_vk = _split_field(main_fields.get('vk','')) & _split_field(rel_fields.get('vk',''))
+        if sh_vk:
+            score += 4.0
+            lnk = next(iter(sh_vk))
+            evidence.append('общий профиль ВКонтакте')
+            social_ev.append(f"ВК: {lnk}")
+            ev_sources.append('ВКонтакте')
+
+        # 11. Общие Одноклассники
+        sh_ok = _split_field(main_fields.get('ok','')) & _split_field(rel_fields.get('ok',''))
+        if sh_ok:
+            score += 3.0
+            lnk = next(iter(sh_ok))
+            evidence.append('общий профиль Одноклассники')
+            social_ev.append(f"ОК: {lnk}")
+            ev_sources.append('Одноклассники')
+
+        # 12. Общие другие соцсети
+        sh_soc = (_split_field(main_fields.get('other_social',''))
+                  & _split_field(rel_fields.get('other_social','')))
+        if sh_soc:
+            score += 3.0
+            lnk = next(iter(sh_soc))
+            evidence.append('общий профиль в соцсетях')
+            social_ev.append(f"соцсеть: {lnk}")
+            ev_sources.append('соцсеть')
+
+        # 13. Общий email
+        sh_em = _split_field(main_fields.get('emails','')) & _split_field(rel_fields.get('emails',''))
+        if sh_em:
+            score += 5.0
+            em = next(iter(sh_em))
+            evidence.append('общий email')
+            common_signs.append(f"email: {em}")
+            ev_sources.append('email')
+
+        # 14. Фамилия основного упоминается в источниках родственника
+        if ml and ml in (rel_fields.get('sources','') or '').lower():
+            score += 2.0
+            evidence.append('фамилия основного в источниках')
+            ev_sources.append('Sauron: источники')
+
+        # 15. Общий город/регион (из адресов)
+        main_addr_low = (main_fields.get('addresses','') or '').lower()
+        rel_addr_low  = (rel_fields.get('addresses','') or '').lower()
+        main_cities   = {w for w in re.findall(r'[а-яё]{4,}', main_addr_low)}
+        rel_cities    = {w for w in re.findall(r'[а-яё]{4,}', rel_addr_low)}
+        _GEO_STOP     = {'улица','город','район','область','проспект','переулок',
+                         'квартира','корпус','строение','номер','дома'}
+        shared_cities = main_cities & rel_cities - _GEO_STOP
+        if shared_cities and not shared_addr:
+            city_ex = sorted(shared_cities)[:2]
+            score += 2.0
+            evidence.append(f"общий город/регион: {', '.join(city_ex)}")
+            common_signs.append(f"регион: {', '.join(city_ex)}")
 
     confidence = ("высокая" if score >= 18 else
                   "средняя"  if score >= FAMILY_SCORE_MIN else "низкая")
 
-    return score, '; '.join(evidence), confidence
+    return (
+        score,
+        '; '.join(evidence),
+        confidence,
+        '; '.join(social_ev),
+        '; '.join(common_signs),
+        '; '.join(dict.fromkeys(ev_sources)),
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1016,60 +1230,95 @@ def run_file_search(
                     rel_norms.add(n)
             shared_phones = bool(main_phones_norm & rel_norms)
 
-            # Семейный скоринг
-            score, evidence, confidence = _family_score(
+            # ── Расширенный скоринг родства ───────────────────────────────
+            score, evidence, confidence, social_ev, common_signs, ev_src = _gather_evidence(
                 rel_str, fio, cand_fio,
-                shared_addr, rel_fields.get('sources',''),
+                shared_addr, rel_fields.get('sources', ''),
                 shared_phones, confirm_cnt,
+                main_fields=fields,
+                rel_fields=rel_fields,
             )
 
             if score < FAMILY_SCORE_MIN:
-                # Не родственник — пропускаем
                 continue
 
-            # Телефоны родственника
+            # ── Телефоны родственника ──────────────────────────────────────
             rel_local_seen: set[str] = set()
             rel_liquid, _, rel_note = _pick_top_phones(
-                rel_fields.get('phones_raw',[]),
-                rel_fields.get('phone_freq',{}),
-                rel_fields.get('phone_src',{}),
+                rel_fields.get('phones_raw', []),
+                rel_fields.get('phone_freq', {}),
+                rel_fields.get('phone_src', {}),
                 rel_local_seen,
                 top_n=TOP_PHONES,
             )
-            # Не дедуп с global_seen для родственников — у каждого свои номера
             for norm in rel_liquid:
                 global_seen.add(norm)
 
             rel_in_mx, rel_mx_src = _check_maxim(
-                rel_fields.get('sources',''), rel_fields.get('raw_records')
+                rel_fields.get('sources', ''), rel_fields.get('raw_records')
             )
-            rel_vk, rel_ok, rel_other = rel_fields.get('vk',''), rel_fields.get('ok',''), rel_fields.get('other_social','')
+            rel_vk    = rel_fields.get('vk', '')
+            rel_ok    = rel_fields.get('ok', '')
+            rel_other = rel_fields.get('other_social', '')
+
+            # ── VK API обогащение (только если токен настроен) ────────────
+            vk_data: dict = {}
+            if rel_vk:
+                try:
+                    import vk_api_client as _vk
+                    if _vk.is_available():
+                        vk_data = _vk.enrich_relative(rel_vk, fio, cand_fio, cand_dob) or {}
+                        if vk_data.get('vk_score_bonus', 0) > 0:
+                            score    += vk_data['vk_score_bonus']
+                            evidence += ('; VK: ' + vk_data['vk_evidence']) if vk_data.get('vk_evidence') else ''
+                            if score >= 18:
+                                confidence = 'высокая'
+                            ev_src = (ev_src + '; VK API').strip('; ')
+                except Exception as _ve:
+                    logger.debug(f"VK enrich skipped: {_ve}")
+
+            # ── Дата рождения — только настоящая дата ─────────────────────
+            real_dob = cand_dob or _extract_dob_from_raw(rel_fields.get('raw_records', []))
 
             rr = RelativeRecord(
-                source_fio   = fio,
-                main_fio     = fields['found_fio'],
-                fio          = cand_fio,
-                dob          = cand_dob or rel_fields.get('found_fio',''),
-                alt_fio      = alt_fio,
-                relation     = rel_str,
-                address      = rel_fields.get('addresses','') if rel_found else '',
-                phones       = rel_liquid,
-                phone_note   = rel_note,
-                vk           = rel_vk,
-                ok           = rel_ok,
-                other_social = rel_other,
-                in_maxim     = rel_in_mx,
-                maxim_source = rel_mx_src,
-                evidence     = evidence,
-                confidence   = confidence,
-                comment      = f"Найдено {rel_fields.get('raw_count',0)} записей Sauron" if rel_found else "Не найден в Sauron",
+                source_fio      = fio,
+                main_fio        = fields['found_fio'],
+                fio             = cand_fio,
+                dob             = real_dob,                          # ТОЛЬКО дата, никаких ФИО
+                variants_fio    = alt_fio,
+                alt_fio         = alt_fio,
+                relation        = _human_relation(rel_str, evidence),  # читаемая причина
+                address         = rel_fields.get('addresses', '') if rel_found else '',
+                phones          = rel_liquid,
+                phone_note      = rel_note or ('мобильные номера не найдены' if not rel_liquid else ''),
+                vk              = rel_vk,
+                ok              = rel_ok,
+                other_social    = rel_other,
+                in_maxim        = rel_in_mx,
+                maxim_source    = rel_mx_src,
+                evidence        = evidence,
+                confidence      = confidence,
+                social_evidence = social_ev,
+                common_signs    = common_signs,
+                score           = round(score, 1),
+                evidence_source = ev_src,
+                vk_profile_url  = vk_data.get('vk_profile_url', ''),
+                vk_full_name    = vk_data.get('vk_full_name', ''),
+                vk_maiden_name  = vk_data.get('vk_maiden_name', ''),
+                vk_city         = vk_data.get('vk_city', ''),
+                vk_relatives_str= vk_data.get('vk_relatives', ''),
+                vk_evidence     = vk_data.get('vk_evidence', ''),
+                comment         = (
+                    f"Найдено {rel_fields.get('raw_count', 0)} записей Sauron"
+                    if rel_found else "Не найден в Sauron"
+                ),
             )
             relatives.append(rr)
             rel_count += 1
 
             for norm in rel_liquid:
                 _add_phone_check(norm, cand_fio, "родственник", rel_in_mx,
-                                 rel_fields.get('sources',''), "действующий")
+                                 rel_fields.get('sources', ''), "действующий")
 
         pr.rel_count = rel_count
 
@@ -1116,6 +1365,14 @@ def build_chat_summary(
     lim_errors = sum(1 for e in errors if e.error_type == "limit")
     api_errors = sum(1 for e in errors if "stop" in e.error_type or "api" in e.error_type)
 
+    # VK API статус
+    vk_enriched = sum(1 for r in relatives if r.vk_profile_url)
+    try:
+        import vk_api_client as _vk
+        vk_status = "включён ✅" if _vk.is_available() else "не настроен"
+    except Exception:
+        vk_status = "не настроен"
+
     lines = ["🔍 *Поиск по файлу завершён*\n"]
     lines.append(f"👤 Обработано ФИО: *{total}*")
     lines.append(f"✅ Найдено: *{found}*   |   ❌ Не найдено: *{not_found}*")
@@ -1126,7 +1383,9 @@ def build_chat_summary(
         lines.append(f"  ↳ Со сменой фамилии/алиасом: *{rel_alias}*")
     lines.append(f"\n📱 Действующих номеров: *{phones_act}*")
     lines.append(f"🚕 В Максе/taxsee: *{maxim_cnt}*")
-    lines.append(f"🔵 ВК: *{vk_cnt}*   |   🟠 ОК: *{ok_cnt}*")
+    lines.append(f"🔵 ВКонтакте: *{vk_cnt}*   |   🟠 ОК: *{ok_cnt}*")
+    lines.append(f"🔷 VK API: {vk_status}"
+                 + (f" — обогащено: *{vk_enriched}*" if vk_enriched else ""))
 
     if lim_errors:
         lines.append(f"\n⚠️ Пропущено по лимиту: *{lim_errors} записей*")
@@ -1398,24 +1657,33 @@ def _csv_relatives(relatives: list[RelativeRecord]) -> bytes:
     headers = [
         "Исходное ФИО", "Найденный человек",
         "Родственник ФИО", "Дата рождения родственника",
-        "Прежняя / другая фамилия", "Тип родства / причина",
-        "Адрес родственника", "Действующие телефоны",
-        "Проверка номера",
-        "ВКонтакте", "Одноклассники", "Другие соцсети",
+        "Варианты ФИО / алиасы", "Тип родства / причина",
+        "Адрес родственника", "Действующие телефоны", "Примечание по телефонам",
+        "ВКонтакте (Sauron)", "Одноклассники", "Другие соцсети",
         "Есть в Максе", "Источник Макса",
-        "Доказательство родства", "Уверенность", "Комментарий",
+        "Доказательства из соцсетей", "Общие признаки",
+        "Скоринг родства", "Источник доказательства",
+        "Все доказательства родства", "Уверенность",
+        # VK API колонки
+        "VK профиль", "VK имя", "VK девичья/старая фамилия",
+        "VK родственники", "VK город", "Доказательства VK",
+        "Комментарий",
     ]
     rows = []
     for r in relatives:
         rows.append([
             r.source_fio, r.main_fio,
             r.fio, r.dob,
-            r.alt_fio, r.relation,
-            r.address, '; '.join(r.phones),
-            r.phone_note,
+            r.variants_fio or r.alt_fio, r.relation,
+            r.address, '; '.join(r.phones), r.phone_note,
             r.vk, r.ok, r.other_social,
             "Да" if r.in_maxim else "Нет", r.maxim_source,
-            r.evidence, r.confidence, r.comment,
+            r.social_evidence, r.common_signs,
+            r.score, r.evidence_source,
+            r.evidence, r.confidence,
+            r.vk_profile_url, r.vk_full_name, r.vk_maiden_name,
+            r.vk_relatives_str, r.vk_city, r.vk_evidence,
+            r.comment,
         ])
     return _make_csv(headers, rows)
 
@@ -1426,11 +1694,16 @@ def _csv_phones(phones: list[PhoneCheck]) -> bytes:
         "Номер (нормализованный)", "Тип номера",
         "Найден в Sauron", "Есть в Максе",
         "Соцсети", "Свежие источники (2024-2026)",
-        "Статус", "Причина отбора / отброса",
+        "Статус", "Причина отбора / отброса", "Подтверждено источниками",
     ]
     rows = []
     for pc in phones:
         is_mob = _is_mobile(pc.phone_norm)
+        confirmed = []
+        if pc.in_sauron:    confirmed.append('Sauron')
+        if pc.in_maxim:     confirmed.append('Макс/taxsee')
+        if pc.fresh_src:    confirmed.append('свежий источник 2024+')
+        if pc.social_links: confirmed.append('соцсеть')
         rows.append([
             pc.owner_fio, pc.owner_type,
             pc.phone_norm,
@@ -1441,6 +1714,7 @@ def _csv_phones(phones: list[PhoneCheck]) -> bytes:
             "Да" if pc.fresh_src else "Нет",
             pc.status,
             pc.reject_reason or ("Топ по скорингу" if pc.status == "действующий" else ""),
+            '; '.join(confirmed),
         ])
     return _make_csv(headers, rows)
 
