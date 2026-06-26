@@ -1988,16 +1988,19 @@ def _btn_sauron_search(chat_id: int):
     """Ручной поиск через Sauron — спрашивает запрос, потом ищет."""
     # Проверяем настройку не показывая credentials
     s_status = sauron.status()
-    if "не задан" in s_status or "не настроен" in s_status.lower():
+    if "не настроен" in s_status.lower() or "не задан" in s_status:
         markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
         bot.send_message(
             chat_id,
             "🔍 *Sauron — поиск информации*\n\n"
-            "⚠️ Не настроено. Добавь в Replit Secrets:\n"
-            "• `SAURON_LOGIN` — твой логин на sauron.info\n"
+            "⚠️ Не настроено. Добавь в Replit Secrets хотя бы одно:\n\n"
+            "*Вариант 1 — API-ключ (рекомендуется):*\n"
+            "• `SAURON_API_KEY` — ключ от sauron.info\n\n"
+            "*Вариант 2 — логин/пароль:*\n"
+            "• `SAURON_USERNAME` — твой логин\n"
             "• `SAURON_PASSWORD` — твой пароль\n\n"
-            "После добавления перезапусти бота.\n\n"
-            "_Логин и пароль в Telegram не присылай — только через Replit Secrets._",
+            "После добавления перезапусти бота.\n"
+            "_Ключи и пароли в Telegram не присылай — только через Replit Secrets._",
             parse_mode="Markdown",
             reply_markup=markup,
         )
