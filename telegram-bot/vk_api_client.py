@@ -63,6 +63,12 @@ def check_token() -> tuple[bool, str]:
         name = f"{user.get('first_name','')} {user.get('last_name','')}".strip()
         uid  = user.get('id', '?')
         return True, f"Авторизован как {name} (id{uid})"
+
+    # Пустой список → это сервисный токен (нет «своего профиля»).
+    # Проверяем реальную задачу: чтение чужого публичного профиля.
+    probe = _api_call('users.get', {'user_ids': '1', 'fields': 'domain'})
+    if isinstance(probe, list) and probe:
+        return True, "Сервисный токен валиден (чтение публичных профилей работает)"
     return False, "Неожиданный ответ VK API"
 
 
