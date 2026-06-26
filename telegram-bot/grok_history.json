@@ -2,163 +2,163 @@
   "7959647798": [
     {
       "role": "user",
-      "content": "send_message(chat_id, \"❌ По заданным критериям возможных родственников не обнаружено.\")\n            else:\n                out = \"📋 **Найденные связи и потенциальные родственники:**\\n\\n\" + \"\\n\\n\".join(res[:8])\n                safe_send(chat_id, out, main_menu())\n            return\n        else:\n            handle_sheet_command(chat_id, t, mode)\n        return\n\n    if chat_id in waiting_for_wallet:\n        waiting_for_wallet.discard(chat_id)\n        address = t\n        if not (address.startswith(\"T\") and len(address) == 34):\n            bot.send_message(chat_id,\n                             \"⚠️ Некорректный TRC20 адрес.\\nНажми *💰 USDT крипто* и попробуй снова.\",\n                             parse_mode=\"Markdown\")\n            return\n        _handle_grok_action(chat_id, \"usdt\", address)\n        return\n\n    # ══════════════════════════════════════════════════════════════════\n    # 1.5 ЯВНЫЕ КОМАНДЫ ПАМЯТИ\n    # ══════════════════════════════════════════════════════════════════\n\n    if chat_id == OWNER_ID:\n        remember_prefixes = [\n            \"запомни что \", \"запомни: \", \"запомни \",\n            \"сохрани что \", \"сохрани: \", \"сохрани факт \",\n            \"не забудь что \", \"не забудь: \",\n            \"запиши что \", \"запиши: \",\n        ]\n        for prefix in remember_prefixes:\n            if tl.startswith(prefix):\n                fact = t[len(prefix):].strip()\n                if fact:\n                    added = add_fact(fact)\n                    if added:\n                        bot.send_message(chat_id, f\"🧠 Запомнил: {fact}\",\n                                         reply_markup=main_menu())\n                    else:\n                        bot.send_message(chat_id, f\"🧠 Уже знаю это: {fact}\",\n                                         reply_markup=main_menu())\n                else:\n                    bot.send_message(chat_id, \"⚠️ Что именно запомнить?\")\n                return\n\n    # ══════════════════════════════════════════════════════════════════\n    # 2. ТОЧНЫЕ МЕТКИ КНОПОК МЕНЮ — UI-навигация\n    # ══════════════════════════════════════════════════════════════════\n\n    BUTTON_LABELS = {\n        \"📞 позвонить\": lambda: _btn_call(chat_id),\n        \"🚕 тоха\": lambda: bot.send_message(chat_id, \"🚕 Что делаем с Тохой?\", reply_markup=toha_menu()),\n        \"📍 геопозиция\": lambda: bot.send_message(chat_id, \"📍 Отправь геопозицию — нажми скрепку 📎 → Геопозиция\"),\n        \"📗 таблицы\": lambda: _btn_sheets(chat_id),\n        \"💰 usdt крипто\": lambda: _btn_usdt(chat_id),\n        \"📊 я тигр\": lambda: _ask_grok_and_route(chat_id, \"Сделай полную статистику по бизнесу Я Тигр\"),\n        \"📋 фоп\": lambda: _show_tax_calendar(chat_id),\n        \"/налоги\": lambda: _show_tax_calendar(chat_id),\n        \"налоги\": lambda: _show_tax_calendar(chat_id),\n        \"🔍 родственники\": lambda: _btn_relatives(chat_id),\n        \"родословная\": lambda: _btn_relatives(chat_id),\n        \"поиск родственников\": lambda: _btn_relatives(chat_id),\n        \"🗑️ забыть\":"
+      "content": "0933129999"
     },
     {
       "role": "assistant",
-      "content": "Код с обработкой кнопки «родственники» вижу. Что именно надо сделать?"
+      "content": "[ACTION:call_restaurant:+380933129999:Здравствуйте, хочу забронировать номер на одну ночь завтра на имя Руслан.]"
     },
     {
       "role": "user",
-      "content": "Замени внутри гости файла bot.py на \n\n# Content-Type: text/x-python\n# Download-Filename: bot.py\n\nimport telebot\nfrom telebot import types\nimport os\nimport time\nimport io\nfrom urllib.parse import quote\nfrom openai import OpenAI\nfrom keep_alive import keep_alive\nfrom sheets import get_values, append_values, get_sheet_info, format_table\nfrom sms import send_geo_to_toha, send_sms_to_toha\nfrom analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets\nfrom roles import get_role, set_role, list_roles\nfrom calls import make_call\nfrom grok import ask_grok\nfrom memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory\nfrom tron import get_usdt_transactions, get_account_balance, build_tx_summary\nfrom reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder\nimport tax_calendar\nimport sheet_monitor\n\nimport threading\nimport json\nimport re\nimport aiohttp\nimport asyncio\nfrom datetime import datetime, timedelta\n\nTOKEN = os.environ.get(\"TELEGRAM_BOT_TOKEN\")\nif not TOKEN:\n    raise RuntimeError(\"TELEGRAM_BOT_TOKEN is not set\")\n\n# UTC offset for Ukraine (EET = UTC+2, adjust to +3 in summer if needed)\nTZ_HOURS = int(os.environ.get(\"TZ_OFFSET_HOURS\", \"2\"))\n\ndef _now_local() -> datetime:\n    \"\"\"Текущее местное время (UTC + TZ_HOURS).\"\"\"\n    return datetime.utcnow() + timedelta(hours=TZ_HOURS)\n\nOPENAI_BASE_URL = os.environ.get(\"AI_INTEGRATIONS_OPENAI_BASE_URL\")\nOPENAI_API_KEY = os.environ.get(\"AI_INTEGRATIONS_OPENAI_API_KEY\")\n\nopenai_client = OpenAI(\n    base_url=OPENAI_BASE_URL,\n    api_key=OPENAI_API_KEY,\n)\n\nbot = telebot.TeleBot(TOKEN)\n\n# ──────────────────────────────────────────────\n# БЕЗОПАСНОСТЬ — белый список\n# ──────────────────────────────────────────────\nOWNER_ID = 7959647798          # Руслан — всегда имеет доступ\nSECRET_CODE = \"ruslan2024vip\"  # Секретный пароль для новых пользователей\nWHITELIST_FILE = \"whitelist.json\"\n\n# Токен VK API для поиска людей (Сервисный ключ доступа из панели VK Developers)\nVK_TOKEN = os.environ.get(\"VK_API_TOKEN\", \"\")\n\ndef _load_whitelist() -> set:\n    if os.path.exists(WHITELIST_FILE):\n        try:\n            import json\n            with open(WHITELIST_FILE) as f:\n                return set(json.load(f))\n        except Exception:\n            pass\n    return {OWNER_ID}\n\ndef _save_whitelist():\n    import json\n    with open(WHITELIST_FILE, \"w\") as f:\n        json.dump(list(allowed_users), f)\n\nallowed_users: set = _load_whitelist()\nallowed_users.add(OWNER_ID)\n\ndef is_allowed(chat_id: int) -> bool:\n    return chat_id in allowed_users\n\ndef grant_access(chat_id: int):\n    allowed_users.add(chat_id)\n    _save_whitelist()\n\n# ──────────────────────────────────────────────\n\ndef safe_send(chat_id: int, text: str, reply_markup=None):\n    \"\"\"Отправляет сообщение — сначала с Markdown, при ошибке — без форматирования.\"\"\"\n    for chunk in [text[i:i+4000] for i in range(0, max(len(text), 1), 4000)]:\n        try:\n            bot.send_message(chat_id, chunk, parse_mode=\"Markdown\", reply_markup=reply_markup)\n        except Exception:\n            try:\n                bot.send_message(chat_id, chunk, reply_markup=reply_markup)\n            except Exception as e2:\n                bot.send_message(chat_id, f\"⚠️ Не удалось отправить ответ: {str(e2)[:100]}\")\n\n\ndef _tts_send_voice(chat_id: int, text: str):\n    \"\"\"Конвертирует текст в голос через gpt-audio-mini и отправляет как голосовое сообщение.\"\"\"\n    import re, base64\n    try:\n        clean = re.sub(r\"\\[ACTION:[^\\]]*\\]\", \"\", text)\n        clean = re.sub(r\"[*_`#>]\", \"\", clean).strip()\n        if not clean:\n            return\n        response = openai_client.chat.completions.create(\n            model=\"gpt-audio-mini\",\n            modalities=[\"text\", \"audio\"],\n            audio={\"voice\": \"onyx\", \"format\": \"opus\"},\n            messages=[\n                {\"role\": \"system\", \"content\": \"Прочитай текст вслух естественно и живо, по-русски.\"},\n                {\"role\": \"user\", \"content\": clean},\n            ],\n        )"
+      "content": "Можешь другу моему набрать и сказать что я его люблю"
     },
     {
       "role": "assistant",
-      "content": "Не могу это. Не умею редактировать файлы."
+      "content": "Нужен номер телефона друга, чтобы позвонить. Какой у него номер?"
     },
     {
       "role": "user",
-      "content": "Создай мне пустой файл бот"
+      "content": "+380 98 038 33 30"
     },
     {
       "role": "assistant",
-      "content": "Не могу это."
+      "content": "[ACTION:send_sms:+380980383330:Привет, это Руслан. Хочу сказать, что я тебя люблю!]"
     },
     {
       "role": "user",
-      "content": "Филатов Павел Олегович \nГород Сасово Рязанская область \nНайди родственников"
+      "content": "Набери его и скажи это"
     },
     {
       "role": "assistant",
-      "content": "Не могу искать родственников."
+      "content": "[ACTION:call_toha:Привет, это Руслан. Хочу сказать, что я тебя люблю!]"
     },
     {
       "role": "user",
-      "content": "ПСС"
+      "content": "Набери на номер 0933129999 и скажи ты лучший"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "[ACTION:call_restaurant:+380933129999:Привет, это Руслан. Ты лучший!]"
     },
     {
       "role": "user",
-      "content": "Сделай полную статистику по бизнесу Я Тигр"
+      "content": "Набери тоху и спроси у него где лежат деньги"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "[ACTION:call_toha:Привет, Тоха! Где лежат деньги?]"
     },
     {
       "role": "user",
-      "content": "Ты тут"
+      "content": "Что там на пк у меня происходит и"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "Не совсем понял, что именно ты имеешь в виду. Уточни, что именно нужно проверить на ПК?"
     },
     {
       "role": "user",
-      "content": "Эй"
+      "content": "Скрин скинь"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "[ACTION:screenshot]"
     },
     {
       "role": "user",
-      "content": "ПСС"
+      "content": "Почини это"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "Не могу это. Поясни, что конкретно нужно сделать?"
     },
     {
       "role": "user",
-      "content": "ПСС"
+      "content": "Это почини"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "Не могу это. Опиши, что именно надо починить, чтобы понять."
     },
     {
       "role": "user",
-      "content": "Эй"
+      "content": "+380 73 001 89 48 набери поздравь с прохождением границы"
     },
     {
       "role": "assistant",
-      "content": "Да, что-то нужно?"
+      "content": "[ACTION:send_sms:+380730018948:Поздравляю с успешным прохождением границы!]"
     },
     {
       "role": "user",
-      "content": "Ты живой"
+      "content": "Набери поздравь с прохождением границы +380 73 001 89 48"
     },
     {
       "role": "assistant",
-      "content": "Да, живой! Что-то нужно?"
+      "content": "[ACTION:send_sms:+380730018948:Поздравляю с прохождением границы! Успехов тебе!]"
     },
     {
       "role": "user",
-      "content": "Сделай полную статистику по бизнесу Я Тигр"
+      "content": "Ты тут ?"
     },
     {
       "role": "assistant",
-      "content": "❌ Gemini не настроен — добавь GEMINI_API_KEY в .env"
+      "content": "Да, я тут! Что нужно?"
     },
     {
       "role": "user",
-      "content": "Таблицы проверь"
+      "content": "Набери его а не пиши"
     },
     {
       "role": "assistant",
-      "content": "Сейчас проверю таблицы."
+      "content": "[ACTION:call_restaurant:+380730018948:Поздравляю с успешным прохождением границы!]"
     },
     {
       "role": "user",
-      "content": "Только мы"
+      "content": "📊 Я Тигр"
     },
     {
       "role": "assistant",
-      "content": "Понял, гляну только на ваши таблицы."
+      "content": "Что-то конкретное по бизнесу? Как помочь?"
     },
     {
       "role": "user",
-      "content": "Как день твой ?"
+      "content": "Таблицы посмотри"
     },
     {
       "role": "assistant",
-      "content": "Все нормально, спасибо! А у тебя как?"
+      "content": "[ACTION:sheets_list]"
     },
     {
       "role": "user",
-      "content": "Живем"
+      "content": "Анализ сделать Только Мы"
     },
     {
       "role": "assistant",
-      "content": "Это хорошо! Главное, чтобы все было в порядке. Как дела с бизнесом?"
+      "content": "[ACTION:sheet_analytics:Мы]"
     },
     {
       "role": "user",
-      "content": "Позвонить можешь кому то ?"
+      "content": "только мы"
     },
     {
       "role": "assistant",
-      "content": "Да, кого позвонить?"
+      "content": "[ACTION:sheet_analytics:Только Мы]"
     },
     {
       "role": "user",
-      "content": "Маршрут сделай до буковкой"
+      "content": "Пробей номер 0955581682"
     },
     {
       "role": "assistant",
-      "content": "Не могу это. Уточни, куда именно нужно проложить маршрут."
+      "content": "Не могу это. Нужна более конкретная информация о том, что именно нужно сделать с номером."
     },
     {
       "role": "user",
-      "content": "Буковель"
+      "content": "Найди всю информацию по номеру 0955581682"
     },
     {
       "role": "assistant",
-      "content": "❌ Не могу это."
+      "content": "Не могу это. С подобной информацией не работаю."
     }
   ]
 }

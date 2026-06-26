@@ -6,6 +6,7 @@ except Exception:
     pass
 
 import telebot
+import sys
 from telebot import types
 import os
 import time
@@ -25,6 +26,16 @@ import pc_control
 import pc_apps
 import price_search
 import crm
+
+# ──────────────────────────────────────────────────────────────────
+# РЕЖИМ ЗАПУСКА
+# development — workspace workflow (только пока открыт браузер)
+# production  — Replit Reserved VM Deployment (24/7)
+# Устанавливается автоматически через run command в Deployment:
+#   cd telegram-bot && DEPLOYMENT_MODE=production python3 -u bot.py
+# ──────────────────────────────────────────────────────────────────
+DEPLOYMENT_MODE = os.environ.get("DEPLOYMENT_MODE", "development").lower()
+IS_PRODUCTION = DEPLOYMENT_MODE == "production"
 
 # Бэкенд ИИ: openai (ChatGPT), grok (xAI), gemini (Google), llama (Ollama).
 # По умолчанию — openai. Переключается через LLM_BACKEND в .env.
@@ -192,6 +203,13 @@ jarvis_mode: set = set()
 # Чаты в режиме тишины — короткие ответы без подсказок
 silence_mode: set = set()
 
+# Журнал действий раздела «Мой ПК» (in-memory, последние 200 записей)
+remote_action_log: list = []
+
+# Чаты, ожидающие подтверждения опасной команды ПК (shutdown/restart)
+waiting_remote_confirm: set = set()
+_remote_confirm_action: dict = {}  # chat_id → "shutdown" | "restart"
+
 # Чаты, ожидающие голосового ответа (запрос пришёл голосом)
 voice_request_chats: set = set()
 
@@ -256,6 +274,7 @@ def main_menu():
     markup.add("📋 ФОП",         "🗑️ Забыть")
     markup.add("🛣️ Маршрут",     "📝 Анкета")
     markup.add("🤖 ИИ чат",      "⚡ Jarvis")
+    markup.add("💻 Мой ПК")
     return markup
 
 
@@ -274,7 +293,29 @@ def jarvis_menu():
     markup.add("🧠 Память",       "📊 Таблицы")
     markup.add("📋 ФОП",          "💸 Расход ИИ")
     markup.add("🧠 Что ты умеешь?")
-    markup.add("🔙 Выйти из Jarvis")
+    markup.add("💻 Мой ПК",          "🔙 Выйти из Jarvis")
+    return markup
+
+
+def remote_access_menu():
+    """Меню раздела «Мой ПК» — только стандартные легальные инструменты."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("🖥 Статус ПК",       "🔑 ID подключения")
+    markup.add("🚀 Запустить AnyDesk", "🚀 Запустить TeamViewer")
+    markup.add("🌐 Chrome Remote Desktop")
+    markup.add("📖 Инструкции по настройке")
+    markup.add("📄 Журнал действий ПК", "🔒 Безопасность")
+    markup.add("🔙 Назад")
+    return markup
+
+
+def remote_instructions_menu():
+    """Меню выбора приложения для инструкций."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    markup.add("📖 AnyDesk — инструкция")
+    markup.add("📖 TeamViewer — инструкция")
+    markup.add("📖 Chrome Remote Desktop — инструкция")
+    markup.add("🔙 Назад к ПК")
     return markup
 
 
@@ -828,6 +869,32 @@ def process_text(chat_id, text):
             handle_sheet_command(chat_id, t, mode)
         return
 
+    # Подтверждение опасной команды ПК (shutdown/restart)
+    if chat_id in waiting_remote_confirm:
+        action = _remote_confirm_action.get(chat_id, "")
+        waiting_remote_confirm.discard(chat_id)
+        _remote_confirm_action.pop(chat_id, None)
+        if tl.strip() in ("да", "yes", "подтверждаю", "✅ да, подтверждаю"):
+            _log_remote(chat_id, f"подтверждено: {action}")
+            if action == "shutdown":
+                import platform, subprocess
+                if platform.system() == "Windows":
+                    subprocess.Popen(["shutdown", "/s", "/t", "30"])
+                    safe_send(chat_id, "🔴 Выключение ПК через 30 секунд. Для отмены: shutdown /a", remote_access_menu())
+                else:
+                    safe_send(chat_id, "⚠️ Выключение работает только на Windows (при локальном запуске bot.py).", remote_access_menu())
+            elif action == "restart":
+                import platform, subprocess
+                if platform.system() == "Windows":
+                    subprocess.Popen(["shutdown", "/r", "/t", "30"])
+                    safe_send(chat_id, "🔄 Перезагрузка ПК через 30 секунд. Для отмены: shutdown /a", remote_access_menu())
+                else:
+                    safe_send(chat_id, "⚠️ Перезагрузка работает только на Windows (при локальном запуске bot.py).", remote_access_menu())
+        else:
+            _log_remote(chat_id, f"отменено: {action}")
+            bot.send_message(chat_id, "✅ Отменено. Ничего не произошло.", reply_markup=remote_access_menu())
+        return
+
     # Ожидаем TRC20-адрес кошелька
     if chat_id in waiting_for_wallet:
         waiting_for_wallet.discard(chat_id)
@@ -959,6 +1026,21 @@ def process_text(chat_id, text):
         "🧠 память": lambda: _btn_show_memory(chat_id),
         "📊 таблицы": lambda: _btn_sheets(chat_id),
         "🔙 выйти из jarvis": lambda: (_jarvis_exit(chat_id)),
+        # ── Мой ПК ──────────────────────────────────────────────
+        "💻 мой пк": lambda: _btn_remote_access(chat_id),
+        "🖥 статус пк": lambda: _btn_remote_status(chat_id),
+        "🔑 id подключения": lambda: _btn_remote_ids(chat_id),
+        "🚀 запустить anydesk": lambda: _btn_remote_launch(chat_id, "AnyDesk"),
+        "🚀 запустить teamviewer": lambda: _btn_remote_launch(chat_id, "TeamViewer"),
+        "🌐 chrome remote desktop": lambda: _btn_remote_crd(chat_id),
+        "📖 инструкции по настройке": lambda: bot.send_message(
+            chat_id, "📖 Выбери приложение:", reply_markup=remote_instructions_menu()),
+        "📖 anydesk — инструкция": lambda: _btn_remote_instructions(chat_id, "anydesk"),
+        "📖 teamviewer — инструкция": lambda: _btn_remote_instructions(chat_id, "teamviewer"),
+        "📖 chrome remote desktop — инструкция": lambda: _btn_remote_instructions(chat_id, "crd"),
+        "📄 журнал действий пк": lambda: _btn_remote_log(chat_id),
+        "🔒 безопасность": lambda: _btn_remote_safety(chat_id),
+        "🔙 назад к пк": lambda: _btn_remote_access(chat_id),
         "🗑️ забыть": lambda: _btn_forget(chat_id),
         "🛣️ маршрут": lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
         "📝 анкета": lambda: _start_anketa(chat_id),
@@ -1319,6 +1401,268 @@ def _jarvis_exit(chat_id):
 
 # ══════════════════════════════════════════════════════════════════
 # конец блока Jarvis
+# ══════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════
+# 💻 МОЙ ПК — удалённый доступ через стандартные приложения
+# ══════════════════════════════════════════════════════════════════
+
+def _log_remote(chat_id: int, action: str):
+    """Записывает действие в журнал раздела «Мой ПК»."""
+    now = _now_local()
+    entry = f"[{now.strftime('%d.%m %H:%M')}] {action}"
+    remote_action_log.append(entry)
+    if len(remote_action_log) > 200:
+        remote_action_log.pop(0)
+
+
+def _remote_owner_check(chat_id: int) -> bool:
+    """Возвращает True если это владелец, иначе отправляет отказ."""
+    if chat_id == OWNER_ID:
+        return True
+    bot.send_message(
+        chat_id,
+        "⛔ Раздел «Мой ПК» доступен только владельцу бота.\n"
+        "Если ты владелец — убедись что твой Telegram ID совпадает с OWNER_ID в настройках.",
+        reply_markup=main_menu(),
+    )
+    return False
+
+
+def _btn_remote_access(chat_id: int):
+    """Главный экран раздела «Мой ПК»."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, "открыл раздел «Мой ПК»")
+    text = (
+        "💻 *Мой ПК — Удалённый доступ*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Управление через *стандартные* приложения:\n"
+        "• AnyDesk\n"
+        "• TeamViewer\n"
+        "• Chrome Remote Desktop\n\n"
+        "🔒 *Безопасность:*\n"
+        "• Я НЕ читаю твои пароли, сессии, историю браузера или куки\n"
+        "• НЕ присылай мне коды из Telegram, SMS-коды или пароли\n"
+        "• Мне достаточно твоего *Telegram ID* — личный аккаунт не нужен\n"
+        "• Все действия записываются в журнал\n\n"
+        "Выбери действие 👇"
+    )
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=remote_access_menu())
+
+
+def _btn_remote_status(chat_id: int):
+    """Статус ПК/сервера через psutil."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, "запросил статус ПК")
+    lines = ["🖥 *Статус системы*\n"]
+    try:
+        import psutil
+        cpu = psutil.cpu_percent(interval=1)
+        ram = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        lines.append(f"💻 CPU: {cpu}%")
+        lines.append(f"🧠 RAM: {ram.percent}% "
+                     f"({ram.used // 1024 // 1024} МБ / {ram.total // 1024 // 1024} МБ)")
+        lines.append(f"💾 Диск: {disk.percent}% занято "
+                     f"({disk.free // 1024 // 1024 // 1024} ГБ свободно)")
+    except ImportError:
+        lines.append("_(psutil не установлен — детальный статус недоступен)_")
+    except Exception as e:
+        lines.append(f"_(Ошибка: {e})_")
+
+    mode = "🏠 Локальный ПК" if DEPLOYMENT_MODE != "production" else "☁️ Replit сервер"
+    now = _now_local()
+    lines.append(f"\n⚡ Режим: {mode}")
+    lines.append(f"🕐 Время: {now.strftime('%H:%M')} (UTC+{_ukraine_tz_hours()})")
+
+    if DEPLOYMENT_MODE == "production":
+        lines.append(
+            "\n_Это статус Replit-сервера, а не твоего домашнего ПК.\n"
+            "Для статуса домашнего ПК запусти bot.py локально._"
+        )
+    safe_send(chat_id, "\n".join(lines), remote_access_menu())
+
+
+def _btn_remote_ids(chat_id: int):
+    """Показывает сохранённые ID подключения из Secrets."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, "запросил ID подключения")
+    anydesk_id = os.environ.get("ANYDESK_ID", "")
+    tv_id = os.environ.get("TEAMVIEWER_ID", "")
+    pc_name = os.environ.get("REMOTE_PC_NAME", "")
+    lines = ["🔑 *Сохранённые ID подключения*\n"]
+    if anydesk_id:
+        lines.append(f"🟢 AnyDesk ID: `{anydesk_id}`")
+    else:
+        lines.append("⚠️ AnyDesk ID: не сохранён")
+        lines.append("  → Добавь `ANYDESK_ID` в Replit Secrets")
+    if tv_id:
+        lines.append(f"🟢 TeamViewer ID: `{tv_id}`")
+    else:
+        lines.append("⚠️ TeamViewer ID: не сохранён")
+        lines.append("  → Добавь `TEAMVIEWER_ID` в Replit Secrets")
+    if pc_name:
+        lines.append(f"\n🖥 ПК: {pc_name}")
+    lines.append(
+        "\n🔒 _ID хранятся в Replit Secrets — бот не просит пароли._\n"
+        "_Пароль сеанса задаёшь вручную в самом приложении._"
+    )
+    safe_send(chat_id, "\n".join(lines), remote_access_menu())
+
+
+def _btn_remote_launch(chat_id: int, app_name: str):
+    """Пробует запустить приложение удалённого доступа."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, f"запустил приложение: {app_name}")
+    if DEPLOYMENT_MODE == "production":
+        bot.send_message(
+            chat_id,
+            f"☁️ Бот работает на Replit-сервере и не может запустить {app_name} на твоём ПК.\n\n"
+            f"Чтобы запускать приложения удалённо:\n"
+            f"1. Установи {app_name} на свой ПК\n"
+            f"2. Открой его вручную или через ярлык\n"
+            f"3. Подключайся с телефона/другого устройства",
+            reply_markup=remote_access_menu(),
+        )
+        return
+    result = pc_apps.launch_app(app_name)
+    safe_send(chat_id, result, remote_access_menu())
+
+
+def _btn_remote_crd(chat_id: int):
+    """Информация о Chrome Remote Desktop."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, "открыл Chrome Remote Desktop")
+    crd_url = os.environ.get("CRD_SHARE_URL", "")
+    text = (
+        "🌐 *Chrome Remote Desktop*\n\n"
+        "Google's официальный инструмент — бесплатно, без регистрации на сторонних серверах.\n\n"
+    )
+    if crd_url:
+        text += f"🔗 Ссылка подключения: {crd_url}\n\n"
+        text += "_Ссылка из REPLIT SECRET `CRD_SHARE_URL`. Обновляй при каждой новой сессии._\n\n"
+    else:
+        text += "⚠️ Ссылка не сохранена. Добавь `CRD_SHARE_URL` в Replit Secrets после создания сессии.\n\n"
+    text += (
+        "📱 Подключение с телефона:\n"
+        "1. Установи *Chrome Remote Desktop* из Google Play / App Store\n"
+        "2. Войди в тот же Google-аккаунт что и на ПК\n"
+        "3. Твой ПК появится в списке — нажми для подключения"
+    )
+    safe_send(chat_id, text, remote_access_menu())
+
+
+def _btn_remote_instructions(chat_id: int, app: str):
+    """Подробная инструкция по настройке приложения удалённого доступа."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, f"запросил инструкцию: {app}")
+    if app == "anydesk":
+        text = (
+            "📖 *AnyDesk — настройка*\n\n"
+            "*На ПК (один раз):*\n"
+            "1. Скачай с [anydesk.com](https://anydesk.com) — бесплатная версия подходит\n"
+            "2. Запусти — AnyDesk ID появится в главном окне (9 цифр)\n"
+            "3. Сохрани ID: добавь `ANYDESK_ID=123456789` в Replit Secrets\n"
+            "4. Включи _Запускать при старте Windows_ в настройках AnyDesk\n"
+            "5. Установи пароль доступа в настройках → Безопасность\n\n"
+            "*Подключение с телефона:*\n"
+            "1. Установи AnyDesk из Google Play / App Store\n"
+            "2. Введи ID из бота (кнопка «🔑 ID подключения»)\n"
+            "3. Введи пароль который ты задал на ПК\n\n"
+            "🔒 _Пароль хранится только в AnyDesk — не присылай его в Telegram._"
+        )
+    elif app == "teamviewer":
+        text = (
+            "📖 *TeamViewer — настройка*\n\n"
+            "*На ПК (один раз):*\n"
+            "1. Скачай с [teamviewer.com](https://teamviewer.com) — бесплатно для личного использования\n"
+            "2. Запусти — в главном окне будет ID (9 цифр) и пароль сеанса\n"
+            "3. Для постоянного доступа: зарегистрируйся и добавь ПК в «Мои компьютеры»\n"
+            "4. Сохрани ID: добавь `TEAMVIEWER_ID=987654321` в Replit Secrets\n\n"
+            "*Подключение с телефона:*\n"
+            "1. Установи TeamViewer из Google Play / App Store\n"
+            "2. Войди в свой аккаунт → выбери свой ПК\n"
+            "   _или_ введи ID вручную и введи пароль сеанса\n\n"
+            "🔒 _Пароль сеанса меняется каждый запуск — не присылай его в Telegram._"
+        )
+    else:  # crd
+        text = (
+            "📖 *Chrome Remote Desktop — настройка*\n\n"
+            "*На ПК (один раз):*\n"
+            "1. Открой [remotedesktop.google.com/access](https://remotedesktop.google.com/access) в Chrome\n"
+            "2. Войди в Google-аккаунт\n"
+            "3. Нажми «Включить» → скачай и установи расширение\n"
+            "4. Задай PIN (минимум 6 цифр) — запомни его\n"
+            "5. ПК появится в списке как доступный\n\n"
+            "*Подключение с телефона:*\n"
+            "1. Установи _Chrome Remote Desktop_ из Google Play / App Store\n"
+            "2. Войди в тот же Google-аккаунт\n"
+            "3. Нажми на свой ПК → введи PIN\n\n"
+            "*Быстрая ссылка (без аккаунта):*\n"
+            "1. На [remotedesktop.google.com/support](https://remotedesktop.google.com/support) → «Поделиться экраном»\n"
+            "2. Скопируй код → сохрани в Replit Secrets как `CRD_SHARE_URL`\n\n"
+            "🔒 _PIN хранится только на ПК — не присылай его в Telegram._"
+        )
+    safe_send(chat_id, text, remote_instructions_menu())
+
+
+def _btn_remote_log(chat_id: int):
+    """Показывает последние 20 записей журнала действий."""
+    if not _remote_owner_check(chat_id):
+        return
+    if not remote_action_log:
+        bot.send_message(
+            chat_id, "📄 Журнал пуст — действий пока не было.",
+            reply_markup=remote_access_menu()
+        )
+        return
+    entries = remote_action_log[-20:]
+    text = "📄 *Журнал действий «Мой ПК»* (последние 20):\n\n" + "\n".join(entries)
+    safe_send(chat_id, text, remote_access_menu())
+
+
+def _btn_remote_safety(chat_id: int):
+    """Напоминание о безопасности и чего бот НЕ делает."""
+    if not _remote_owner_check(chat_id):
+        return
+    _log_remote(chat_id, "открыл раздел безопасности")
+    text = (
+        "🔒 *Безопасность — важно знать*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✅ *Что бот умеет:*\n"
+        "• Показывать сохранённые ID подключения из Secrets\n"
+        "• Давать инструкции по AnyDesk / TeamViewer / CRD\n"
+        "• Запускать приложения (только при локальном запуске bot.py)\n"
+        "• Показывать статус CPU/RAM/диска\n\n"
+        "🚫 *Что бот НЕ делает — никогда:*\n"
+        "• Не читает пароли, куки, токены, историю браузера\n"
+        "• Не устанавливает скрытые программы\n"
+        "• Не записывает нажатия клавиш (кейлоггер)\n"
+        "• Не включает камеру или микрофон без ведома\n"
+        "• Не выполняет произвольные команды терминала\n"
+        "• Не подключается к твоему личному Telegram-аккаунту\n\n"
+        "🔑 *Идентификация:*\n"
+        "Бот знает тебя по *Telegram ID* (`"
+        + str(OWNER_ID) +
+        "`). Никаких паролей аккаунта не нужно.\n\n"
+        "⚠️ *Никогда не присылай в Telegram:*\n"
+        "• Код подтверждения из SMS\n"
+        "• Пароль Telegram-аккаунта\n"
+        "• Пароли от AnyDesk / TeamViewer\n"
+        "• Пароли от Wi-Fi, банков, любых сервисов\n\n"
+        "_Если кто-то просит тебя прислать такие данные — это мошенник._"
+    )
+    safe_send(chat_id, text, remote_access_menu())
+
+
+# ══════════════════════════════════════════════════════════════════
+# конец блока «Мой ПК»
 # ══════════════════════════════════════════════════════════════════
 
 def _btn_forget(chat_id):
