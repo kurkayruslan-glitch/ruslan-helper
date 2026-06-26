@@ -2673,11 +2673,12 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
     except Exception:
         safe_send(chat_id, short, markup)
 
-    # Отчёт-файл: XLSX если openpyxl доступен, иначе CSV
+    # Отчёт-файл: XLSX (два листа) если openpyxl доступен, иначе CSV
     if len(results) >= 1:
         try:
             base_name  = filename.rsplit('.', 1)[0]
-            found_cnt  = sum(1 for r in results if r.get('found'))
+            found_cnt  = sum(1 for r in results if r.found)
+            rel_cnt    = sum(len(r.related) for r in results if r.found)
             xlsx_bytes = file_search.build_xlsx_report(results)
             if xlsx_bytes:
                 report_name = base_name + "_sauron_report.xlsx"
@@ -2686,8 +2687,9 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
                 bot.send_document(
                     chat_id, bio,
                     caption=(
-                        f"📊 Отчёт по «{filename}»\n"
-                        f"Найдено: {found_cnt} / {len(results)} чел."
+                        f"📊 Отчёт по «{filename}» (2 листа)\n"
+                        f"Найдено: {found_cnt} / {len(results)} чел.\n"
+                        f"Связанных лиц: {rel_cnt}"
                         + (f"\n⚠️ Пропущено по лимиту: {skipped}" if skipped else "")
                     ),
                     reply_markup=markup,
@@ -2701,7 +2703,8 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
                     chat_id, bio,
                     caption=(
                         f"📊 Отчёт по «{filename}»\n"
-                        f"Найдено: {found_cnt} / {len(results)} чел."
+                        f"Найдено: {found_cnt} / {len(results)} чел.\n"
+                        f"Связанных лиц: {rel_cnt}"
                         + (f"\n⚠️ Пропущено по лимиту: {skipped}" if skipped else "")
                     ),
                     reply_markup=markup,
@@ -3073,17 +3076,33 @@ def handle_callback(call):
             bot.edit_message_text(short, chat_id, prog_msg.message_id, parse_mode="Markdown")
         except Exception:
             safe_send(chat_id, short, markup)
-        if len(results) > 5:
+        if len(results) >= 1:
             try:
-                csv_bytes = file_search.build_csv_report(results)
-                report_name = filename.rsplit('.', 1)[0] + "_sauron_report.csv"
-                bio = io.BytesIO(csv_bytes)
-                bio.name = report_name
-                bot.send_document(
-                    chat_id, bio,
-                    caption=f"📊 Полный отчёт Sauron: «{filename}» ({len(results)} записей)",
-                    reply_markup=markup,
-                )
+                found_cnt2 = sum(1 for r in results if r.found)
+                rel_cnt2   = sum(len(r.related) for r in results if r.found)
+                base2      = filename.rsplit('.', 1)[0]
+                xlsx2      = file_search.build_xlsx_report(results)
+                if xlsx2:
+                    bio = io.BytesIO(xlsx2)
+                    bio.name = base2 + "_sauron_report.xlsx"
+                    bot.send_document(
+                        chat_id, bio,
+                        caption=(
+                            f"📊 Отчёт Sauron: «{filename}» (2 листа)\n"
+                            f"Найдено: {found_cnt2} / {len(results)} чел.\n"
+                            f"Связанных лиц: {rel_cnt2}"
+                        ),
+                        reply_markup=markup,
+                    )
+                else:
+                    csv2 = file_search.build_csv_report(results)
+                    bio  = io.BytesIO(csv2)
+                    bio.name = base2 + "_sauron_report.csv"
+                    bot.send_document(
+                        chat_id, bio,
+                        caption=f"📊 Полный отчёт Sauron: «{filename}» ({len(results)} записей)",
+                        reply_markup=markup,
+                    )
             except Exception as e:
                 bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
         else:

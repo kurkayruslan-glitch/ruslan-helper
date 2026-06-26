@@ -1,45 +1,52 @@
 """Поиск ФИО из файлов через Sauron.
 
-Сценарий: пользователь присылает файл со списком ФИО → бот извлекает ФИО,
-для каждого ищет в Sauron, собирает адреса/телефоны/связи, по связанным
-людям делает один дополнительный запрос (глубина 1, лимит 3 чел./запрос).
+Формат отчёта: два листа XLSX
+  «Итог по людям»   — одна строка = один исходный человек из файла
+  «Связанные лица»  — одна строка = одно связанное лицо (child record)
 
-После поиска для связанных лиц:
-  • фильтрует телефоны на ликвидность (нормализация + антимаски)
-  • детектирует присутствие в Максе / taxsee по источникам Sauron
+Для связанных лиц:
+  • Только mobile-номера, максимум TOP_PHONES_PER_RELATED лучших
+  • Приоритет: свежие источники (2024-2026), Maxim/taxsee, многократное
+    подтверждение, мобильный префикс
+  • Отдельные колонки: ВК, Одноклассники, другие соцсети
+  • Парсинг даты рождения и типа связи из поля «Связь с лицом»
+  • Детектор Макса/taxsee по источникам Sauron
+  • Глобальный dedup телефонов
 
 Форматы файлов: txt, csv, xlsx, xls, docx, pdf.
-Для csv/xlsx — приоритет именованным колонкам (ФИО/Фамилия/Имя/…).
-Regex — запасной вариант для неструктурированных файлов.
 
-Env (переопределяют умолчания):
-  SAURON_FILE_MAX_FIO         — макс. ФИО за файл (умолч. 30)
-  SAURON_FILE_DELAY_SEC       — пауза между запросами, сек (умолч. 2)
-  SAURON_FILE_MAX_RELATED     — макс. связанных лиц на одно ФИО (умолч. 3)
-  SAURON_FILE_MAX_REL_PHONES  — макс. ликвидных тел. связанных на ФИО (умолч. 10)
+Env:
+  SAURON_FILE_MAX_FIO         — макс. ФИО за файл      (умолч. 30)
+  SAURON_FILE_DELAY_SEC       — пауза сек              (умолч. 2)
+  SAURON_FILE_MAX_RELATED     — макс. связанных на ФИО (умолч. 3)
+  SAURON_FILE_TOP_REL_PHONES  — топ тел. на связанного (умолч. 4)
 """
+from __future__ import annotations
+
 import os
 import re
 import io
 import csv
 import time
 import logging
+from dataclasses import dataclass, field
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Лимиты ───────────────────────────────────────────────────────────────────
-DEFAULT_MAX_FIO        = int(os.environ.get("SAURON_FILE_MAX_FIO",        "30"))
-DEFAULT_DELAY_SEC      = float(os.environ.get("SAURON_FILE_DELAY_SEC",    "2"))
-DEFAULT_MAX_RELATED    = int(os.environ.get("SAURON_FILE_MAX_RELATED",    "3"))
-DEFAULT_MAX_REL_PHONES = int(os.environ.get("SAURON_FILE_MAX_REL_PHONES", "10"))
+DEFAULT_MAX_FIO          = int(os.environ.get("SAURON_FILE_MAX_FIO",         "30"))
+DEFAULT_DELAY_SEC        = float(os.environ.get("SAURON_FILE_DELAY_SEC",     "2"))
+DEFAULT_MAX_RELATED      = int(os.environ.get("SAURON_FILE_MAX_RELATED",     "3"))
+TOP_PHONES_PER_RELATED   = int(os.environ.get("SAURON_FILE_TOP_REL_PHONES",  "4"))
 
-# Обратная совместимость с bot.py который читает DEFAULT_MAX_RECORDS
+# Обратная совместимость
 DEFAULT_MAX_RECORDS = DEFAULT_MAX_FIO
 
 # ── Опциональные библиотеки ───────────────────────────────────────────────────
 try:
     import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     _HAS_OPENPYXL = True
 except ImportError:
     _HAS_OPENPYXL = False
@@ -64,20 +71,67 @@ except ImportError:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Стоп-слова для фильтрации ложных ФИО
+# Структуры данных
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class RelatedPerson:
+    """Одно связанное лицо."""
+    fio:            str = ""
+    dob:            str = ""          # дата рождения
+    relation:       str = ""          # тип связи / причина
+    address:        str = ""
+    liquid_phones:  list[str] = field(default_factory=list)
+    discarded_cnt:  int = 0
+    phone_note:     str = ""
+    in_maxim:       bool = False
+    maxim_source:   str = ""
+    vk:             str = ""
+    ok:             str = ""
+    other_social:   str = ""
+    sources:        str = ""
+    comment:        str = ""
+    raw_count:      int = 0
+
+
+@dataclass
+class PersonResult:
+    """Результат поиска одного ФИО из файла."""
+    row_num:        int = 0
+    source_fio:     str = ""
+    found:          bool = False
+    found_fio:      str = ""
+    liquid_phones:  str = ""          # ликвидные тел. основного
+    phones_raw:     str = ""
+    discarded_phones: int = 0
+    emails:         str = ""
+    addresses:      str = ""
+    connections:    str = ""
+    in_maxim:       bool = False
+    maxim_source:   str = ""
+    vk:             str = ""
+    ok:             str = ""
+    other_social:   str = ""
+    sources:        str = ""
+    raw_count:      int = 0
+    confidence:     str = ""
+    phone_note:     str = ""
+    error:          str = ""
+    related: list[RelatedPerson] = field(default_factory=list)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Стоп-слова ФИО
 # ═════════════════════════════════════════════════════════════════════════════
 
 _NAME_STOPWORDS: frozenset[str] = frozenset({
-    # Административные единицы
     "Республика", "Область", "Край", "Округ", "Район", "Автономная",
     "Федерация", "Федеральный", "Федеральная", "Муниципальный", "Муниципальная",
     "Поселение", "Поселок", "Деревня", "Хутор", "Аул", "Станица",
-    # Названия регионов РФ
     "Дагестан", "Башкортостан", "Татарстан", "Чечня", "Ингушетия",
     "Калмыкия", "Черкесия", "Адыгея", "Мордовия", "Удмуртия",
     "Чувашия", "Якутия", "Бурятия", "Хакасия", "Тыва", "Тува",
     "Карачаево", "Кабардино", "Балкария", "Коми", "Крым", "Алтай", "Марий",
-    # Прилагательные формы регионов
     "Чувашская", "Чеченская", "Дагестанская", "Башкирская",
     "Татарская", "Ингушская", "Кабардинская", "Балкарская",
     "Калмыцкая", "Карачаевская", "Черкесская", "Адыгейская",
@@ -95,20 +149,16 @@ _NAME_STOPWORDS: frozenset[str] = frozenset({
     "Кировская", "Вологодская", "Архангельская", "Мурманская",
     "Псковская", "Астраханская", "Калужская", "Калининградская",
     "Российская", "Советская", "Украинская", "Белорусская",
-    # Адресные ориентиры
     "Улица", "Проспект", "Бульвар", "Площадь", "Переулок",
     "Набережная", "Шоссе", "Тракт", "Квартал", "Микрорайон",
     "Город", "Москва", "Санкт-Петербург",
-    # Месяцы и дни недели
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
     "Понедельник", "Вторник", "Среда", "Четверг", "Пятница",
     "Суббота", "Воскресенье",
-    # Украинские регионы
     "Украина", "Харків", "Одеса", "Дніпро",
 })
 
-# Прилагательные-топонимы: *ская/*ский/*ское/*ской
 _GEO_ADJ_RE = re.compile(r'^[А-ЯЁ][а-яё]{3,}(ская|ский|ское|ской|ских|ском)$')
 
 
@@ -117,21 +167,14 @@ def _is_valid_fio_word(word: str) -> bool:
         return False
     if _GEO_ADJ_RE.match(word):
         return False
-    if len(word) < 2 or len(word) > 30:
-        return False
-    return True
+    return 2 <= len(word) <= 30
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Извлечение ФИО
-# ═════════════════════════════════════════════════════════════════════════════
 
 _FIO3_RE = re.compile(
     r'\b([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,25})\s+'
     r'([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20})\s+'
     r'([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20})\b'
 )
-
 _FIO2_RE = re.compile(
     r'\b([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,25})\s+'
     r'([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20})\b'
@@ -141,7 +184,6 @@ _FIO2_RE = re.compile(
 def extract_names(text: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
-
     for m in _FIO3_RE.finditer(text):
         parts = [m.group(1), m.group(2), m.group(3)]
         if not all(_is_valid_fio_word(p) for p in parts):
@@ -150,7 +192,6 @@ def extract_names(text: str) -> list[str]:
         if name not in seen:
             seen.add(name)
             found.append(name)
-
     for m in _FIO2_RE.finditer(text):
         p1, p2 = m.group(1), m.group(2)
         if not _is_valid_fio_word(p1) or not _is_valid_fio_word(p2):
@@ -159,12 +200,11 @@ def extract_names(text: str) -> list[str]:
         if name not in seen and not any(name in ex for ex in seen):
             seen.add(name)
             found.append(name)
-
     return found
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Детектор колонок для структурированных файлов
+# Детектор колонок
 # ═════════════════════════════════════════════════════════════════════════════
 
 _FIO_COLS    = frozenset({'фио', 'fullname', 'full_name', 'ф.и.о', 'ф.и.о.', 'полное имя', 'наименование', 'person', 'человек'})
@@ -197,17 +237,11 @@ def _detect_fio_cols(headers: list[str]) -> dict[str, int]:
 def _build_fio_from_cols(row: list[str], col_map: dict[str, int]) -> str:
     def get(key: str) -> str:
         idx = col_map.get(key, -1)
-        if idx < 0 or idx >= len(row):
-            return ''
-        return str(row[idx]).strip()
+        return str(row[idx]).strip() if 0 <= idx < len(row) else ''
 
-    if col_map.get('fio', -1) >= 0:
-        val = get('fio')
-        if val:
-            return val
-
-    parts = [get('last'), get('first'), get('patron')]
-    return ' '.join(p for p in parts if p)
+    if col_map.get('fio', -1) >= 0 and get('fio'):
+        return get('fio')
+    return ' '.join(p for p in [get('last'), get('first'), get('patron')] if p)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -299,15 +333,6 @@ def _parse_pdf_text(data: bytes) -> str:
 
 
 def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
-    """
-    Парсит файл и возвращает список PersonRecord + строку ошибки.
-
-    PersonRecord: {
-        'row_num'     : int
-        'source_line' : str
-        'fio'         : str   — основной ключ поиска
-    }
-    """
     fname = filename.lower()
     records: list[dict] = []
     seen_fio: set[str] = set()
@@ -334,21 +359,15 @@ def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
                     _add(i, line, name)
 
     if fname.endswith('.csv'):
-        headers, rows = _parse_csv_structured(data)
-        _from_structured(headers, rows)
-
+        _from_structured(*_parse_csv_structured(data))
     elif fname.endswith('.xlsx'):
         if not _HAS_OPENPYXL:
-            return [], "xlsx не поддерживается — опенпиксл не установлен."
-        headers, rows = _parse_xlsx_structured(data)
-        _from_structured(headers, rows)
-
+            return [], "xlsx не поддерживается — openpyxl не установлен."
+        _from_structured(*_parse_xlsx_structured(data))
     elif fname.endswith('.xls'):
         if not _HAS_XLRD:
             return [], "xls не поддерживается — xlrd не установлен."
-        headers, rows = _parse_xls_structured(data)
-        _from_structured(headers, rows)
-
+        _from_structured(*_parse_xls_structured(data))
     elif fname.endswith('.txt'):
         text = _decode(data)
         for i, line in enumerate(text.splitlines(), 1):
@@ -364,7 +383,6 @@ def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
                     continue
             for name in extract_names(stripped):
                 _add(i, stripped, name)
-
     elif fname.endswith('.docx'):
         if not _HAS_DOCX:
             return [], "docx не поддерживается — python-docx не установлен."
@@ -372,7 +390,6 @@ def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
         for i, line in enumerate(text.splitlines(), 1):
             for name in extract_names(line.strip()):
                 _add(i, line.strip(), name)
-
     elif fname.endswith('.pdf'):
         if not _HAS_PDF:
             return [], "pdf не поддерживается — pdfplumber не установлен."
@@ -380,7 +397,6 @@ def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
         for i, line in enumerate(text.splitlines(), 1):
             for name in extract_names(line.strip()):
                 _add(i, line.strip(), name)
-
     else:
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else '?'
         return [], f"Формат .{ext} не поддерживается.\nПоддерживаю: txt, csv, xlsx, xls, docx, pdf"
@@ -390,9 +406,8 @@ def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
             "В файле не найдено ни одного ФИО.\n\n"
             "Убедись, что:\n"
             "• Для csv/xlsx — есть колонка «ФИО», «Фамилия» или «Имя»\n"
-            "• Для txt — каждая строка содержит имя (2–3 слова с заглавной буквы на кириллице)"
+            "• Для txt — каждая строка содержит 2–3 слова с заглавной буквы (кириллица)"
         )
-
     return records, ''
 
 
@@ -400,184 +415,193 @@ def parse_file(data: bytes, filename: str) -> tuple[list[dict], str]:
 # Проверка ликвидности телефонов
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Префиксы валидных мобильных операторов RU/UA/KZ
-_MOBILE_PREFIXES_RU = frozenset({
-    '9', # 9xx — основной диапазон
+_ALL_SAME_RE = re.compile(r'^(\d)\1{9,}$')
+_SEQUENTIAL  = {'1234567890', '0987654321', '9876543210', '0123456789'}
+_TECH_PFXS   = ('70000', '79000', '700000', '710000', '71234', '70123')
+
+# Мобильные RU-коды (после 79)
+_RU_MOBILE_CODES = frozenset({
+    '901','902','903','904','905','906','908','909',
+    '910','911','912','913','914','915','916','917','918','919',
+    '920','921','922','923','924','925','926','927','928','929',
+    '930','931','932','933','934','936','937','938','939',
+    '950','951','952','953','955','958','960','961','962','963',
+    '964','965','966','967','968','969',
+    '970','977','978','980','981','982','983','984','985','986','987','988','989',
+    '990','991','992','993','994','995','996','997','998','999',
 })
 
-# Маски: одинаковые цифры
-_ALL_SAME_RE  = re.compile(r'^(\d)\1{9,}$')
-# Последовательность: 1234567890 / 0987654321
-_SEQUENTIAL = {'1234567890', '0987654321', '9876543210', '0123456789'}
-# Явно технические/тестовые номера
-_TECH_PREFIXES = ('70000', '79000', '700000', '710000', '71234', '70123')
 
-
-def normalize_phone(raw: str) -> str | None:
-    """
-    Нормализует телефон в E.164-подобный формат (без +).
-    Возвращает нормализованный номер или None если невалидный/маска.
-
-    Поддерживает:
-      RU:  7xxxxxxxxxx  / 8xxxxxxxxxx (10 цифр после 7/8)
-      UA:  380xxxxxxxxx / 0xxxxxxxxx  (9 цифр после 0)
-      KZ:  7xxxxxxxxxx  (10 цифр после 7)
-    """
+def normalize_phone(raw: str) -> Optional[str]:
+    """Нормализует телефон. Возвращает None если невалидный/маска."""
     if not raw:
         return None
-
-    # Оставляем только цифры
     digits = re.sub(r'\D', '', raw)
     if not digits:
         return None
-
-    # Длина: минимум 7, максимум 15 (E.164)
     if not (7 <= len(digits) <= 15):
         return None
 
-    # Нормализация российских/казахских (7xxxxxxxxxx / 8xxxxxxxxxx)
+    # Нормализация
     if len(digits) == 11 and digits[0] in ('7', '8'):
-        normalized = '7' + digits[1:]
-    # Украинских с 0 впереди (0xxxxxxxxx → 380xxxxxxxxx)
+        norm = '7' + digits[1:]
     elif len(digits) == 10 and digits[0] == '0':
-        normalized = '380' + digits[1:]
-    # Украинских уже с кодом 380
+        norm = '380' + digits[1:]
     elif len(digits) == 12 and digits.startswith('380'):
-        normalized = digits
-    # Прочие 10-значные
-    elif len(digits) == 10:
-        normalized = digits
+        norm = digits
     else:
-        normalized = digits
+        norm = digits
 
-    # ── Проверка на маски и мусор ─────────────────────────────────────────
-
-    # Все одинаковые цифры
-    if _ALL_SAME_RE.match(normalized):
+    # Маски
+    if _ALL_SAME_RE.match(norm):
+        return None
+    if norm[-10:] in _SEQUENTIAL:
+        return None
+    if any(norm.startswith(p) for p in _TECH_PFXS):
+        return None
+    if norm.replace('0', '') == '':
         return None
 
-    # Последовательные
-    tail10 = normalized[-10:]
-    if tail10 in _SEQUENTIAL:
-        return None
-
-    # Технические префиксы
-    if any(normalized.startswith(p) for p in _TECH_PREFIXES):
-        return None
-
-    # Явно невалидные: 0000x, все нули
-    if normalized.replace('0', '') == '':
-        return None
-
-    # Российский: цифра после 7 должна быть 9 (мобильный) или 4/8 (городской)
-    if len(normalized) == 11 and normalized.startswith('7'):
-        second = normalized[1]
+    # RU: цифра после кода страны
+    if len(norm) == 11 and norm.startswith('7'):
+        second = norm[1]
         if second not in ('9', '4', '8', '3', '2'):
             return None
+    return norm
 
-    return normalized
+
+def _is_mobile(norm: str) -> bool:
+    """True если номер мобильный (RU 79xxx или UA 380xxx)."""
+    if norm.startswith('79') and len(norm) == 11:
+        code3 = norm[1:4]
+        return code3 in _RU_MOBILE_CODES
+    if norm.startswith('380') and len(norm) == 12:
+        prefix = norm[3]
+        return prefix in ('6', '7', '9', '5', '4', '3')
+    return False
 
 
-def check_phone_liquidity(raw: str, seen_normalized: set[str]) -> tuple[str | None, str]:
+def _phone_score(raw: str, sources_ctx: str, freq: int = 1) -> float:
     """
-    Проверяет ликвидность телефона.
-
-    Возвращает (normalized_phone | None, reason_if_rejected).
-    При валидном номере добавляет в seen_normalized (dedup).
+    Скоринг телефона: выше → надёжнее.
+    Факторы: мобильный, свежий источник, Maxim/taxsee, частота.
     """
     norm = normalize_phone(raw)
     if norm is None:
-        return None, f"невалидный формат: «{raw[:20]}»"
-    if norm in seen_normalized:
-        return None, f"дубль: {norm}"
-    seen_normalized.add(norm)
-    return norm, ""
-
-
-def filter_liquid_phones(
-    raw_phones_str: str,
-    seen_normalized: set[str],
-    max_phones: int = 20,
-) -> tuple[list[str], int, list[str]]:
-    """
-    Из строки с телефонами (разделитель ';') возвращает:
-      (liquid_list, discarded_count, reject_reasons)
-
-    seen_normalized — общий глобальный set для дедупликации между записями.
-    """
-    liquid: list[str]  = []
-    discarded = 0
-    reasons: list[str] = []
-
-    raw_list = [p.strip() for p in re.split(r'[;,\s]+', raw_phones_str) if p.strip()]
-    for raw in raw_list[:max_phones]:
-        norm, reason = check_phone_liquidity(raw, seen_normalized)
-        if norm:
-            liquid.append(norm)
-        else:
-            discarded += 1
-            if reason:
-                reasons.append(reason)
-
-    return liquid, discarded, reasons
+        return -1.0
+    score = 0.0
+    # Мобильный приоритет
+    if _is_mobile(norm):
+        score += 10.0
+    else:
+        score += 2.0   # городские тоже можно, но ниже приоритет
+    # Свежесть источников (2024-2026)
+    for yr in ('2026', '2025', '2024'):
+        if yr in sources_ctx:
+            score += 5.0
+            break
+    for yr in ('2023', '2022'):
+        if yr in sources_ctx:
+            score += 2.0
+            break
+    # Maxim/taxsee
+    if re.search(r'taxsee|maxim|максим\s*такс', sources_ctx, re.I):
+        score += 8.0
+    # Частота встречи в записях
+    score += min(freq, 5) * 1.5
+    return score
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Детектор Макса / Максима / taxsee
+# Детектор Макса / taxsee
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Все известные маркеры присутствия в агрегаторе Maxim/taxsee.
-# Проверяем поле Источник, поэтому контекст — название базы, не имя человека.
 _MAXIM_RE = re.compile(
     r'taxsee|'
-    r'\bmaxim(um)?\b|'                          # "Maxim", "Maximum" (латиница)
-    r'максим(а|у|ом|е|овск)?\b|'               # "Максим", "Максимовск…" (кириллица)
+    r'\bmaxim(um)?\b|'
+    r'максим(а|у|ом|е|овск)?\b|'
     r'mac[s]?tax|мак[сш]такс|maxtax|'
     r'клиент[ыа]?\s*(maxim|макс|такси)|'
     r'база\s*(maxim|макс)|'
-    r'driver\s*base\s*(maxim|макс)?',
+    r'driver\s*base',
     re.IGNORECASE,
 )
-
-# Более широкий паттерн по слову «Макс» отдельно — только в контексте «такси»
 _MAXIM_BROAD_RE = re.compile(
     r'\bмакс\b.{0,20}(такси|taxi|водит|шофер|driver)',
     re.IGNORECASE,
 )
 
 
-def check_maxim(sources: str, raw_records: list[dict] | None = None) -> tuple[bool, str]:
-    """
-    Проверяет, есть ли признаки Maksa/taxsee в строке источников или raw Sauron-записях.
-
-    Возвращает (in_maxim: bool, matched_source: str).
-    """
+def check_maxim(sources: str, raw_records: Optional[list[dict]] = None) -> tuple[bool, str]:
     combined = sources or ''
     if raw_records:
         for rec in raw_records:
-            src = str(rec.get('Источник', '') or rec.get('База', '') or '')
-            combined += '\n' + src
+            combined += '\n' + str(rec.get('Источник', '') or rec.get('База', '') or '')
 
     m = _MAXIM_RE.search(combined)
     if m:
-        # Возвращаем фрагмент контекста
         start = max(0, m.start() - 15)
         end   = min(len(combined), m.end() + 15)
-        snippet = combined[start:end].replace('\n', ' ').strip()
-        return True, snippet
+        return True, combined[start:end].replace('\n', ' ').strip()
 
     m2 = _MAXIM_BROAD_RE.search(combined)
     if m2:
         start = max(0, m2.start() - 10)
         end   = min(len(combined), m2.end() + 10)
-        snippet = combined[start:end].replace('\n', ' ').strip()
-        return True, snippet
+        return True, combined[start:end].replace('\n', ' ').strip()
 
     return False, ''
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Извлечение полей из ответа Sauron API
+# Извлечение соцсетей
+# ═════════════════════════════════════════════════════════════════════════════
+
+_VK_RE  = re.compile(r'vk\.com/[\w\.\-]+|(?:id|club|public)\d{4,}|vkontakte\.ru/[\w\.]+', re.I)
+_OK_RE  = re.compile(r'ok\.ru/[\w\.\-]+|odnoklassniki\.ru/[\w\.]+|профиль\s*ок\s*\d+', re.I)
+_SOC_RE = re.compile(
+    r'(?:instagram|facebook|twitter|telegram|t\.me|youtube|tiktok|linkedin)[\./][\w\.\-/]+',
+    re.I,
+)
+
+
+def _extract_social(raw_records: list[dict]) -> tuple[str, str, str]:
+    """Извлекает (vk, ok, other) из raw Sauron-записей."""
+    vk_set: set[str]    = set()
+    ok_set: set[str]    = set()
+    other_set: set[str] = set()
+
+    def _scan(text: str):
+        for m in _VK_RE.finditer(text):
+            vk_set.add(m.group(0)[:80])
+        for m in _OK_RE.finditer(text):
+            ok_set.add(m.group(0)[:80])
+        for m in _SOC_RE.finditer(text):
+            other_set.add(m.group(0)[:80])
+
+    for rec in raw_records:
+        # Поля-соцсети
+        for field_name in ('ВКонтакте', 'VK', 'Vk', 'vk', 'ВК',
+                           'Одноклассники', 'OK', 'Ok', 'ok',
+                           'Соцсети', 'Соц.сети', 'Social'):
+            v = str(rec.get(field_name) or '')
+            if v.strip() and v.strip().lower() not in ('none', 'null', '-'):
+                _scan(v)
+        # Полный текст записи (fallback)
+        for v in rec.values():
+            s = str(v or '')
+            if len(s) > 5:
+                _scan(s)
+
+    return (
+        '; '.join(sorted(vk_set)[:5]),
+        '; '.join(sorted(ok_set)[:5]),
+        '; '.join(sorted(other_set)[:5]),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Извлечение полей из ответа Sauron
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _val(rec: dict, *keys: str) -> str:
@@ -588,39 +612,73 @@ def _val(rec: dict, *keys: str) -> str:
     return ''
 
 
-def _extract_person_fields(api_result: dict) -> dict:
-    """
-    Извлекает структурированные поля из ответа Sauron.
+# Парсинг строки связи: «Иванов Иван Петрович (01.01.1980/муж)»
+_CONN_FIO_RE = re.compile(
+    r'^([А-ЯЁІЇЄ][а-яёіїє\'\-]{1,25}\s+[А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20}'
+    r'(?:\s+[А-ЯЁІЇЄ][а-яёіїє\'\-]{1,20})?)'
+    r'(?:\s*[\(\[](.*?)[\)\]])?'
+)
+_DOB_RE = re.compile(r'\b(\d{1,2}[\.\/]\d{1,2}[\.\/]\d{2,4}|\d{4})\b')
 
-    Возвращает dict:
-        found_fio, phones_raw, emails, addresses, connections, sources,
-        raw_count, related_fios, raw_records
-    """
+
+def _parse_connection_str(conn: str) -> tuple[str, str, str]:
+    """Из строки «Иванов ИО (01.01.1980/супруг)» → (fio, dob, relation)."""
+    m = _CONN_FIO_RE.match(conn.strip())
+    if not m:
+        return conn.strip(), '', ''
+    fio = m.group(1).strip()
+    extra = (m.group(2) or '').strip()
+    # DOB
+    dob = ''
+    dm = _DOB_RE.search(extra)
+    if dm:
+        dob = dm.group(1)
+        extra = extra[:dm.start()] + extra[dm.end():]
+    # Relation — остаток после даты
+    relation = re.sub(r'[/,;]', ' ', extra).strip()
+    return fio, dob, relation
+
+
+def _extract_person_fields(api_result: dict) -> dict:
+    """Извлекает поля из ответа Sauron. Возвращает структуру с raw_records."""
     records = api_result.get("response", [])
     if not records:
         return {
             "found_fio": "", "phones_raw": [], "emails": "",
-            "addresses": "", "connections": "", "sources": "",
-            "raw_count": 0, "related_fios": [], "raw_records": [],
+            "addresses": "", "connections_parsed": [], "sources": "",
+            "raw_count": 0, "related_fios_parsed": [], "raw_records": [],
+            "vk": "", "ok": "", "other_social": "",
         }
 
-    all_fios:    list[str] = []
-    all_phones:  list[str] = []
-    all_emails:  list[str] = []
-    all_addrs:   list[str] = []
-    all_conns:   list[str] = []
-    all_sources: list[str] = []
-    related_fios: list[str] = []
+    all_fios:     list[str] = []
+    all_phones:   list[str] = []
+    all_emails:   list[str] = []
+    all_addrs:    list[str] = []
+    all_sources:  list[str] = []
+    # {conn_raw: count}
+    conn_counts:  dict[str, int] = {}
+
+    # Сбор телефонов с частотой
+    phone_freq:   dict[str, int] = {}
+    phone_src:    dict[str, list[str]] = {}
 
     for rec in records:
         fio = _val(rec, 'ФИО', 'Фамилия', 'Имя')
         if fio and fio not in all_fios:
             all_fios.append(fio)
 
+        src = _val(rec, 'Источник', 'База', 'Источники')
+        if src and src not in all_sources:
+            all_sources.append(src)
+        src_ctx = src  # контекст источника для этой записи
+
         for pf in ('Телефон', 'Телефон2', 'Телефон3', 'Phone', 'Моб', 'Mob'):
             ph = _val(rec, pf)
-            if ph and ph not in all_phones:
-                all_phones.append(ph)
+            if ph:
+                phone_freq[ph] = phone_freq.get(ph, 0) + 1
+                phone_src.setdefault(ph, []).append(src_ctx)
+                if ph not in all_phones:
+                    all_phones.append(ph)
 
         for ef in ('Email', 'E-mail', 'Эл. почта', 'Почта'):
             em = _val(rec, ef)
@@ -638,34 +696,100 @@ def _extract_person_fields(api_result: dict) -> dict:
                 all_addrs.append(addr)
 
         conn = _val(rec, 'Связь с лицом', 'Связанные лица', 'Связи', 'Родственники')
-        if conn and conn not in all_conns:
-            all_conns.append(conn)
-            fio_part = re.split(r'[\d(]', conn)[0].strip()
-            if fio_part and len(fio_part.split()) >= 2 and fio_part not in related_fios:
-                related_fios.append(fio_part)
+        if conn:
+            conn_counts[conn] = conn_counts.get(conn, 0) + 1
 
-        src = _val(rec, 'Источник', 'База', 'Источники')
-        if src and src not in all_sources:
-            all_sources.append(src)
+    def join(lst: list[str], n: int = 10) -> str:
+        return '; '.join(lst[:n])
 
-    def join(lst: list[str], n: int = 10, sep: str = '; ') -> str:
-        return sep.join(lst[:n])
+    # Парсинг связанных лиц
+    connections_parsed: list[dict] = []
+    related_fios_parsed: list[str] = []
+    for conn_raw, cnt in sorted(conn_counts.items(), key=lambda x: -x[1]):
+        fio, dob, relation = _parse_connection_str(conn_raw)
+        connections_parsed.append({
+            'fio': fio, 'dob': dob, 'relation': relation,
+            'raw': conn_raw, 'count': cnt,
+        })
+        if fio and len(fio.split()) >= 2 and fio not in related_fios_parsed:
+            related_fios_parsed.append(fio)
+
+    # Соцсети
+    vk, ok, other_social = _extract_social(records)
 
     return {
-        "found_fio":   join(all_fios, 5),
-        "phones_raw":  all_phones,                 # сырые телефоны (список)
-        "emails":      join(all_emails, 5),
-        "addresses":   join(all_addrs, 5),
-        "connections": join(all_conns, 10),
-        "sources":     join(all_sources, 10),
-        "raw_count":   len(records),
-        "related_fios": related_fios[:DEFAULT_MAX_RELATED],
-        "raw_records": records,
+        "found_fio":           join(all_fios, 3),
+        "phones_raw":          all_phones,
+        "phone_freq":          phone_freq,
+        "phone_src":           phone_src,
+        "emails":              join(all_emails, 5),
+        "addresses":           join(all_addrs, 5),
+        "connections_parsed":  connections_parsed,
+        "sources":             join(all_sources, 10),
+        "raw_count":           len(records),
+        "related_fios_parsed": related_fios_parsed[:DEFAULT_MAX_RELATED],
+        "raw_records":         records,
+        "vk":                  vk,
+        "ok":                  ok,
+        "other_social":        other_social,
     }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Пакетный поиск (entity-ориентированный)
+# Выбор топ-N телефонов
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _pick_top_phones(
+    phones_raw: list[str],
+    phone_freq: dict[str, int],
+    phone_src:  dict[str, list[str]],
+    seen_normalized: set[str],
+    top_n: int = TOP_PHONES_PER_RELATED,
+    mobile_only: bool = True,
+) -> tuple[list[str], int, str]:
+    """
+    Выбирает топ-N ликвидных телефонов по скорингу.
+    Возвращает (liquid_list, discarded_count, note).
+    """
+    scored: list[tuple[float, str, str]] = []  # (score, norm, raw)
+    seen_norm_local: set[str] = set()
+    total_raw = len(phones_raw)
+
+    for raw in phones_raw:
+        norm = normalize_phone(raw)
+        if norm is None:
+            continue
+        if norm in seen_normalized or norm in seen_norm_local:
+            continue
+        if mobile_only and not _is_mobile(norm):
+            continue
+        seen_norm_local.add(norm)
+        freq = phone_freq.get(raw, 1)
+        sources_ctx = ' '.join(phone_src.get(raw, []))
+        score = _phone_score(raw, sources_ctx, freq)
+        scored.append((score, norm, raw))
+
+    # Сортировка по убыванию скора
+    scored.sort(key=lambda x: -x[0])
+
+    top = scored[:top_n]
+    for _, norm, _ in top:
+        seen_normalized.add(norm)
+
+    liquid = [norm for _, norm, _ in top]
+    discarded = total_raw - len(liquid)
+
+    notes: list[str] = []
+    if discarded > 0:
+        notes.append(f"отброшено {discarded}")
+    if mobile_only and any(not _is_mobile(normalize_phone(r) or '') for r in phones_raw if normalize_phone(r)):
+        notes.append("городские исключены")
+
+    return liquid, discarded, '; '.join(notes)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Пакетный поиск
 # ═════════════════════════════════════════════════════════════════════════════
 
 def batch_search(
@@ -675,38 +799,20 @@ def batch_search(
     progress_msg_id: int,
     max_records: int = DEFAULT_MAX_FIO,
     delay_sec: float = DEFAULT_DELAY_SEC,
-) -> tuple[list[dict], str]:
+) -> tuple[list[PersonResult], str]:
     """
-    Пакетный поиск по списку ФИО.
-
-    Для каждого ФИО:
-      1. Ищет в Sauron
-      2. Фильтрует телефоны основного человека на ликвидность
-      3. Проверяет наличие в Максе/taxsee по источникам
-      4. Для связанных лиц (глубина 1, лимит MAX_RELATED):
-         — ищет в Sauron
-         — фильтрует их телефоны на ликвидность (дедупликация глобальная)
-         — проверяет Макса для связанных
-
-    Результат содержит новые поля:
-      liquid_phones       — ликвидные тел. основного чел.
-      discarded_phones    — кол-во отброшенных тел. основного чел.
-      in_maxim            — найден в Максе (True/False)
-      maxim_source        — контекст источника Макса
-      liquid_rel_phones   — ликвидные тел. связанных (фио: тел; ...)
-      rel_discarded       — кол-во отброшенных тел. связанных
-      rel_in_maxim        — связанный найден в Максе
-      phone_check_note    — краткий комментарий по фильтрации
+    Пакетный поиск. Возвращает (results: list[PersonResult], stop_reason).
+    Каждый PersonResult.related содержит список RelatedPerson (одна строка на связанного).
     """
     import sauron as _sauron
 
     to_search = records[:max_records]
     skipped   = len(records) - len(to_search)
-    results: list[dict] = []
+    results: list[PersonResult] = []
     stop_reason = ""
 
-    # Глобальный set нормализованных телефонов (дедуп по всему файлу)
-    global_seen_phones: set[str] = set()
+    # Глобальный dedup нормализованных телефонов
+    global_seen: set[str] = set()
 
     def _do_search(query: str) -> tuple[bool, dict, bool]:
         try:
@@ -714,133 +820,96 @@ def batch_search(
             fields = _extract_person_fields(api_result)
             stop = False
             try:
-                bal = float(api_result.get("balance", "999"))
-                if bal < 1.0:
+                if float(api_result.get("balance", "999")) < 1.0:
                     stop = True
             except Exception:
                 pass
-            found = fields["raw_count"] > 0
-            return found, fields, stop
+            return fields["raw_count"] > 0, fields, stop
         except RuntimeError as e:
-            msg = str(e)
-            stop = any(kw in msg for kw in ("баланс", "Неверный", "API-ключ", "Secrets"))
+            stop = any(kw in str(e) for kw in ("баланс", "Неверный", "API-ключ", "Secrets"))
             return False, {}, stop
         except Exception:
             return False, {}, False
 
     total = len(to_search)
+
     for i, record in enumerate(to_search, 1):
         fio = record['fio']
 
-        # ── Прогресс ────────────────────────────────────────────────────────
+        # Прогресс
         try:
             pct = (i - 1) * 100 // total
             bar = '▓' * ((i - 1) * 10 // total) + '░' * (10 - (i - 1) * 10 // total)
+            skip_note = f"\n_(пропущено по лимиту: {skipped})_" if skipped and i == 1 else ""
             bot.edit_message_text(
                 f"🔍 *Поиск по файлу…*\n\n"
-                f"Обработано: *{i-1}* / {total}"
-                + (f" _(пропущено по лимиту: {skipped})_" if skipped and i == 1 else "")
-                + f"\n{bar} {pct}%\n\n"
+                f"Обработано: *{i-1}* / {total}{skip_note}\n"
+                f"{bar} {pct}%\n\n"
                 f"👤 Ищу: `{fio}`",
                 chat_id, progress_msg_id, parse_mode="Markdown",
             )
         except Exception:
             pass
 
-        result: dict = {
-            "row_num":          record['row_num'],
-            "source_fio":       fio,
-            "found":            False,
-            "found_fio":        "",
-            "phones_raw":       "",
-            "liquid_phones":    "",
-            "discarded_phones": 0,
-            "emails":           "",
-            "addresses":        "",
-            "connections":      "",
-            "in_maxim":         False,
-            "maxim_source":     "",
-            # Связанные лица
-            "related_fios_found":  "",
-            "liquid_rel_phones":   "",
-            "rel_discarded":       0,
-            "rel_addresses":       "",
-            "rel_in_maxim":        False,
-            "rel_maxim_source":    "",
-            # Мета
-            "sources":          "",
-            "raw_count":        0,
-            "confidence":       "",
-            "phone_check_note": "",
-            "error":            "",
-        }
+        pr = PersonResult(row_num=record['row_num'], source_fio=fio)
 
-        # ── Основной поиск по ФИО ─────────────────────────────────────────
+        # ── Основной поиск ────────────────────────────────────────────────
         found, fields, stop = _do_search(fio)
 
         if stop:
-            result['error'] = "Остановлено — недостаточно баланса или ошибка API"
-            results.append(result)
-            stop_reason = result['error']
+            pr.error = "Остановлено — недостаточно баланса или ошибка API"
+            results.append(pr)
+            stop_reason = pr.error
             break
 
         if found:
-            result['found']       = True
-            result['found_fio']   = fields['found_fio']
-            result['emails']      = fields['emails']
-            result['addresses']   = fields['addresses']
-            result['connections'] = fields['connections']
-            result['sources']     = fields['sources']
-            result['raw_count']   = fields['raw_count']
+            pr.found     = True
+            pr.found_fio = fields['found_fio']
+            pr.emails    = fields['emails']
+            pr.addresses = fields['addresses']
+            pr.sources   = fields['sources']
+            pr.raw_count = fields['raw_count']
+            pr.vk        = fields['vk']
+            pr.ok        = fields['ok']
+            pr.other_social = fields['other_social']
 
             # Ликвидность основных телефонов
-            raw_phones_str = '; '.join(fields['phones_raw'])
-            result['phones_raw'] = raw_phones_str
-
-            liquid, disc, reasons = filter_liquid_phones(
-                raw_phones_str, global_seen_phones
+            pr.phones_raw = '; '.join(fields['phones_raw'])
+            liquid, disc, note = _pick_top_phones(
+                fields['phones_raw'],
+                fields.get('phone_freq', {}),
+                fields.get('phone_src', {}),
+                global_seen,
+                top_n=5,
             )
-            result['liquid_phones']    = '; '.join(liquid)
-            result['discarded_phones'] = disc
-            if reasons or disc:
-                note_parts = []
-                if disc:
-                    note_parts.append(f"отброшено {disc}")
-                if reasons:
-                    note_parts.append('; '.join(reasons[:3]))
-                result['phone_check_note'] = ', '.join(note_parts)
+            pr.liquid_phones    = '; '.join(liquid)
+            pr.discarded_phones = disc
+            pr.phone_note       = note
 
-            # Проверка Макса для основного человека
-            in_maxim, maxim_src = check_maxim(
+            # Макс для основного
+            pr.in_maxim, pr.maxim_source = check_maxim(
                 fields['sources'], fields.get('raw_records')
             )
-            result['in_maxim']    = in_maxim
-            result['maxim_source'] = maxim_src
 
-            # Уверенность совпадения
+            # Уверенность
             if fields['found_fio']:
-                q_words = set(fio.lower().split())
-                f_words = set(fields['found_fio'].lower().split())
-                overlap = len(q_words & f_words)
-                if overlap == len(q_words):
-                    result['confidence'] = "высокая"
-                elif overlap >= 1:
-                    result['confidence'] = "средняя"
-                else:
-                    result['confidence'] = "низкая"
+                q_w = set(fio.lower().split())
+                f_w = set(fields['found_fio'].lower().split())
+                ov  = len(q_w & f_w)
+                pr.confidence = "высокая" if ov == len(q_w) else ("средняя" if ov >= 1 else "низкая")
             else:
-                result['confidence'] = "нет ФИО в ответе"
+                pr.confidence = "нет ФИО в ответе"
 
-            # ── Поиск связанных лиц ───────────────────────────────────────
-            related_fios_list = fields.get('related_fios', [])
-            rel_fios_found:    list[str] = []
-            rel_liquid_all:    list[str] = []
-            rel_addrs_list:    list[str] = []
-            rel_disc_total = 0
-            rel_in_maxim_found = False
-            rel_maxim_sources: list[str] = []
+            # ── Связанные лица ────────────────────────────────────────────
+            related_fios_parsed = fields.get('related_fios_parsed', [])
+            connections_parsed  = fields.get('connections_parsed', [])
 
-            for rel_fio in related_fios_list[:DEFAULT_MAX_RELATED]:
+            # Строим lookup fio→metadata из connections_parsed
+            conn_meta: dict[str, dict] = {}
+            for cp in connections_parsed:
+                conn_meta[cp['fio'].lower()] = cp
+
+            for rel_fio in related_fios_parsed[:DEFAULT_MAX_RELATED]:
                 if delay_sec > 0:
                     time.sleep(delay_sec)
 
@@ -850,60 +919,56 @@ def batch_search(
                     stop_reason = "Остановлено при поиске связанных — баланс или ошибка API"
                     break
 
+                # Метаданные связи из поля connections основного человека
+                meta = conn_meta.get(rel_fio.lower(), {})
+
+                rp = RelatedPerson(
+                    fio      = rel_fio,
+                    dob      = meta.get('dob', ''),
+                    relation = meta.get('relation', ''),
+                )
+
                 if rel_found:
-                    rel_fios_found.append(rel_fio)
+                    rp.raw_count = rel_fields['raw_count']
+                    rp.addresses = rel_fields['addresses']
+                    rp.sources   = rel_fields['sources']
+                    rp.vk        = rel_fields['vk']
+                    rp.ok        = rel_fields['ok']
+                    rp.other_social = rel_fields['other_social']
 
-                    # Ликвидные телефоны связанного
-                    rel_raw_str = '; '.join(rel_fields.get('phones_raw', []))
-                    rel_liquid, rel_disc, _ = filter_liquid_phones(
-                        rel_raw_str, global_seen_phones,
-                        max_phones=DEFAULT_MAX_REL_PHONES,
+                    # Телефоны связанного — с приоритетом по мобильности и источникам
+                    rel_liquid, rel_disc, rel_note = _pick_top_phones(
+                        rel_fields['phones_raw'],
+                        rel_fields.get('phone_freq', {}),
+                        rel_fields.get('phone_src', {}),
+                        global_seen,
+                        top_n=TOP_PHONES_PER_RELATED,
+                        mobile_only=True,
                     )
-                    rel_disc_total += rel_disc
+                    rp.liquid_phones = rel_liquid
+                    rp.discarded_cnt = rel_disc
+                    rp.phone_note    = rel_note
 
-                    if rel_liquid:
-                        # Формат: "Иванов Иван: 79012345678; 79012345679"
-                        short_name = rel_fio.split()[0] if rel_fio.split() else rel_fio
-                        rel_liquid_all.append(
-                            f"{short_name}: " + '; '.join(rel_liquid)
-                        )
-
-                    # Адреса связанного
-                    if rel_fields.get('addresses'):
-                        short_name = rel_fio.split()[0] if rel_fio.split() else rel_fio
-                        rel_addrs_list.append(
-                            f"{short_name}: {rel_fields['addresses'][:100]}"
-                        )
-
-                    # Макс у связанного
-                    rel_mx, rel_mx_src = check_maxim(
-                        rel_fields.get('sources', ''),
-                        rel_fields.get('raw_records'),
+                    # Макс связанного
+                    rp.in_maxim, rp.maxim_source = check_maxim(
+                        rel_fields['sources'], rel_fields.get('raw_records')
                     )
-                    if rel_mx:
-                        rel_in_maxim_found = True
-                        rel_maxim_sources.append(f"{rel_fio}: {rel_mx_src}")
+                    rp.comment = f"Найдено {rp.raw_count} записей Sauron"
+                else:
+                    rp.comment = "Не найден в Sauron"
 
-            result['related_fios_found'] = '; '.join(rel_fios_found)
-            result['liquid_rel_phones']  = '\n'.join(rel_liquid_all)
-            result['rel_discarded']      = rel_disc_total
-            result['rel_addresses']      = '; '.join(rel_addrs_list)
-            result['rel_in_maxim']       = rel_in_maxim_found
-            result['rel_maxim_source']   = '; '.join(rel_maxim_sources)
+                pr.related.append(rp)
 
             if stop_reason:
-                results.append(result)
+                results.append(pr)
                 break
-
         else:
-            result['found']      = False
-            result['confidence'] = "не найден"
+            pr.confidence = "не найден"
 
-        results.append(result)
+        results.append(pr)
 
         if stop_reason:
             break
-
         if i < total:
             time.sleep(delay_sec)
 
@@ -911,229 +976,277 @@ def batch_search(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Формирование отчётов
+# Краткая сводка
 # ═════════════════════════════════════════════════════════════════════════════
 
-def build_short_summary(results: list[dict], stop_reason: str = "") -> str:
-    """Краткая сводка в чат."""
+def build_short_summary(results: list[PersonResult], stop_reason: str = "") -> str:
     total     = len(results)
-    found     = sum(1 for r in results if r.get('found'))
-    errors    = sum(1 for r in results if r.get('error') and not r.get('found'))
+    found     = sum(1 for r in results if r.found)
+    errors    = sum(1 for r in results if r.error and not r.found)
     not_found = total - found - errors
 
-    # Статистика по новым полям
-    rel_found_total = sum(
-        len([x for x in r.get('related_fios_found', '').split(';') if x.strip()])
-        for r in results if r.get('found')
+    rel_total  = sum(len(r.related) for r in results if r.found)
+    liq_phones = sum(
+        len(r.liquid_phones.split(';')) if r.liquid_phones else 0
+        for r in results if r.found
+    ) + sum(
+        len(rp.liquid_phones)
+        for r in results if r.found
+        for rp in r.related
     )
-    liquid_phones_total = sum(
-        len([x for x in r.get('liquid_phones', '').split(';') if x.strip()])
-        + len([x for x in r.get('liquid_rel_phones', '').replace('\n', ';').split(';') if x.strip()])
-        for r in results if r.get('found')
-    )
-    maxim_total = sum(
+    maxim_cnt = sum(
         1 for r in results
-        if r.get('in_maxim') or r.get('rel_in_maxim')
+        if r.in_maxim or any(rp.in_maxim for rp in r.related)
     )
+    vk_cnt = sum(1 for r in results if r.vk or any(rp.vk for rp in r.related))
+    ok_cnt = sum(1 for r in results if r.ok or any(rp.ok for rp in r.related))
 
     lines = ["🔍 *Поиск по файлу завершён*\n"]
     lines.append(f"👤 Найдено ФИО: *{found}*")
     lines.append(f"❌ Не найдено: *{not_found}*")
     if errors:
         lines.append(f"⚠️ Ошибки: *{errors}*")
-    lines.append(f"📊 Обработано: *{total}*")
-    lines.append("")
-    lines.append(f"🔗 Связанных лиц найдено: *{rel_found_total}*")
-    lines.append(f"📱 Ликвидных номеров: *{liquid_phones_total}*")
-    lines.append(f"🚕 Совпадений в Максе/taxsee: *{maxim_total}*")
+    lines.append(f"📊 Обработано: *{total}*\n")
+    lines.append(f"🔗 Связанных лиц найдено: *{rel_total}*")
+    lines.append(f"📱 Действующих номеров: *{liq_phones}*")
+    lines.append(f"🚕 В Максе/taxsee: *{maxim_cnt}*")
+    lines.append(f"🔵 ВК найдено: *{vk_cnt}*   |   🟠 ОК: *{ok_cnt}*")
 
     if stop_reason:
         lines.append(f"\n⛔ Остановлено: _{stop_reason}_")
 
-    # Топ найденных с ликвидными номерами
-    has_liquid = [r for r in results if r.get('found') and r.get('liquid_phones')]
-    if has_liquid:
-        lines.append("\n*Топ найденных (с номерами):*")
-        for r in has_liquid[:8]:
-            ph = r['liquid_phones'].split(';')[0].strip()
-            maxim_flag = " 🚕" if r.get('in_maxim') or r.get('rel_in_maxim') else ""
-            lines.append(f"\n👤 `{r['source_fio']}`{maxim_flag}\n  📱 {ph}")
-        if len(has_liquid) > 8:
-            lines.append(f"_…и ещё {len(has_liquid) - 8}_")
+    has_data = [r for r in results if r.found and (r.liquid_phones or r.related)]
+    if has_data:
+        lines.append("\n*Топ найденных:*")
+        for r in has_data[:6]:
+            ph = r.liquid_phones.split(';')[0].strip() if r.liquid_phones else ''
+            mx = " 🚕" if r.in_maxim else ""
+            rel_found = sum(1 for rp in r.related if rp.raw_count > 0)
+            lines.append(
+                f"\n👤 `{r.source_fio}`{mx}"
+                + (f"\n  📱 {ph}" if ph else "")
+                + (f"\n  🔗 связ.: {rel_found}" if rel_found else "")
+            )
+        if len(has_data) > 6:
+            lines.append(f"_…ещё {len(has_data) - 6}_")
 
     return '\n'.join(lines)
 
 
-def build_csv_report(results: list[dict]) -> bytes:
-    """CSV со всеми колонками включая ликвидность и Макс."""
-    columns = [
-        "Исходное ФИО",
-        "Строка №",
-        "Найдено",
-        "Найденное ФИО",
-        "Ликвидные тел. (осн.)",
-        "Все тел. (сырые)",
-        "Отброшено тел.",
-        "Email",
-        "Адреса",
-        "В Максе",
-        "Источник Макса",
-        "Связанные лица",
-        "Ликвидные тел. связанных",
-        "Адреса связанных",
-        "Связ. в Максе",
-        "Источник Макса (связ.)",
-        "Найд. связанные ФИО",
-        "Источники",
-        "Записей в Sauron",
-        "Уверенность",
-        "Комментарий по номерам",
-        "Ошибка",
-    ]
+# ═════════════════════════════════════════════════════════════════════════════
+# Построение XLSX (два листа)
+# ═════════════════════════════════════════════════════════════════════════════
 
-    output = io.StringIO()
-    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
-    writer.writerow(columns)
-
-    for r in results:
-        writer.writerow([
-            r.get('source_fio', ''),
-            r.get('row_num', ''),
-            "Да" if r.get('found') else "Нет",
-            r.get('found_fio', ''),
-            r.get('liquid_phones', ''),
-            r.get('phones_raw', ''),
-            r.get('discarded_phones', ''),
-            r.get('emails', ''),
-            r.get('addresses', ''),
-            "Да" if r.get('in_maxim') else "Нет",
-            r.get('maxim_source', ''),
-            r.get('connections', ''),
-            r.get('liquid_rel_phones', '').replace('\n', '; '),
-            r.get('rel_addresses', ''),
-            "Да" if r.get('rel_in_maxim') else "Нет",
-            r.get('rel_maxim_source', ''),
-            r.get('related_fios_found', ''),
-            r.get('sources', ''),
-            r.get('raw_count', ''),
-            r.get('confidence', ''),
-            r.get('phone_check_note', ''),
-            r.get('error', ''),
-        ])
-
-    return output.getvalue().encode('utf-8-sig')
+def _make_border():
+    side = Side(style='thin', color='BBBBBB')
+    return Border(left=side, right=side, top=side, bottom=side)
 
 
-def build_xlsx_report(results: list[dict]) -> bytes | None:
-    """XLSX с форматированием: ликвидность, Макс, связанные."""
+def _write_header(ws, columns: list[tuple[str, int]],
+                  header_fill, header_font, wrap):
+    for col_idx, (col_name, col_width) in enumerate(columns, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = wrap
+        cell.border    = _make_border()
+        ws.column_dimensions[cell.column_letter].width = col_width
+    ws.freeze_panes = "A2"
+    ws.row_dimensions[1].height = 38
+
+
+def build_xlsx_report(results: list[PersonResult]) -> Optional[bytes]:
+    """Два листа: «Итог по людям» и «Связанные лица»."""
     if not _HAS_OPENPYXL:
         return None
 
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Sauron Report"
+    ws1 = wb.active
+    ws1.title = "Итог по людям"
+    ws2 = wb.create_sheet("Связанные лица")
 
-    HEADER_FILL  = PatternFill("solid", fgColor="1F4E79")
-    FOUND_FILL   = PatternFill("solid", fgColor="E2EFDA")
-    NOTFND_FILL  = PatternFill("solid", fgColor="FCE4D6")
-    MAXIM_FILL   = PatternFill("solid", fgColor="FFF2CC")   # жёлтый — есть в Максе
-    HEADER_FONT  = Font(bold=True, color="FFFFFF")
-    MAXIM_FONT   = Font(bold=True, color="7F6000")
-    WRAP         = Alignment(wrap_text=True, vertical="top")
+    # ── Стили ─────────────────────────────────────────────────────────────
+    H_FILL   = PatternFill("solid", fgColor="1F4E79")
+    H_FILL2  = PatternFill("solid", fgColor="375623")   # зелёный заголовок для лист 2
+    H_FONT   = Font(bold=True, color="FFFFFF")
+    FOUND    = PatternFill("solid", fgColor="E2EFDA")
+    NOTFND   = PatternFill("solid", fgColor="FCE4D6")
+    MAXIM    = PatternFill("solid", fgColor="FFF2CC")
+    REL_BG   = PatternFill("solid", fgColor="EEF5FB")
+    REL_MAXIM= PatternFill("solid", fgColor="FFF0A0")
+    WRAP     = Alignment(wrap_text=True, vertical="top")
 
-    columns = [
-        ("Исходное ФИО",           28),
-        ("Строка №",                7),
-        ("Найдено",                 8),
-        ("Найденное ФИО",          28),
-        ("Ликвидные тел. (осн.)",  26),
-        ("Все тел. (сырые)",       26),
-        ("Отброшено тел.",         10),
-        ("Email",                  20),
-        ("Адреса",                 38),
-        ("В Максе",                 9),
-        ("Источник Макса",         28),
-        ("Связанные лица",         30),
-        ("Ликвид. тел. связ.",     30),
-        ("Адреса связанных",       35),
-        ("Связ. в Максе",           9),
-        ("Ист. Макса (связ.)",     28),
-        ("Найд. связ. ФИО",        24),
-        ("Источники",              28),
-        ("Записей в Sauron",       10),
-        ("Уверенность",            12),
-        ("Коммент. по номерам",    25),
-        ("Ошибка",                 28),
+    # ── Лист 1: «Итог по людям» ───────────────────────────────────────────
+    cols1 = [
+        ("Строка №",              7),
+        ("Исходное ФИО",         28),
+        ("Найдено",               8),
+        ("Найденное ФИО",        28),
+        ("Действующие тел.",     28),
+        ("Email",                18),
+        ("Адрес",                38),
+        ("В Максе",               9),
+        ("Источник Макса",       25),
+        ("ВК",                   22),
+        ("Одноклассники",        22),
+        ("Другие соцсети",       22),
+        ("Связ. лиц найдено",    10),
+        ("Источники",            28),
+        ("Уверенность",          12),
+        ("Ошибка",               25),
     ]
-
-    for col_idx, (col_name, col_width) in enumerate(columns, 1):
-        cell = ws.cell(row=1, column=col_idx, value=col_name)
-        cell.font      = HEADER_FONT
-        cell.fill      = HEADER_FILL
-        cell.alignment = WRAP
-        ws.column_dimensions[cell.column_letter].width = col_width
-
-    ws.freeze_panes = "A2"
-    ws.row_dimensions[1].height = 36
+    _write_header(ws1, cols1, H_FILL, H_FONT, WRAP)
 
     for row_idx, r in enumerate(results, 2):
-        in_maxim_any = r.get('in_maxim') or r.get('rel_in_maxim')
-        row_fill = (
-            MAXIM_FILL  if r.get('found') and in_maxim_any else
-            FOUND_FILL  if r.get('found') else
-            NOTFND_FILL
-        )
-
-        values = [
-            r.get('source_fio', ''),
-            r.get('row_num', ''),
-            "Да" if r.get('found') else "Нет",
-            r.get('found_fio', ''),
-            r.get('liquid_phones', ''),
-            r.get('phones_raw', ''),
-            r.get('discarded_phones', '') or '',
-            r.get('emails', ''),
-            r.get('addresses', ''),
-            "✅ Да" if r.get('in_maxim') else "Нет",
-            r.get('maxim_source', ''),
-            r.get('connections', ''),
-            r.get('liquid_rel_phones', '').replace('\n', '\n'),   # сохраняем переносы строк
-            r.get('rel_addresses', ''),
-            "✅ Да" if r.get('rel_in_maxim') else "Нет",
-            r.get('rel_maxim_source', ''),
-            r.get('related_fios_found', ''),
-            r.get('sources', ''),
-            r.get('raw_count', ''),
-            r.get('confidence', ''),
-            r.get('phone_check_note', ''),
-            r.get('error', ''),
+        in_mx = r.in_maxim or any(rp.in_maxim for rp in r.related)
+        fill  = MAXIM if in_mx and r.found else (FOUND if r.found else NOTFND)
+        vals  = [
+            r.row_num,
+            r.source_fio,
+            "Да" if r.found else "Нет",
+            r.found_fio,
+            r.liquid_phones,
+            r.emails,
+            r.addresses,
+            "✅ Да" if r.in_maxim else "Нет",
+            r.maxim_source,
+            r.vk,
+            r.ok,
+            r.other_social,
+            len(r.related),
+            r.sources[:200] if r.sources else '',
+            r.confidence,
+            r.error,
         ]
-
-        for col_idx, val in enumerate(values, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+        for ci, v in enumerate(vals, 1):
+            cell = ws1.cell(row=row_idx, column=ci, value=v)
             cell.alignment = WRAP
-            # Красим только первые 3 колонки (ключевые идентификаторы)
-            if col_idx in (1, 3):
-                cell.fill = row_fill
-            # Колонки «В Максе» — жёлтый если да
-            if col_idx in (10, 15) and val and val.startswith("✅"):
-                cell.fill = MAXIM_FILL
-                cell.font = MAXIM_FONT
+            cell.border    = _make_border()
+            if ci in (1, 2, 3):
+                cell.fill = fill
+            if ci == 8 and str(v).startswith("✅"):
+                cell.fill = MAXIM
+                cell.font = Font(bold=True, color="7F6000")
+
+    # ── Лист 2: «Связанные лица» ──────────────────────────────────────────
+    cols2 = [
+        ("Исходное ФИО",             28),
+        ("Найденное ФИО",            28),
+        ("Связанное лицо ФИО",       30),
+        ("Дата рождения",            14),
+        ("Связь/причина",            20),
+        ("Адрес связанного",         38),
+        ("Действующие номера",       28),
+        ("Проверка номера",          22),
+        ("Есть в Максе",             10),
+        ("Источник Макса",           25),
+        ("ВК",                       22),
+        ("Одноклассники",            22),
+        ("Другие соцсети/ссылки",   22),
+        ("Источники",                28),
+        ("Комментарий",              25),
+    ]
+    _write_header(ws2, cols2, H_FILL2, H_FONT, WRAP)
+
+    row2 = 2
+    for r in results:
+        if not r.found or not r.related:
+            continue
+        for rp in r.related:
+            fill2 = REL_MAXIM if rp.in_maxim else REL_BG
+            vals2 = [
+                r.source_fio,
+                r.found_fio,
+                rp.fio,
+                rp.dob,
+                rp.relation,
+                rp.address,
+                '; '.join(rp.liquid_phones),
+                rp.phone_note,
+                "✅ Да" if rp.in_maxim else "Нет",
+                rp.maxim_source,
+                rp.vk,
+                rp.ok,
+                rp.other_social,
+                rp.sources[:200] if rp.sources else '',
+                rp.comment,
+            ]
+            for ci, v in enumerate(vals2, 1):
+                cell = ws2.cell(row=row2, column=ci, value=v)
+                cell.alignment = WRAP
+                cell.border    = _make_border()
+                if ci in (1, 2, 3):
+                    cell.fill = fill2
+                if ci == 9 and str(v).startswith("✅"):
+                    cell.fill = REL_MAXIM
+                    cell.font = Font(bold=True, color="7F6000")
+            row2 += 1
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# CSV (запасной)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def build_csv_report(results: list[PersonResult]) -> bytes:
+    """CSV с развёрнутыми связанными лицами (одна строка = один связанный)."""
+    columns = [
+        "Исходное ФИО", "Строка №", "Найдено", "Найденное ФИО",
+        "Действующие тел.", "Email", "Адрес", "В Максе", "Источник Макса",
+        "ВК", "Одноклассники",
+        "Связанное лицо ФИО", "Дата рожд.", "Связь", "Адрес связ.",
+        "Номера связ.", "Проверка номера", "Связ. в Максе",
+        "Ист. Макса (связ.)", "ВК связ.", "ОК связ.",
+        "Источники", "Уверенность", "Ошибка",
+    ]
+    output = io.StringIO()
+    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+    writer.writerow(columns)
+
+    for r in results:
+        if r.found and r.related:
+            for rp in r.related:
+                writer.writerow([
+                    r.source_fio, r.row_num,
+                    "Да", r.found_fio,
+                    r.liquid_phones, r.emails, r.addresses,
+                    "Да" if r.in_maxim else "Нет", r.maxim_source,
+                    r.vk, r.ok,
+                    rp.fio, rp.dob, rp.relation, rp.address,
+                    '; '.join(rp.liquid_phones),
+                    rp.phone_note,
+                    "Да" if rp.in_maxim else "Нет",
+                    rp.maxim_source,
+                    rp.vk, rp.ok,
+                    r.sources, r.confidence, r.error,
+                ])
+        else:
+            writer.writerow([
+                r.source_fio, r.row_num,
+                "Да" if r.found else "Нет", r.found_fio,
+                r.liquid_phones, r.emails, r.addresses,
+                "Да" if r.in_maxim else "Нет", r.maxim_source,
+                r.vk, r.ok,
+                '', '', '', '', '', '', '', '', '', '',
+                r.sources, r.confidence, r.error,
+            ])
+
+    return output.getvalue().encode('utf-8-sig')
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Preview до начала поиска
+# ═════════════════════════════════════════════════════════════════════════════
+
 def build_summary(records: list[dict], filename: str, max_records: int = DEFAULT_MAX_FIO) -> str:
-    """Preview до начала поиска."""
     total      = len(records)
     will_check = min(total, max_records)
     skipped    = total - will_check
-
     lines = [f"📄 *Файл:* `{filename}`", ""]
     lines.append(f"👤 *Найдено ФИО:* {total}")
-
     for r in records[:8]:
         lines.append(f"  • {r['fio']}")
     if total > 8:
@@ -1143,7 +1256,6 @@ def build_summary(records: list[dict], filename: str, max_records: int = DEFAULT
     lines.append(f"🔍 Будет проверено: *{will_check}* ФИО")
     if skipped:
         lines.append(f"⚠️ По лимиту ({max_records}) пропущено: *{skipped}*")
-
     return '\n'.join(lines)
 
 
