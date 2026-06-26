@@ -94,9 +94,11 @@ class PhoneCheck:
 class RelativeRecord:
     """Один вероятный родственник для листа «Родственники»."""
     source_fio:      str   = ""   # исходное ФИО из файла
+    source_row:      int   = 0    # номер строки исходного человека (для точного маппинга)
     main_fio:        str   = ""   # найденный основной человек
     fio:             str   = ""   # ФИО родственника
     dob:             str   = ""   # ТОЛЬКО дата в формате DD.MM.YYYY
+    snils:           str   = ""   # СНИЛС родственника (как текст)
     variants_fio:    str   = ""   # варианты ФИО / алиасы (отдельно от даты!)
     alt_fio:         str   = ""   # прежняя/девичья фамилия (устарело, используй variants_fio)
     relation:        str   = ""   # тип родства — всегда заполнен человекочитаемо
@@ -775,6 +777,59 @@ _DOB_RAW_KEYS = (
     'дата_рождения','birth_date','Год рождения','Дата рожд',
 )
 
+# ── Определение мобильного оператора по коду (best-effort, без учёта MNP) ─────
+_RU_OPERATOR: dict[str, str] = {}
+for _c in "910 911 912 913 914 915 916 917 918 919 980 981 982 983 984 985 986 987 988 989 891 892 978".split():
+    _RU_OPERATOR[_c] = "МТС"
+for _c in "903 905 906 909 960 961 962 963 964 965 966 967 968".split():
+    _RU_OPERATOR[_c] = "Билайн"
+for _c in "920 921 922 923 924 925 926 927 928 929 930 931 932 933 934 935 936 937 938 939 999".split():
+    _RU_OPERATOR[_c] = "МегаФон"
+for _c in "900 901 902 904 908 950 951 952 953 958 977 991 992 993 994 995 996".split():
+    _RU_OPERATOR[_c] = "Tele2"
+
+_UA_OPERATOR: dict[str, str] = {}
+for _c in "67 68 96 97 98".split():
+    _UA_OPERATOR[_c] = "Київстар"
+for _c in "50 66 95 99".split():
+    _UA_OPERATOR[_c] = "Vodafone"
+for _c in "63 73 93".split():
+    _UA_OPERATOR[_c] = "lifecell"
+
+
+def _phone_operator(norm: str) -> str:
+    """Возвращает название оператора по нормализованному номеру или ''."""
+    if not norm:
+        return ""
+    if norm.startswith('7') and len(norm) == 11:
+        return _RU_OPERATOR.get(norm[1:4], "")
+    if norm.startswith('380') and len(norm) == 12:
+        return _UA_OPERATOR.get(norm[3:5], "")
+    return ""
+
+
+_SNILS_KEYS = (
+    'СНИЛС', 'Снилс', 'снилс', 'SNILS', 'Snils', 'snils',
+    'Номер СНИЛС', 'Страховой номер', 'Страховой номер счёта',
+)
+_SNILS_RE = re.compile(r'(\d{3})[\-\s]?(\d{3})[\-\s]?(\d{3})[\-\s]?(\d{2})')
+
+
+def _extract_snils_from_raw(raw_records: list[dict]) -> str:
+    """Ищет СНИЛС в ответе Sauron. Возвращает 'XXX-XXX-XXX YY' или ''."""
+    for rec in raw_records:
+        v = _val(rec, *_SNILS_KEYS)
+        if not v:
+            continue
+        m = _SNILS_RE.search(str(v))
+        if m:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}"
+        digits = re.sub(r'\D', '', str(v))
+        if len(digits) == 11:
+            return f"{digits[0:3]}-{digits[3:6]}-{digits[6:9]} {digits[9:11]}"
+    return ''
+
+
 def _extract_dob_from_raw(raw_records: list[dict]) -> str:
     """Ищет дату рождения в полях ответа Sauron. Возвращает DD.MM.YYYY или ''."""
     for rec in raw_records:
@@ -1278,13 +1333,16 @@ def run_file_search(
                     logger.debug(f"VK enrich skipped: {_ve}")
 
             # ── Дата рождения — только настоящая дата ─────────────────────
-            real_dob = cand_dob or _extract_dob_from_raw(rel_fields.get('raw_records', []))
+            real_dob   = cand_dob or _extract_dob_from_raw(rel_fields.get('raw_records', []))
+            real_snils = _extract_snils_from_raw(rel_fields.get('raw_records', []))
 
             rr = RelativeRecord(
                 source_fio      = fio,
+                source_row      = inp.row_num,
                 main_fio        = fields['found_fio'],
                 fio             = cand_fio,
                 dob             = real_dob,                          # ТОЛЬКО дата, никаких ФИО
+                snils           = real_snils,
                 variants_fio    = alt_fio,
                 alt_fio         = alt_fio,
                 relation        = _human_relation(rel_str, evidence),  # читаемая причина
@@ -1616,7 +1674,134 @@ def build_xlsx_report(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# CSV / ZIP отчёт (основной экспорт)
+# FINAL_MERGED.xlsx — основной формат результата (один лист, 1 строка = 1 родственник)
+# ═════════════════════════════════════════════════════════════════════════════
+
+FINAL_MERGED_HEADERS = [
+    "ФИО погибшего",
+    "Дата рождения погибшего",
+    "Дата смерти погибшего",
+    "ФИО родственника",
+    "Дата рождения родственника",
+    "Телефон",
+    "phone_norm",
+    "СНИЛС",
+    "MAX",
+    "Соц. сети",
+    "Ошибка",
+]
+# Колонки, которые Excel должен хранить как текст (чтобы не портить длинные числа)
+_FM_TEXT_COLS = {6, 7, 8, 9}  # Телефон, phone_norm, СНИЛС, MAX
+
+
+def _fm_social_links(r: RelativeRecord) -> str:
+    """Собирает ссылки VK/OK/Telegram/Instagram, каждая с новой строки."""
+    links: list[str] = []
+    for raw in (r.vk_profile_url, r.vk, r.ok, r.other_social):
+        if not raw:
+            continue
+        for part in re.split(r'[;\n\s]+', str(raw)):
+            part = part.strip()
+            if part and part not in links:
+                links.append(part)
+    return '\n'.join(links)
+
+
+def build_final_merged_xlsx(
+    persons:   list[PersonRecord],
+    relatives: list[RelativeRecord],
+    phones:    list[PhoneCheck],
+) -> Optional[bytes]:
+    """
+    Единый файл FINAL_MERGED.xlsx, лист Sheet1.
+    Одна строка = один родственник найденного (погибшего) человека.
+    Дополнительно: строки для не найденных / ошибочных людей (с заполненной «Ошибка»).
+    """
+    if not _HAS_OPENPYXL:
+        return None
+
+    # Индекс: строка/ФИО исходного человека → PersonRecord (для даты рожд./смерти)
+    # Приоритет — точный номер строки, fallback — ФИО (на случай старых записей).
+    person_by_row: dict[int, PersonRecord] = {p.row_num: p for p in persons if p.row_num}
+    person_by_src: dict[str, PersonRecord] = {}
+    for p in persons:
+        person_by_src.setdefault(p.source_fio.strip().lower(), p)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    head_fill = PatternFill("solid", fgColor="1F4E79")
+    head_font = Font(bold=True, color="FFFFFF")
+    wrap_top  = Alignment(wrap_text=True, vertical="top")
+
+    for ci, title in enumerate(FINAL_MERGED_HEADERS, 1):
+        c = ws.cell(row=1, column=ci, value=title)
+        c.fill = head_fill
+        c.font = head_font
+        c.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+
+    widths = [30, 18, 18, 30, 18, 34, 28, 18, 26, 36, 24]
+    for ci, w in enumerate(widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(ci)].width = w
+
+    def _emit(row_idx: int, values: list[str]):
+        for ci, val in enumerate(values, 1):
+            c = ws.cell(row=row_idx, column=ci, value=val if val else None)
+            c.alignment = wrap_top
+            if ci in _FM_TEXT_COLS:
+                c.number_format = '@'   # хранить как текст
+
+    ri = 2
+
+    # ── Одна строка = один родственник найденного (погибшего) человека ─────
+    for r in relatives:
+        p = person_by_row.get(r.source_row) or person_by_src.get(r.source_fio.strip().lower())
+
+        deceased_fio = (r.main_fio or r.source_fio or "").strip()
+        deceased_dob = p.dob if p else ""
+        deceased_dod = p.dod if p else ""
+
+        # Телефон с операторами: "79140367459 (МТС); 79512941691 (Tele2)"
+        phone_disp_parts: list[str] = []
+        for n in r.phones:
+            op = _phone_operator(n)
+            phone_disp_parts.append(f"{n} ({op})" if op else n)
+        phone_disp = '; '.join(phone_disp_parts)
+        phone_norm = '; '.join(r.phones)
+
+        # MAX: "Да - 79148605668" если человек в Максе (флаг — на уровне родственника).
+        # in_maxim не привязан к конкретному номеру, поэтому берём первый ликвидный.
+        if r.in_maxim and r.phones:
+            max_cell = "Да - " + r.phones[0]
+        elif r.in_maxim:
+            max_cell = "Да"
+        else:
+            max_cell = "Нет"
+
+        _emit(ri, [
+            deceased_fio,
+            deceased_dob,
+            deceased_dod,
+            r.fio,
+            r.dob,
+            phone_disp,
+            phone_norm,
+            r.snils,
+            max_cell,
+            _fm_social_links(r),
+            "",   # ошибок по строке родственника нет
+        ])
+        ri += 1
+
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CSV / ZIP отчёт (вспомогательный экспорт)
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _make_csv(headers: list[str], rows: list[list]) -> bytes:

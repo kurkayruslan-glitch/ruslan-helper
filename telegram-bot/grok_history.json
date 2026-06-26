@@ -2,22 +2,6 @@
   "7959647798": [
     {
       "role": "user",
-      "content": "Позвони жене скажи пусть встает быстреее"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:call_wife:Пусть встаёт быстрее!]"
-    },
-    {
-      "role": "user",
-      "content": "+380 99 433 86 19"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:send_sms:+380994338619:Пусть встаёт быстрее!]"
-    },
-    {
-      "role": "user",
       "content": "Набери и скажи. Вставай быстрее"
     },
     {
@@ -159,6 +143,22 @@
     {
       "role": "assistant",
       "content": "[ACTION:send_sms:+380983464316:Дай денег.]"
+    },
+    {
+      "role": "user",
+      "content": "Стоп"
+    },
+    {
+      "role": "assistant",
+      "content": "Что-то не так?"
+    },
+    {
+      "role": "user",
+      "content": "Останови поиск"
+    },
+    {
+      "role": "assistant",
+      "content": "Не могу остановить поиск, так как он уже завершен. Если нужно что-то другое, давай!"
     }
   ]
 }

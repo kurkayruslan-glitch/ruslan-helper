@@ -1,1 +1,2 @@
 - [Sauron API format](sauron-api.md) — POST form-data ?token=KEY + data={query:...}; NOT Bearer/JSON/GET
+- [Sauron FINAL_MERGED.xlsx report](sauron-final-merged-report.md) — single Excel, 1 row = 1 relative; map by source_row not name; MAX is relative-level.

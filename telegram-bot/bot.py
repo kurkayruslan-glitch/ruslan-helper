@@ -2685,7 +2685,6 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
         return
 
     try:
-        base      = filename.rsplit('.', 1)[0]
         found_cnt = sum(1 for p in persons if p.found)
         rel_cnt   = len(relatives)
         caption_base = (
@@ -2694,36 +2693,26 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
             + (f"\n⚠️ Пропущено: {skipped}" if skipped else "")
         )
 
-        # ── Основной формат: ZIP с 4 CSV ──────────────────────────────────
-        zip_bytes = sauron_file_search.build_zip_report(
-            persons, relatives, phone_checks, errors, base_name=base,
-        )
-        zip_bio = io.BytesIO(zip_bytes)
-        zip_bio.name = base + "_sauron.zip"
-        bot.send_document(
-            chat_id, zip_bio,
-            caption=(
-                f"📦 Отчёт «{filename}» — CSV архив (4 файла)\n"
-                + caption_base
-                + "\n\n📂 Внутри архива:\n"
-                "  • people_summary.csv — итог по людям\n"
-                "  • relatives.csv — родственники\n"
-                "  • phone_checks.csv — номера\n"
-                "  • errors_limits.csv — ошибки"
-            ),
-            reply_markup=markup,
-        )
-
-        # ── Опционально: XLSX если openpyxl доступен ──────────────────────
-        xlsx_bytes = sauron_file_search.build_xlsx_report(
-            persons, relatives, phone_checks, errors,
+        # ── Единственный результат: FINAL_MERGED.xlsx ─────────────────────
+        xlsx_bytes = sauron_file_search.build_final_merged_xlsx(
+            persons, relatives, phone_checks,
         )
         if xlsx_bytes:
             xlsx_bio = io.BytesIO(xlsx_bytes)
-            xlsx_bio.name = base + "_sauron.xlsx"
+            xlsx_bio.name = "FINAL_MERGED.xlsx"
             bot.send_document(
                 chat_id, xlsx_bio,
-                caption=f"📊 То же — в XLSX (4 листа, для удобного просмотра)\n" + caption_base,
+                caption=(
+                    "📊 FINAL_MERGED.xlsx — итоговый отчёт\n"
+                    "(1 строка = 1 родственник)\n" + caption_base
+                ),
+                reply_markup=markup,
+            )
+        else:
+            bot.send_message(
+                chat_id,
+                "⚠️ Не удалось собрать XLSX (нет openpyxl).",
+                reply_markup=markup,
             )
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
