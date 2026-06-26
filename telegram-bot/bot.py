@@ -26,6 +26,7 @@ import pc_control
 import pc_apps
 import price_search
 import crm
+import sauron
 
 # ──────────────────────────────────────────────────────────────────
 # РЕЖИМ ЗАПУСКА
@@ -203,6 +204,9 @@ waiting_for_owner_call = {}
 # Ожидание адреса TRC20 кошелька
 waiting_for_wallet = set()
 
+# Ожидание поискового запроса для Sauron
+waiting_for_sauron_query: set = set()
+
 # Чаты в режиме свободного ИИ-диалога («🤖 ИИ чат»)
 ai_chat_mode: set = set()
 
@@ -284,7 +288,8 @@ def main_menu():
     markup.add("📞 Звонок",       "🏨 Бронирование")
     markup.add("📋 Задачи",       "🚕 Тоха")
     markup.add("💻 Мой ПК",       "🎮 Dota 2")
-    markup.add("📊 Я Тигр",       "📋 ФОП")
+    markup.add("🔍 Саурон",       "📊 Я Тигр")
+    markup.add("📋 ФОП")
     return markup
 
 
@@ -662,6 +667,18 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
     elif action_type == "list_apps":
         safe_send(chat_id, pc_apps.list_apps())
 
+    elif action_type == "search_sauron":
+        query = (action_param or "").strip()
+        if not query:
+            safe_send(chat_id, "🔍 Что искать на Sauron? Укажи ФИО, номер или другой запрос.")
+            return
+        bot.send_message(chat_id, f"🔍 Ищу «{query}» на Sauron…")
+        try:
+            result = sauron.search(query)
+        except Exception as e:
+            result = f"❌ Ошибка Sauron: {str(e)[:200]}"
+        safe_send(chat_id, result)
+
     elif action_type == "search_price":
         safe_send(chat_id, "🔎 Ищу цены, секунду…")
         try:
@@ -783,6 +800,10 @@ def _ask_grok_and_route(chat_id: int, text: str):
         "Отвечай умно, коротко, по делу — как лучший друг и эксперт одновременно. "
         "Если чего-то не знаешь — говори прямо и предлагай альтернативу. "
         "Никогда не проси пароли, коды SMS, токены или личные данные. "
+        "Для поиска информации о людях, телефонах, адресах через sauron.info — используй "
+        "[ACTION:search_sauron:запрос]. Пример: если Руслан говорит «найди в Sauron Иванова Петра» — "
+        "ответь [ACTION:search_sauron:Иванов Петр]. Никогда не проси логин/пароль от Sauron — "
+        "они берутся из настроек бота автоматически. "
     )
     memory_block = "\n" + personality + "\n" + memory_block
 
@@ -940,6 +961,28 @@ def process_text(chat_id, text):
         else:
             _log_remote(chat_id, f"отменено: {action}")
             bot.send_message(chat_id, "✅ Отменено. Ничего не произошло.", reply_markup=remote_access_menu())
+        return
+
+    # Ожидаем поисковый запрос для Sauron
+    if chat_id in waiting_for_sauron_query:
+        if tl in ("отмена", "cancel", "стоп", "нет"):
+            waiting_for_sauron_query.discard(chat_id)
+            markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+            bot.send_message(chat_id, "🔍 Поиск отменён.", reply_markup=markup)
+            return
+        waiting_for_sauron_query.discard(chat_id)
+        query = t
+        msg = bot.send_message(chat_id, f"🔍 Ищу «{query}» на Sauron…")
+        try:
+            result = sauron.search(query)
+        except Exception as e:
+            result = f"❌ Ошибка Sauron: {str(e)[:200]}"
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        try:
+            bot.delete_message(chat_id, msg.message_id)
+        except Exception:
+            pass
+        safe_send(chat_id, result, markup)
         return
 
     # Ожидаем TRC20-адрес кошелька
@@ -1115,6 +1158,7 @@ def process_text(chat_id, text):
         "/податки":              lambda: _show_tax_calendar(chat_id),
         "налоги":                lambda: _show_tax_calendar(chat_id),
         "податки":               lambda: _show_tax_calendar(chat_id),
+        "🔍 саурон":             lambda: _btn_sauron_search(chat_id),
         "🔙 назад":              lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
     }
 
@@ -1188,6 +1232,12 @@ def _jarvis_system_status() -> str:
         lines.append("🎤 Голос (STT/TTS): ✅ настроен")
     else:
         lines.append("🎤 Голос (STT/TTS): ⚠️ не настроен — добавь OPENAI_API_KEY в Secrets")
+
+    # Sauron
+    try:
+        lines.append(f"🔍 Sauron: {sauron.status()}")
+    except Exception:
+        lines.append("🔍 Sauron: ⚠️ ошибка модуля")
 
     # Звонки
     tw_ok = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
@@ -1933,6 +1983,37 @@ def _btn_dota(chat_id: int):
 # ══════════════════════════════════════════════════════════════════
 # конец новых хендлеров
 # ══════════════════════════════════════════════════════════════════
+
+def _btn_sauron_search(chat_id: int):
+    """Ручной поиск через Sauron — спрашивает запрос, потом ищет."""
+    # Проверяем настройку не показывая credentials
+    s_status = sauron.status()
+    if "не задан" in s_status or "не настроен" in s_status.lower():
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        bot.send_message(
+            chat_id,
+            "🔍 *Sauron — поиск информации*\n\n"
+            "⚠️ Не настроено. Добавь в Replit Secrets:\n"
+            "• `SAURON_LOGIN` — твой логин на sauron.info\n"
+            "• `SAURON_PASSWORD` — твой пароль\n\n"
+            "После добавления перезапусти бота.\n\n"
+            "_Логин и пароль в Telegram не присылай — только через Replit Secrets._",
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+        return
+    waiting_for_sauron_query.add(chat_id)
+    bot.send_message(
+        chat_id,
+        "🔍 *Sauron — поиск*\n\n"
+        "Что искать? Напиши запрос:\n"
+        "• ФИО — «Иванов Петр Сергеевич»\n"
+        "• Номер телефона — «+380XXXXXXXXX»\n"
+        "• Адрес, ИНН или другое\n\n"
+        "_Напиши «отмена» чтобы выйти._",
+        parse_mode="Markdown",
+    )
+
 
 def _btn_forget(chat_id):
     grok_history.pop(chat_id, None)
