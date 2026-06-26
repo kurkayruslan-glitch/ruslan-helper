@@ -405,6 +405,21 @@ def search(query: str) -> str:
     return header + result_text
 
 
+def search_for_batch(query: str) -> tuple[bool, str, bool]:
+    """
+    Для пакетного поиска из файлов.
+    Возвращает (success, result_text, stop_batch).
+    stop_batch=True — нужно остановить всю пачку (нет баланса, нет ключа, нет настройки).
+    """
+    result = search(query)
+    stop_keywords = ("баланс", "API-ключ", "Не настроен", "SAURON_API_KEY",
+                     "не настроен", "Replit Secrets", "API URL")
+    stop_batch = any(kw in result for kw in stop_keywords)
+    not_found_keywords = ("ничего не найдено", "пустой ответ", "⚠️", "❌")
+    found = not any(kw in result for kw in not_found_keywords)
+    return found, result, stop_batch
+
+
 def get_balance() -> str:
     """Проверяет баланс через API (только если настроен API-ключ)."""
     if not _api_key():

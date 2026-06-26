@@ -27,6 +27,7 @@ import pc_apps
 import price_search
 import crm
 import sauron
+import file_search
 
 # ──────────────────────────────────────────────────────────────────
 # РЕЖИМ ЗАПУСКА
@@ -207,6 +208,10 @@ waiting_for_wallet = set()
 # Ожидание поискового запроса для Sauron
 waiting_for_sauron_query: set = set()
 
+# Поиск по файлу через Sauron
+waiting_for_file_sauron: set = set()          # chat_id ожидает отправки файла
+file_sauron_pending: dict = {}                 # chat_id → {"records": [...], "filename": str}
+
 # Чаты в режиме свободного ИИ-диалога («🤖 ИИ чат»)
 ai_chat_mode: set = set()
 
@@ -288,8 +293,8 @@ def main_menu():
     markup.add("📞 Звонок",       "🏨 Бронирование")
     markup.add("📋 Задачи",       "🚕 Тоха")
     markup.add("💻 Мой ПК",       "🎮 Dota 2")
-    markup.add("🔍 Саурон",       "📊 Я Тигр")
-    markup.add("📋 ФОП")
+    markup.add("🔍 Саурон",       "📁 Файл → Саурон")
+    markup.add("📊 Я Тигр",       "📋 ФОП")
     return markup
 
 
@@ -985,6 +990,20 @@ def process_text(chat_id, text):
         safe_send(chat_id, result, markup)
         return
 
+    # Ожидаем файл для поиска через Sauron
+    if chat_id in waiting_for_file_sauron:
+        if tl in ("отмена", "cancel", "стоп", "нет"):
+            waiting_for_file_sauron.discard(chat_id)
+            markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+            bot.send_message(chat_id, "📁 Отменено.", reply_markup=markup)
+        else:
+            bot.send_message(
+                chat_id,
+                "📁 Отправь файл (txt, csv, xlsx, docx, pdf) — не текст.\n"
+                "Напиши «отмена» чтобы выйти.",
+            )
+        return
+
     # Ожидаем TRC20-адрес кошелька
     if chat_id in waiting_for_wallet:
         waiting_for_wallet.discard(chat_id)
@@ -1159,8 +1178,21 @@ def process_text(chat_id, text):
         "налоги":                lambda: _show_tax_calendar(chat_id),
         "податки":               lambda: _show_tax_calendar(chat_id),
         "🔍 саурон":             lambda: _btn_sauron_search(chat_id),
+        "📁 файл → саурон":     lambda: _btn_file_sauron(chat_id),
         "🔙 назад":              lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
     }
+
+    # ── Естественные фразы для поиска по файлу ───────────────────────────
+    file_triggers = [
+        "проверь файл", "проверить файл", "поиск по файлу",
+        "найди в файле", "загрузи файл", "отправь файл",
+        "файл саурон", "файл в саурон", "найди связанных",
+        "найди приближенных", "поиск номеров в файле",
+        "найди номера в файле", "проверь номера",
+    ]
+    if any(trigger in tl for trigger in file_triggers):
+        _btn_file_sauron(chat_id)
+        return
 
     label_key = tl.strip()
     if label_key in BUTTON_LABELS:
@@ -2018,6 +2050,35 @@ def _btn_sauron_search(chat_id: int):
     )
 
 
+def _btn_file_sauron(chat_id: int):
+    """Запускает поиск по файлу через Sauron — предлагает отправить файл."""
+    s_status = sauron.status()
+    if "не настроен" in s_status.lower() or "не задан" in s_status:
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        bot.send_message(
+            chat_id,
+            "📁 *Поиск по файлу — Sauron не настроен*\n\n"
+            "Добавь в Replit Secrets:\n"
+            "• `SAURON_API_KEY` — API-ключ _(рекомендуется)_\n"
+            "• или `SAURON_USERNAME` + `SAURON_PASSWORD`\n\n"
+            "После добавления перезапусти бота.",
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+        return
+    fmts = file_search.supported_formats()
+    waiting_for_file_sauron.add(chat_id)
+    bot.send_message(
+        chat_id,
+        "📁 *Поиск по файлу через Sauron*\n\n"
+        f"Поддерживаемые форматы: `{fmts}`\n\n"
+        "Отправь файл — бот извлечёт из него телефоны и ФИО, "
+        "покажет что нашёл и спросит подтверждение перед отправкой в Sauron.\n\n"
+        "_Напиши «отмена» чтобы выйти._",
+        parse_mode="Markdown",
+    )
+
+
 def _btn_forget(chat_id):
     grok_history.pop(chat_id, None)
     _save_grok_history()
@@ -2551,6 +2612,81 @@ def handle_voice(message):
             bot.send_message(chat_id, f"⚠️ {hint}")
 
 
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    """Обрабатывает загруженные файлы — парсит и запускает поиск через Sauron."""
+    chat_id = message.chat.id
+    if not is_allowed(chat_id):
+        return
+
+    doc = message.document
+    filename = doc.file_name or "file"
+
+    # Если пользователь не в режиме ожидания файла и это не очевидный файл для Sauron —
+    # проверяем расширение, чтобы не перехватывать код/фото/архивы случайно
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    supported_exts = {'txt', 'csv', 'xlsx', 'xls', 'docx', 'pdf'}
+
+    if chat_id not in waiting_for_file_sauron and ext not in supported_exts:
+        # Передаём управление дальше (обычный документ, не для Sauron)
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        bot.send_message(
+            chat_id,
+            f"📎 Получил файл *{filename}*\n\n"
+            "Что с ним сделать?\n"
+            "• Для поиска через Sauron нажми *📁 Файл → Саурон*\n"
+            "• Поддерживаемые форматы: txt, csv, xlsx, xls, docx, pdf",
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+        return
+
+    # Убираем из режима ожидания
+    waiting_for_file_sauron.discard(chat_id)
+
+    msg = bot.send_message(chat_id, f"📄 Получил *{filename}* — разбираю…", parse_mode="Markdown")
+
+    # Скачиваем файл
+    try:
+        file_info = bot.get_file(doc.file_id)
+        data = bot.download_file(file_info.file_path)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Не удалось скачать файл: {str(e)[:100]}", chat_id, msg.message_id)
+        return
+
+    # Парсим файл
+    try:
+        records, parse_error = file_search.parse_file(data, filename)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка при разборе файла: {str(e)[:150]}", chat_id, msg.message_id)
+        return
+
+    if parse_error:
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        bot.edit_message_text(
+            f"📄 *{filename}*\n\n⚠️ {parse_error}",
+            chat_id, msg.message_id,
+            parse_mode="Markdown",
+        )
+        bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
+        return
+
+    # Строим превью и показываем пользователю
+    summary = file_search.build_summary(records, filename)
+    file_sauron_pending[chat_id] = {"records": records, "filename": filename}
+
+    inline = types.InlineKeyboardMarkup(row_width=2)
+    inline.add(
+        types.InlineKeyboardButton("✅ Да, искать в Sauron", callback_data="filesauron_yes"),
+        types.InlineKeyboardButton("❌ Отмена",              callback_data="filesauron_no"),
+    )
+    try:
+        bot.delete_message(chat_id, msg.message_id)
+    except Exception:
+        pass
+    bot.send_message(chat_id, summary, parse_mode="Markdown", reply_markup=inline)
+
+
 def make_sms_link(phone: str, text: str) -> str:
     """Создать https ссылку на страницу-редирект которая откроет SMS приложение"""
     domain = os.environ.get("REPLIT_DEV_DOMAIN", "localhost")
@@ -2852,6 +2988,60 @@ def handle_document(message):
 def handle_callback(call):
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id)
+
+    # ── Поиск по файлу — подтверждение ───────────────────────────────────
+    if call.data == "filesauron_yes":
+        pending = file_sauron_pending.pop(chat_id, None)
+        if not pending:
+            bot.send_message(chat_id, "⚠️ Данные устарели — отправь файл снова.")
+            return
+        records  = pending["records"]
+        filename = pending["filename"]
+        prog_msg = bot.send_message(
+            chat_id,
+            f"🔍 *Начинаю поиск по файлу «{filename}»…*\n\n"
+            f"Записей к проверке: *{min(len(records), 50)}*\n"
+            "Это займёт некоторое время — не отправляй новые команды.",
+            parse_mode="Markdown",
+        )
+        try:
+            results, stop_reason = file_search.batch_search(
+                records, chat_id, bot, prog_msg.message_id,
+            )
+        except Exception as e:
+            try:
+                bot.edit_message_text(f"❌ Критическая ошибка поиска: {str(e)[:200]}", chat_id, prog_msg.message_id)
+            except Exception:
+                pass
+            return
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        short = file_search.build_short_summary(results, stop_reason)
+        try:
+            bot.edit_message_text(short, chat_id, prog_msg.message_id, parse_mode="Markdown")
+        except Exception:
+            safe_send(chat_id, short, markup)
+        if len(results) > 5:
+            try:
+                csv_bytes = file_search.build_csv_report(results)
+                report_name = filename.rsplit('.', 1)[0] + "_sauron_report.csv"
+                bio = io.BytesIO(csv_bytes)
+                bio.name = report_name
+                bot.send_document(
+                    chat_id, bio,
+                    caption=f"📊 Полный отчёт Sauron: «{filename}» ({len(results)} записей)",
+                    reply_markup=markup,
+                )
+            except Exception as e:
+                bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
+        else:
+            bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
+        return
+
+    elif call.data == "filesauron_no":
+        file_sauron_pending.pop(chat_id, None)
+        markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+        bot.send_message(chat_id, "📁 Поиск отменён.", reply_markup=markup)
+        return
 
     if call.data == "add_sheet":
         bot.send_message(chat_id,
