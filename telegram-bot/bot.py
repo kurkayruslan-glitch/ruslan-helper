@@ -2640,21 +2640,23 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
         bot.send_message(chat_id, "Главное меню 👇", reply_markup=markup)
         return
 
-    n_phones = sum(1 for r in records if r['type'] == 'phone')
-    n_names  = sum(1 for r in records if r['type'] == 'name')
-    to_check = min(len(records), 50)
+    n_persons = len(records)
+    max_q     = file_search.DEFAULT_MAX_FIO
+    to_check  = min(n_persons, max_q)
+    skipped   = n_persons - to_check
+    skip_note = f"\n⚠️ _По лимиту ({max_q}) пропущено: {skipped}_" if skipped else ""
     try:
         bot.edit_message_text(
             f"📄 *{filename}*\n\n"
-            f"📱 Телефонов: *{n_phones}*   👤 ФИО: *{n_names}*\n"
-            f"🔍 Проверяю {to_check} записей через Sauron…\n\n"
-            "⏳ _Это займёт немного времени…_",
+            f"👤 ФИО найдено в файле: *{n_persons}*{skip_note}\n"
+            f"🔍 Проверяю *{to_check}* человек через Sauron…\n\n"
+            "⏳ _Это может занять несколько минут…_",
             chat_id, msg.message_id, parse_mode="Markdown",
         )
     except Exception:
         pass
 
-    # Пакетный поиск — прогресс обновляется в этом же сообщении
+    # Пакетный поиск — прогресс обновляется в том же сообщении
     try:
         results, stop_reason = file_search.batch_search(records, chat_id, bot, msg.message_id)
     except Exception as e:
@@ -2665,24 +2667,45 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
         return
 
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-    short = file_search.build_short_summary(results, stop_reason)
+    short  = file_search.build_short_summary(results, stop_reason)
     try:
         bot.edit_message_text(short, chat_id, msg.message_id, parse_mode="Markdown")
     except Exception:
         safe_send(chat_id, short, markup)
 
-    # CSV-отчёт если результатов много
-    if len(results) > 5:
+    # Отчёт-файл: XLSX если openpyxl доступен, иначе CSV
+    if len(results) >= 1:
         try:
-            csv_bytes = file_search.build_csv_report(results)
-            report_name = filename.rsplit('.', 1)[0] + "_sauron_report.csv"
-            bio = io.BytesIO(csv_bytes)
-            bio.name = report_name
-            bot.send_document(
-                chat_id, bio,
-                caption=f"📊 Полный отчёт по «{filename}» — {len(results)} записей",
-                reply_markup=markup,
-            )
+            base_name  = filename.rsplit('.', 1)[0]
+            found_cnt  = sum(1 for r in results if r.get('found'))
+            xlsx_bytes = file_search.build_xlsx_report(results)
+            if xlsx_bytes:
+                report_name = base_name + "_sauron_report.xlsx"
+                bio = io.BytesIO(xlsx_bytes)
+                bio.name = report_name
+                bot.send_document(
+                    chat_id, bio,
+                    caption=(
+                        f"📊 Отчёт по «{filename}»\n"
+                        f"Найдено: {found_cnt} / {len(results)} чел."
+                        + (f"\n⚠️ Пропущено по лимиту: {skipped}" if skipped else "")
+                    ),
+                    reply_markup=markup,
+                )
+            else:
+                csv_bytes   = file_search.build_csv_report(results)
+                report_name = base_name + "_sauron_report.csv"
+                bio = io.BytesIO(csv_bytes)
+                bio.name = report_name
+                bot.send_document(
+                    chat_id, bio,
+                    caption=(
+                        f"📊 Отчёт по «{filename}»\n"
+                        f"Найдено: {found_cnt} / {len(results)} чел."
+                        + (f"\n⚠️ Пропущено по лимиту: {skipped}" if skipped else "")
+                    ),
+                    reply_markup=markup,
+                )
         except Exception as e:
             bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:80]}", reply_markup=markup)
     else:
@@ -2923,10 +2946,10 @@ def handle_document(message):
     ext      = os.path.splitext(filename)[1].lower()
 
     # ── Роутинг: Sauron ───────────────────────────────────────────────────
-    SAURON_EXTS = {'.csv', '.xlsx', '.xls', '.docx', '.pdf'}
+    # .txt включён: список ФИО чаще всего приходит именно в txt/csv/xlsx
+    SAURON_EXTS = {'.csv', '.xlsx', '.xls', '.docx', '.pdf', '.txt'}
     is_sauron_mode = chat_id in waiting_for_file_sauron
     is_sauron_ext  = ext in SAURON_EXTS
-    # .txt идёт в Sauron только если пользователь явно запросил
     if is_sauron_ext or is_sauron_mode:
         waiting_for_file_sauron.discard(chat_id)
         _run_file_sauron(chat_id, doc, filename)

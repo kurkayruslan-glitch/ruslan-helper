@@ -2,22 +2,6 @@
   "7959647798": [
     {
       "role": "user",
-      "content": "📞 Звонок"
-    },
-    {
-      "role": "assistant",
-      "content": "[ACTION:call_toha]"
-    },
-    {
-      "role": "user",
-      "content": "Как сам ?"
-    },
-    {
-      "role": "assistant",
-      "content": "Да всё норм! Как у тебя? Что нового?"
-    },
-    {
-      "role": "user",
       "content": "Проснулся"
     },
     {
@@ -159,6 +143,22 @@
     {
       "role": "assistant",
       "content": "Что-то нужно?"
+    },
+    {
+      "role": "user",
+      "content": "И"
+    },
+    {
+      "role": "assistant",
+      "content": "И что? Поясни, что именно нужно!"
+    },
+    {
+      "role": "user",
+      "content": "Отправь смс на номер \n\n+380955412070\nС текстом Уходи отсюда ты воняешь"
+    },
+    {
+      "role": "assistant",
+      "content": "[ACTION:send_sms:+380955412070:Уходи отсюда, ты воняешь.]"
     }
   ]
 }

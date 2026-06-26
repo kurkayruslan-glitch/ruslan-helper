@@ -94,12 +94,19 @@ def _api_post_search(query: str) -> dict:
     """POST /search с form-data query=... Возвращает result или бросает RuntimeError."""
     key = _api_key()
     url = f"{_api_base()}/search"
+
+    # Телефонные номера: убираем знак + в начале.
+    # Sauron API возвращает ошибку 1002 ("Пустой запрос") если query начинается с '+'.
+    q = query.strip()
+    if re.match(r'^\+\d{7,15}$', q):
+        q = q[1:]
+
     try:
         resp = requests.post(
             url,
             headers=_API_HEADERS,
             params={"token": key},
-            data={"query": query},      # form-data, НЕ json
+            data={"query": q},          # form-data, НЕ json
             timeout=_TIMEOUT,
         )
     except requests.exceptions.Timeout:
