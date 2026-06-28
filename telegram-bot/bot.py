@@ -117,6 +117,11 @@ if OpenAI and _DIRECT_OPENAI_KEY:
 else:
     voice_openai_client = None  # голос недоступен; текстовый чат продолжает работать
 
+# Лимит размера аудиофайла для анализа диалога (по умолчанию 24 МБ)
+_DIALOG_AUDIO_MAX_BYTES = int(os.environ.get("DIALOG_AUDIO_MAX_BYTES", str(24 * 1024 * 1024)))
+# Расширения аудиофайлов, которые отправляются на анализ диалога
+_DIALOG_AUDIO_EXTS = {'.mp3', '.m4a', '.wav', '.ogg', '.oga', '.opus', '.aac', '.flac', '.webm'}
+
 bot = telebot.TeleBot(TOKEN)
 
 # ──────────────────────────────────────────────
@@ -190,6 +195,117 @@ def _tts_send_voice(chat_id: int, text: str):
     except Exception as e:
         print(f"TTS ошибка: {e}")
         # Graceful fallback — текстовый ответ уже отправлен выше
+
+
+def _is_audio_doc(filename: str, mime_type) -> bool:
+    """Возвращает True если файл является аудио по расширению или MIME-типу."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in _DIALOG_AUDIO_EXTS:
+        return True
+    if mime_type and str(mime_type).startswith("audio/"):
+        return True
+    return False
+
+
+_DIALOG_ANALYSIS_SYSTEM = (
+    "Ты — профессиональный аналитик переговоров и коммуникаций. "
+    "Проанализируй транскрипт записанного диалога и дай структурированный отчёт строго в этом формате:\n\n"
+    "📋 *ИТОГ* — 2-3 предложения: о чём разговор\n"
+    "🎯 *ЦЕЛЬ* — кто чего хотел добиться\n"
+    "👑 *КОНТРОЛЬ* — кто управлял диалогом и почему\n"
+    "💪 *СИЛЬНЫЕ СТОРОНЫ* — что сработало хорошо (конкретные примеры)\n"
+    "⚠️ *ОШИБКИ* — что пошло не так, упущенные возможности\n"
+    "🚨 *РИСКИ* — угрозы, напряжение, опасные моменты\n"
+    "✅ *ЛУЧШИЕ ФРАЗЫ* — 2-3 цитаты, которые работали\n"
+    "❌ *ОПАСНЫЕ ФРАЗЫ* — 2-3 цитаты, которые навредили или могут навредить\n"
+    "💡 *КАК СКАЗАТЬ ЛУЧШЕ* — конкретная переформулировка для опасных фраз\n"
+    "📊 *ОЦЕНКИ (0–10)*:\n"
+    "  • Контроль диалога: X/10\n"
+    "  • Доверие / раппорт: X/10\n"
+    "  • Ясность / чёткость: X/10\n"
+    "  • Результат / итог: X/10\n"
+    "  • Безопасность / риск: X/10\n"
+    "🏆 *ВЕРДИКТ* — финальная оценка одним абзацем и главный совет\n\n"
+    "Отвечай на русском языке. Будь конкретным и честным. "
+    "Если говорящих несколько — различай их (Собеседник 1, Собеседник 2 или по именам из текста)."
+)
+
+
+def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
+    """Расшифровывает аудиофайл через Whisper и анализирует диалог через текущий LLM."""
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+
+    if not voice_openai_client:
+        safe_send(
+            chat_id,
+            "❌ *Для анализа MP3/аудио нужен прямой OPENAI_API_KEY.*\n\n"
+            "Добавь его в Replit Secrets (или в .env) и перезапусти бота.\n"
+            "_(Голосовой Whisper не работает через Replit AI proxy — нужен именно прямой ключ)_",
+            markup,
+        )
+        return
+
+    if len(audio_bytes) > _DIALOG_AUDIO_MAX_BYTES:
+        limit_mb = _DIALOG_AUDIO_MAX_BYTES // (1024 * 1024)
+        safe_send(chat_id, f"❌ Файл слишком большой. Лимит — {limit_mb} МБ (задай DIALOG_AUDIO_MAX_BYTES чтобы изменить).", markup)
+        return
+
+    msg = bot.send_message(chat_id, "🎙️ Расшифровываю запись через Whisper…")
+    try:
+        ext = os.path.splitext(filename)[1].lower() or ".mp3"
+        audio_io = io.BytesIO(audio_bytes)
+        audio_io.name = filename
+
+        transcript_obj = voice_openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_io,
+            response_format="text",
+        )
+        transcript = (transcript_obj.strip() if isinstance(transcript_obj, str)
+                      else transcript_obj.text.strip())
+
+        if not transcript:
+            bot.edit_message_text(
+                "⚠️ Не удалось расшифровать. Убедись что в файле есть речь.",
+                chat_id, msg.message_id,
+            )
+            return
+
+        preview = transcript[:250] + ("…" if len(transcript) > 250 else "")
+        bot.edit_message_text(
+            f"📝 Расшифровка готова ({len(transcript)} симв.)\n\n_{preview}_",
+            chat_id, msg.message_id,
+            parse_mode="Markdown",
+        )
+
+        bot.send_chat_action(chat_id, "typing")
+        analysis = ask_grok(
+            f"Вот транскрипт записи диалога (файл: {filename}):\n\n{transcript}",
+            [],
+            memory_block=_DIALOG_ANALYSIS_SYSTEM,
+        )
+
+        header = f"🎙️ *Анализ диалога: {filename}*\n{'─' * 32}\n\n"
+        safe_send(chat_id, header + analysis, markup)
+
+    except Exception as e:
+        err = str(e)
+        print(f"Ошибка анализа аудио ({filename}): {err}")
+        if "401" in err or "incorrect api key" in err.lower() or ("auth" in err.lower() and "key" in err.lower()):
+            hint = "Неверный OPENAI_API_KEY — проверь ключ в Replit Secrets."
+        elif "413" in err or "too large" in err.lower() or "maximum" in err.lower():
+            hint = "Файл слишком большой для Whisper API. Попробуй обрезать запись."
+        elif "timeout" in err.lower():
+            hint = "Сервер не ответил вовремя — попробуй ещё раз."
+        elif "rate" in err.lower():
+            hint = "Слишком много запросов — подожди минуту и повтори."
+        else:
+            hint = f"Ошибка обработки: {err[:200]}"
+        try:
+            bot.edit_message_text(f"❌ {hint}", chat_id, msg.message_id)
+        except Exception:
+            safe_send(chat_id, f"❌ {hint}", markup)
+
 
 # Последняя геопозиция пользователя
 last_location = {}
@@ -2554,6 +2670,32 @@ def handle_voice(message):
             bot.send_message(chat_id, f"⚠️ {hint}")
 
 
+@bot.message_handler(content_types=['audio'])
+def handle_audio(message):
+    """Принимает аудиофайлы (MP3 и др.) и анализирует диалог."""
+    chat_id = message.chat.id
+    if not is_allowed(chat_id):
+        return
+
+    audio = message.audio
+    filename = (audio.file_name or f"audio.mp3").strip()
+
+    msg_dl = bot.send_message(chat_id, f"📥 Скачиваю *{filename}*…", parse_mode="Markdown")
+    try:
+        file_info = bot.get_file(audio.file_id)
+        audio_bytes = bot.download_file(file_info.file_path)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Не смог скачать файл: {e}", chat_id, msg_dl.message_id)
+        return
+
+    try:
+        bot.delete_message(chat_id, msg_dl.message_id)
+    except Exception:
+        pass
+
+    _analyze_dialog_audio(chat_id, audio_bytes, filename)
+
+
 def _run_file_sauron(chat_id: int, doc, filename: str):
     """Скачивает файл и запускает полный Sauron-поиск через sauron_file_search."""
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
@@ -2852,6 +2994,22 @@ def handle_document(message):
     doc      = message.document
     filename = (doc.file_name or "file").strip()
     ext      = os.path.splitext(filename)[1].lower()
+
+    # ── Роутинг: аудиофайлы → анализ диалога ─────────────────────────────
+    if _is_audio_doc(filename, getattr(doc, 'mime_type', None)):
+        msg_dl = bot.send_message(chat_id, f"📥 Скачиваю *{filename}*…", parse_mode="Markdown")
+        try:
+            file_info = bot.get_file(doc.file_id)
+            audio_bytes = bot.download_file(file_info.file_path)
+        except Exception as e:
+            bot.edit_message_text(f"❌ Не смог скачать файл: {e}", chat_id, msg_dl.message_id)
+            return
+        try:
+            bot.delete_message(chat_id, msg_dl.message_id)
+        except Exception:
+            pass
+        _analyze_dialog_audio(chat_id, audio_bytes, filename)
+        return
 
     # ── Роутинг: Sauron ───────────────────────────────────────────────────
     # .txt включён: список ФИО чаще всего приходит именно в txt/csv/xlsx
