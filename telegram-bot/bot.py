@@ -120,10 +120,10 @@ else:
 bot = telebot.TeleBot(TOKEN)
 
 # ──────────────────────────────────────────────
-# БЕЗОПАСНОСТЬ — белый список
+# ДОСТУП — бот открыт для всех пользователей
 # ──────────────────────────────────────────────
 OWNER_ID = 7959647798          # Руслан — всегда имеет доступ
-# Секретный код берётся из .env (BOT_SECRET_CODE), fallback — на случай первого запуска
+# Старый секретный код оставлен только для совместимости; вход по нему больше не нужен
 SECRET_CODE = os.environ.get("BOT_SECRET_CODE", "ruslan2024vip")
 WHITELIST_FILE = "whitelist.json"
 
@@ -146,11 +146,11 @@ allowed_users: set = _load_whitelist()
 allowed_users.add(OWNER_ID)
 
 def is_allowed(chat_id: int) -> bool:
-    return chat_id in allowed_users
+    return True
 
 def grant_access(chat_id: int):
-    allowed_users.add(chat_id)
-    _save_whitelist()
+    # Public access is enabled; keep function for old handlers.
+    return None
 
 # ──────────────────────────────────────────────
 
