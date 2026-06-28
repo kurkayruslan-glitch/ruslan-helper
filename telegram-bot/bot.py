@@ -361,8 +361,6 @@ def worker_menu():
 
 
 def get_menu_for_role(role: str):
-    if role == "driver":
-        return driver_menu()
     if role == "worker":
         return worker_menu()
     return main_menu()
@@ -2485,13 +2483,10 @@ def start(message):
             parse_mode="Markdown",
             reply_markup=main_menu()
         )
-    elif role == "driver":
-        bot.send_message(chat_id, "👋 Привет! Нажми кнопку чтобы узнать где Руслан.", reply_markup=driver_menu())
     elif role == "worker":
-        bot.send_message(chat_id, "👋 Привет! Здесь ты можешь смотреть аналитику таблиц.", reply_markup=worker_menu())
+        bot.send_message(chat_id, "👋 Привет! Можешь написать Руслану или просто задать вопрос.", reply_markup=worker_menu())
     else:
-        bot.send_message(chat_id, "✅ Ты уже в системе. Ожидай — Руслан назначит тебе доступ.",
-                         reply_markup=types.ReplyKeyboardRemove())
+        bot.send_message(chat_id, "👋 Привет! Пиши обычным текстом или выбери кнопку ниже.", reply_markup=main_menu())
 
 
 @bot.message_handler(content_types=['voice'])
@@ -2674,15 +2669,8 @@ def make_sms_link(phone: str, text: str) -> str:
 
 def build_location_markup(lat, lon, is_live=False):
     maps_link = f"https://maps.google.com/?q={lat},{lon}"
-    toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-    label = "Живое гео" if is_live else "Гео"
-    sms_text = f"{label} Руслана: {maps_link}"
-    sms_link = make_sms_link(toha_number, sms_text)
-
     markup = types.InlineKeyboardMarkup()
     markup.row(types.InlineKeyboardButton("🗺️ Открыть в Google картах", url=maps_link))
-    markup.row(types.InlineKeyboardButton("📱 Отправить SMS Тохе", url=sms_link))
-    markup.row(types.InlineKeyboardButton("🚕 Отправить через Twilio", callback_data="send_geo_toha"))
     return markup, maps_link
 
 
@@ -2732,21 +2720,8 @@ def handle_live_location_update(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "send_geo_toha")
 def callback_send_geo(call):
-    chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id)
-    if chat_id in last_location:
-        lat, lon = last_location[chat_id]
-        maps_link = f"https://maps.google.com/?q={lat},{lon}"
-        toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
-        sms_link = make_sms_link(toha_number, f"Гео Руслана: {maps_link}")
-        markup = types.InlineKeyboardMarkup()
-        markup.row(types.InlineKeyboardButton("📱 Открыть SMS и отправить Тохе", url=sms_link))
-        markup.row(types.InlineKeyboardButton("🗺️ Открыть в картах", url=maps_link))
-        bot.send_message(chat_id,
-                         f"📍 Нажми кнопку — откроется SMS приложение с геопозицией:\n{maps_link}",
-                         reply_markup=markup)
-    else:
-        bot.send_message(chat_id, "⚠️ Геопозиция не найдена. Сначала отправь своё гео.", reply_markup=main_menu())
+    bot.answer_callback_query(call.id, "Раздел Тоха отключён.")
+    bot.send_message(call.message.chat.id, "🚕 Раздел Тоха отключён.", reply_markup=main_menu())
 
 
 def process_worker(chat_id: int, text: str):
@@ -2839,14 +2814,8 @@ def handle_message(message):
             bot.send_message(chat_id, "🔒 Нет доступа.")
         return
     role = get_role(chat_id)
-    if role == "driver":
-        process_driver(chat_id, text)
-    elif role == "worker":
+    if role == "worker":
         process_worker(chat_id, text)
-    elif role == "guest" and chat_id != OWNER_ID:
-        bot.send_message(chat_id,
-                         "⏳ Ожидай — Руслан ещё не назначил тебе роль.",
-                         reply_markup=types.ReplyKeyboardRemove())
     else:
         process_text(chat_id, text)
 
