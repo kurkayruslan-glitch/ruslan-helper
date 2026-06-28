@@ -21,7 +21,7 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-args = ["sh", "-c", "cd telegram-bot && python bot.py & cd /home/runner/workspace && exec node --enable-source-maps artifacts/api-server/dist/index.mjs"]
+args = ["sh", "-c", "cd telegram-bot && python3 -u bot.py & cd /home/runner/workspace && exec node --enable-source-maps artifacts/api-server/dist/index.mjs"]
 
 [services.production.run.env]
 PORT = "8080"
