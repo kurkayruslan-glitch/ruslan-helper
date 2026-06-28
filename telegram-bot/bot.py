@@ -1309,8 +1309,7 @@ def _btn_status(chat_id):
     calls_ok = any(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TELNYX_API_KEY"))
     lines.append(f"📞 Звонки: {'✅ настроены' if calls_ok else '⚠️ не настроены'}")
     lines.append("🧠 Умный режим: ✅ пиши обычным текстом")
-    safe_send(chat_id, "
-".join(lines), main_menu())
+    safe_send(chat_id, "\n".join(lines), main_menu())
 
 
 def _btn_skills(chat_id):
