@@ -3672,6 +3672,18 @@ if __name__ == "__main__":
     # Засеваем налоговый календарь ФОП — идемпотентно, дубли не создаст
     _seed_tax_reminders_safe()
     print("🚀 Ruslan Personal Helper с SMS для Тохи!")
+
+    # Сбрасываем webhook перед стартом polling.
+    # Если webhook был активен (например после смены режима) — polling без этого не заработает.
+    try:
+        bot.remove_webhook()
+        print("🔗 Webhook сброшен — polling готов.")
+    except Exception as _we:
+        print(f"⚠️  Webhook сброс не удался (не критично): {_we}")
+
+    _mode_label = "PRODUCTION 🟢 (24/7)" if IS_PRODUCTION else "DEVELOPMENT 🟡 (только пока открыт Replit)"
+    print(f"🕐 Polling start | Режим: {_mode_label} | {_now_local().strftime('%Y-%m-%d %H:%M')} Kyiv")
+
     while True:
         try:
             bot.infinity_polling(timeout=10, long_polling_timeout=5)
@@ -3681,8 +3693,8 @@ if __name__ == "__main__":
                 print(
                     "⛔ 409 CONFLICT: бот уже запущен в другом месте!\n"
                     "   Telegram разрешает ОДИН активный polling на токен.\n"
-                    "   Останови бот на ПК ИЛИ останови Replit-воркфлоу — "
-                    "запускай только в одном месте.\n"
+                    "   Останови деплой (Deployments → Stop) ИЛИ workspace-воркфлоу —\n"
+                    "   должен работать ТОЛЬКО ОДИН экземпляр.\n"
                     "   Повтор через 30 секунд..."
                 )
                 time.sleep(30)
