@@ -1,4 +1,4 @@
-# Загружаем переменные из .env (если есть python-dotenv и .env-файл)
+﻿# Загружаем переменные из .env (если есть python-dotenv и .env-файл)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -249,7 +249,7 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
         safe_send(
             chat_id,
             "❌ *Для анализа MP3/аудио нужен прямой OPENAI_API_KEY.*\n\n"
-            "Добавь его в Replit Secrets (или в .env) и перезапусти бота.\n"
+            "Добавь его в Railway Variables и перезапусти деплой.\n"
             "_(Голосовой Whisper не работает через Replit AI proxy — нужен именно прямой ключ)_",
             markup,
         )
@@ -282,15 +282,29 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
             return
 
         preview = transcript[:250] + ("…" if len(transcript) > 250 else "")
-        bot.edit_message_text(
-            f"📝 Расшифровка готова ({len(transcript)} симв.)\n\n_{preview}_",
-            chat_id, msg.message_id,
-            parse_mode="Markdown",
-        )
+        preview_text = f"📝 Расшифровка готова ({len(transcript)} симв.)\n\n_{preview}_"
+        try:
+            bot.edit_message_text(
+                preview_text,
+                chat_id, msg.message_id,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            bot.edit_message_text(
+                f"📝 Расшифровка готова ({len(transcript)} симв.)\n\n{preview}",
+                chat_id, msg.message_id,
+            )
 
         bot.send_chat_action(chat_id, "typing")
+        analysis_transcript = transcript
+        if len(transcript) > 24000:
+            analysis_transcript = (
+                transcript[:16000]
+                + "\n\n[СЕРЕДИНА ТРАНСКРИПТА СОКРАЩЕНА: запись слишком длинная для одного LLM-анализа]\n\n"
+                + transcript[-8000:]
+            )
         analysis = ask_grok(
-            f"Вот транскрипт записи диалога (файл: {filename}):\n\n{transcript}",
+            f"Вот транскрипт записи диалога (файл: {filename}):\n\n{analysis_transcript}",
             [],
             memory_block=_DIALOG_ANALYSIS_SYSTEM,
         )
@@ -302,7 +316,7 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
         err = str(e)
         print(f"Ошибка анализа аудио ({filename}): {err}")
         if "401" in err or "incorrect api key" in err.lower() or ("auth" in err.lower() and "key" in err.lower()):
-            hint = "Неверный OPENAI_API_KEY — проверь ключ в Replit Secrets."
+            hint = "Неверный OPENAI_API_KEY — проверь ключ в Railway Variables."
         elif "413" in err or "too large" in err.lower() or "maximum" in err.lower():
             hint = "Файл слишком большой для Whisper API. Попробуй обрезать запись."
         elif "timeout" in err.lower():
@@ -1752,16 +1766,16 @@ def _btn_remote_ids(chat_id: int):
         lines.append(f"🟢 AnyDesk ID: `{anydesk_id}`")
     else:
         lines.append("⚠️ AnyDesk ID: не сохранён")
-        lines.append("  → Добавь `ANYDESK_ID` в Replit Secrets")
+        lines.append("  → Добавь `ANYDESK_ID` в Railway Variables")
     if tv_id:
         lines.append(f"🟢 TeamViewer ID: `{tv_id}`")
     else:
         lines.append("⚠️ TeamViewer ID: не сохранён")
-        lines.append("  → Добавь `TEAMVIEWER_ID` в Replit Secrets")
+        lines.append("  → Добавь `TEAMVIEWER_ID` в Railway Variables")
     if pc_name:
         lines.append(f"\n🖥 ПК: {pc_name}")
     lines.append(
-        "\n🔒 _ID хранятся в Replit Secrets — бот не просит пароли._\n"
+        "\n🔒 _ID хранятся в Railway Variables — бот не просит пароли._\n"
         "_Пароль сеанса задаёшь вручную в самом приложении._"
     )
     safe_send(chat_id, "\n".join(lines), remote_access_menu())
@@ -1839,9 +1853,9 @@ def _btn_remote_crd(chat_id: int):
     )
     if crd_url:
         text += f"🔗 Ссылка подключения: {crd_url}\n\n"
-        text += "_Ссылка из REPLIT SECRET `CRD_SHARE_URL`. Обновляй при каждой новой сессии._\n\n"
+        text += "_Ссылка из Railway Variable `CRD_SHARE_URL`. Обновляй при каждой новой сессии._\n\n"
     else:
-        text += "⚠️ Ссылка не сохранена. Добавь `CRD_SHARE_URL` в Replit Secrets после создания сессии.\n\n"
+        text += "⚠️ Ссылка не сохранена. Добавь `CRD_SHARE_URL` в Railway Variables после создания сессии.\n\n"
     text += (
         "📱 Подключение с телефона:\n"
         "1. Установи *Chrome Remote Desktop* из Google Play / App Store\n"
@@ -1862,7 +1876,7 @@ def _btn_remote_instructions(chat_id: int, app: str):
             "*На ПК (один раз):*\n"
             "1. Скачай с [anydesk.com](https://anydesk.com) — бесплатная версия подходит\n"
             "2. Запусти — AnyDesk ID появится в главном окне (9 цифр)\n"
-            "3. Сохрани ID: добавь `ANYDESK_ID=123456789` в Replit Secrets\n"
+            "3. Сохрани ID: добавь `ANYDESK_ID=123456789` в Railway Variables\n"
             "4. Включи _Запускать при старте Windows_ в настройках AnyDesk\n"
             "5. Установи пароль доступа в настройках → Безопасность\n\n"
             "*Подключение с телефона:*\n"
@@ -1878,7 +1892,7 @@ def _btn_remote_instructions(chat_id: int, app: str):
             "1. Скачай с [teamviewer.com](https://teamviewer.com) — бесплатно для личного использования\n"
             "2. Запусти — в главном окне будет ID (9 цифр) и пароль сеанса\n"
             "3. Для постоянного доступа: зарегистрируйся и добавь ПК в «Мои компьютеры»\n"
-            "4. Сохрани ID: добавь `TEAMVIEWER_ID=987654321` в Replit Secrets\n\n"
+            "4. Сохрани ID: добавь `TEAMVIEWER_ID=987654321` в Railway Variables\n\n"
             "*Подключение с телефона:*\n"
             "1. Установи TeamViewer из Google Play / App Store\n"
             "2. Войди в свой аккаунт → выбери свой ПК\n"
@@ -1900,7 +1914,7 @@ def _btn_remote_instructions(chat_id: int, app: str):
             "3. Нажми на свой ПК → введи PIN\n\n"
             "*Быстрая ссылка (без аккаунта):*\n"
             "1. На [remotedesktop.google.com/support](https://remotedesktop.google.com/support) → «Поделиться экраном»\n"
-            "2. Скопируй код → сохрани в Replit Secrets как `CRD_SHARE_URL`\n\n"
+            "2. Скопируй код → сохрани в Railway Variables как `CRD_SHARE_URL`\n\n"
             "🔒 _PIN хранится только на ПК — не присылай его в Telegram._"
         )
     safe_send(chat_id, text, remote_instructions_menu())
@@ -2001,7 +2015,7 @@ def _btn_voice_help(chat_id: int):
         how = (
             "1. Нажми 🎤 → запиши сообщение\n"
             "2. Я расшифрую и отвечу *текстом*\n\n"
-            "Для голосовых ответов добавь в Replit Secrets:\n"
+            "Для голосовых ответов добавь в Railway Variables:\n"
             "`OPENAI_API_KEY` — ключ OpenAI"
         )
     text = (
@@ -2096,14 +2110,14 @@ def _btn_sauron_search(chat_id: int):
         bot.send_message(
             chat_id,
             "🔍 *Sauron — поиск информации*\n\n"
-            "⚠️ Не настроено. Добавь в Replit Secrets хотя бы одно:\n\n"
+            "⚠️ Не настроено. Добавь в Railway Variables хотя бы одно:\n\n"
             "*Вариант 1 — API-ключ (рекомендуется):*\n"
             "• `SAURON_API_KEY` — ключ от sauron.info\n\n"
             "*Вариант 2 — логин/пароль:*\n"
             "• `SAURON_USERNAME` — твой логин\n"
             "• `SAURON_PASSWORD` — твой пароль\n\n"
             "После добавления перезапусти бота.\n"
-            "_Ключи и пароли в Telegram не присылай — только через Replit Secrets._",
+            "_Ключи и пароли в Telegram не присылай — только через Railway Variables._",
             parse_mode="Markdown",
             reply_markup=markup,
         )
@@ -2129,7 +2143,7 @@ def _btn_file_sauron(chat_id: int):
         bot.send_message(
             chat_id,
             "📁 *Поиск по файлу — Sauron не настроен*\n\n"
-            "Добавь в Replit Secrets:\n"
+            "Добавь в Railway Variables:\n"
             "• `SAURON_API_KEY` — API-ключ _(рекомендуется)_\n"
             "• или `SAURON_USERNAME` + `SAURON_PASSWORD`\n\n"
             "После добавления перезапусти бота.",
@@ -2625,9 +2639,9 @@ def handle_voice(message):
         markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
         bot.send_message(
             chat_id,
-            "🎤 Голос пока не включён: нужно добавить OPENAI_API_KEY в Replit Secrets "
+            "🎤 Голос пока не включён: нужно добавить OPENAI_API_KEY в Railway Variables "
             "и перезапустить бота.\n\n"
-            "Ключи и пароли в Telegram не присылай — только через Replit Secrets.",
+            "Ключи и пароли в Telegram не присылай — только через Railway Variables.",
             reply_markup=markup,
         )
         return
@@ -2671,7 +2685,7 @@ def handle_voice(message):
         elif "rate" in err_str.lower():
             hint = "Слишком много запросов — подожди секунду."
         elif "auth" in err_str.lower() or "401" in err_str or "403" in err_str:
-            hint = "Неверный OPENAI_API_KEY — проверь ключ в Replit Secrets."
+            hint = "Неверный OPENAI_API_KEY — проверь ключ в Railway Variables."
         else:
             hint = "Попробуй ещё раз или напиши текстом."
         try:
@@ -3771,3 +3785,4 @@ if __name__ == "__main__":
             else:
                 print(f"Ошибка polling: {e}. Перезапуск через 5 секунд...")
                 time.sleep(5)
+
