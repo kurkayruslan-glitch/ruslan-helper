@@ -287,15 +287,11 @@ known_users: dict = _load_known_users()
 
 
 def main_menu():
-    """Главное меню — красиво, чисто, без лишнего."""
+    """Главное меню — только нужные рабочие команды."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("⚡ Jarvis",       "🩺 Статус")
-    markup.add("💬 Поговорить",   "🎤 Голос")
-    markup.add("📞 Звонок",       "🏨 Бронирование")
-    markup.add("📋 Задачи",       "🚕 Тоха")
-    markup.add("💻 Мой ПК",       "🎮 Dota 2")
-    markup.add("🔍 Саурон",       "📁 Файл → Саурон")
-    markup.add("📊 Я Тигр",       "📋 ФОП")
+    markup.add("🩺 Статус", "📞 Звонок")
+    markup.add("📋 Задачи")
+    markup.add("🔍 Саурон", "📁 Файл → Саурон")
     return markup
 
 
@@ -307,16 +303,8 @@ def ai_chat_menu():
 
 
 def jarvis_menu():
-    """Командный центр Jarvis — все функции под рукой."""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("☀️ Бриф",          "🩺 Статус")
-    markup.add("💬 Поговорить",     "📞 Звонок")
-    markup.add("📋 Задачи",         "🧠 Память")
-    markup.add("📊 Таблицы",        "🚕 Тоха")
-    markup.add("💻 Мой ПК",         "🎮 Dota 2")
-    markup.add("📋 ФОП",            "💸 Расход ИИ")
-    markup.add("🧠 Что умею?",      "🔙 Выйти из Jarvis")
-    return markup
+    """Отдельный Jarvis-раздел отключён; используем обычное меню."""
+    return main_menu()
 
 
 def remote_access_menu():
@@ -366,11 +354,9 @@ def driver_menu():
 
 
 def worker_menu():
-    """Меню для рабочего — аналитика + звонок Руслану"""
+    """Меню для рабочего — только связь с Русланом."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     markup.add("📞 Позвонить Руслану")
-    markup.add("📊 Аналитика таблицы")
-    markup.add("📋 Мои таблицы")
     return markup
 
 
@@ -426,6 +412,15 @@ def _parse_action(reply: str) -> tuple[str | None, str | None, str]:
 
 def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None):
     """Выполняет действие из ACTION-тега Grok."""
+    disabled_actions = {
+        "call_toha", "sms_toha", "sheet_analytics", "sheets_list",
+        "open_url", "search_files", "search_content", "screenshot",
+        "screenshot_site", "open_folder", "launch_app", "close_app",
+        "list_apps", "crm_expense", "call_restaurant",
+    }
+    if action_type in disabled_actions:
+        safe_send(chat_id, "Этот раздел отключён.", main_menu())
+        return
     if action_type == "call_toha":
         toha_number = os.environ.get("TOHA_PHONE_NUMBER", "")
         if not toha_number:
@@ -796,20 +791,17 @@ def _ask_grok_and_route(chat_id: int, text: str):
     tz = _ukraine_tz_hours()
     date_line = f"\nСейчас: {now.strftime('%Y-%m-%dT%H:%M')} (UTC+{tz}, Украина).\n"
     memory_block = date_line + memory_block
-    # Базовая личность — всегда активна
+    # Базовая личность — умный помощник без лишних разделов меню.
     personality = (
-        "Ты — Jarvis, персональный ИИ-ассистент Руслана. "
-        "Руслан — украинец, владелец такси-бизнеса «Я Тигр» (Украина, 2024–2025). "
-        "Он занятой человек: управляет водителями, клиентами, финансами. "
-        "Общайся на русском языке, дружелюбно но чётко. "
-        "Без лишней воды, без извинений, без вступлений «Конечно!», «Отличный вопрос!». "
-        "Отвечай умно, коротко, по делу — как лучший друг и эксперт одновременно. "
-        "Если чего-то не знаешь — говори прямо и предлагай альтернативу. "
+        "Ты — Ruslan Helper, умный персональный ассистент Руслана. "
+        "Думай как сильный ChatGPT/Codex: внимательно понимай запрос, рассуждай, "
+        "предлагай следующий шаг и помогай доводить дело до результата. "
+        "Общайся на русском языке: дружелюбно, спокойно, уверенно, без воды. "
+        "Если не хватает данных — задай один короткий уточняющий вопрос. "
+        "Если можно помочь сразу — помогай сразу. "
         "Никогда не проси пароли, коды SMS, токены или личные данные. "
-        "Для поиска информации о людях, телефонах, адресах через sauron.info — используй "
-        "[ACTION:search_sauron:запрос]. Пример: если Руслан говорит «найди в Sauron Иванова Петра» — "
-        "ответь [ACTION:search_sauron:Иванов Петр]. Никогда не проси логин/пароль от Sauron — "
-        "они берутся из настроек бота автоматически. "
+        "Для поиска информации через Sauron используй [ACTION:search_sauron:запрос]. "
+        "Все отключённые разделы не предлагай: таблицы, Тоха, Dota, Jarvis, Мой ПК, Я Тигр, ФОП, бронирование. "
     )
     memory_block = "\n" + personality + "\n" + memory_block
 
@@ -1116,74 +1108,21 @@ def process_text(chat_id, text):
         return
 
     BUTTON_LABELS = {
-        # ── Главное меню ─────────────────────────────────────────
-        "⚡ jarvis":             lambda: _btn_jarvis(chat_id),
+        # Оставленные команды
         "🩺 статус":             lambda: _btn_status(chat_id),
-        "💬 поговорить":         lambda: _btn_talk(chat_id),
-        "🎤 голос":              lambda: _btn_voice_help(chat_id),
+        "статус":                lambda: _btn_status(chat_id),
         "📞 звонок":             lambda: _btn_call(chat_id),
-        "📞 позвонить":          lambda: _btn_call(chat_id),       # legacy
-        "🏨 бронирование":       lambda: _btn_booking(chat_id),
+        "📞 позвонить":          lambda: _btn_call(chat_id),
+        "позвонить":             lambda: _btn_call(chat_id),
         "📋 задачи":             lambda: _btn_tasks(chat_id),
-        "🚕 тоха":               lambda: bot.send_message(chat_id, "🚕 Что делаем с Тохой?", reply_markup=toha_menu()),
-        "💻 мой пк":             lambda: _btn_remote_access(chat_id),
-        "🎮 dota 2":             lambda: _btn_dota(chat_id),
-        "📊 я тигр":             lambda: _ask_grok_and_route(chat_id, "Сделай полную статистику по бизнесу Я Тигр"),
-        "📋 фоп":                lambda: _show_tax_calendar(chat_id),
-        # ── Jarvis-меню ──────────────────────────────────────────
-        "☀️ бриф":               lambda: _btn_morning_brief(chat_id),
-        "📊 таблицы":            lambda: _btn_sheets(chat_id),
-        "🧠 память":             lambda: _btn_show_memory(chat_id),
-        "💸 расход ии":          lambda: _btn_ai_budget(chat_id),
-        "🧠 что умею?":          lambda: _btn_skills(chat_id),
-        "🧠 что ты умеешь?":     lambda: _btn_skills(chat_id),    # legacy
-        "🔙 выйти из jarvis":    lambda: _jarvis_exit(chat_id),
-        # ── Раздел «Мой ПК» ──────────────────────────────────────
-        "🖥 статус пк":          lambda: _btn_remote_status(chat_id),
-        "🔑 id подключения":     lambda: _btn_remote_ids(chat_id),
-        "🚀 запустить anydesk":  lambda: _btn_remote_launch(chat_id, "AnyDesk"),
-        "🚀 запустить teamviewer": lambda: _btn_remote_launch(chat_id, "TeamViewer"),
-        "🌐 chrome remote desktop": lambda: _btn_remote_crd(chat_id),
-        "📖 инструкции по настройке": lambda: bot.send_message(
-            chat_id, "📖 Выбери приложение:", reply_markup=remote_instructions_menu()),
-        "📖 anydesk — инструкция":    lambda: _btn_remote_instructions(chat_id, "anydesk"),
-        "📖 teamviewer — инструкция": lambda: _btn_remote_instructions(chat_id, "teamviewer"),
-        "📖 chrome remote desktop — инструкция": lambda: _btn_remote_instructions(chat_id, "crd"),
-        "📄 журнал действий пк": lambda: _btn_remote_log(chat_id),
-        "🔒 безопасность":       lambda: _btn_remote_safety(chat_id),
-        "🔙 назад к пк":         lambda: _btn_remote_access(chat_id),
-        # ── Тоха под-меню ────────────────────────────────────────
-        "📍 отправить гео тохе": lambda: _btn_geo_toha(chat_id),
-        "💬 написать тохе sms":  lambda: _btn_sms_toha(chat_id),
-        # ── Таблицы под-меню ─────────────────────────────────────
-        "📊 аналитика таблицы":  lambda: _btn_analytics(chat_id),
-        "📋 мои таблицы":        lambda: _btn_my_sheets(chat_id),
-        "➕ сохранить таблицу":  lambda: _btn_save_sheet(chat_id),
-        "📖 читать таблицу":     lambda: _btn_read_sheet(chat_id),
-        "✏️ записать в таблицу": lambda: _btn_write_sheet(chat_id),
-        "ℹ️ инфо о таблице":     lambda: _btn_info_sheet(chat_id),
-        # ── Разное ───────────────────────────────────────────────
-        "📍 геопозиция":         lambda: bot.send_message(chat_id, "📍 Отправь геопозицию — скрепка 📎 → Геопозиция"),
-        "💰 usdt крипто":        lambda: _btn_usdt(chat_id),
-        "🤖 ии чат":             lambda: _btn_talk(chat_id),       # legacy → новое название
-        "📗 таблицы":            lambda: _btn_sheets(chat_id),     # legacy
-        "🗑️ забыть":             lambda: _btn_forget(chat_id),
-        "🛣️ маршрут":            lambda: _ask_grok_and_route(chat_id, "Помоги с маршрутом"),
-        "📝 анкета":             lambda: _start_anketa(chat_id),
-        "анкета":                lambda: _start_anketa(chat_id),
-        "/анкета":               lambda: _start_anketa(chat_id),
-        "/anketa":               lambda: _start_anketa(chat_id),
-        "/profile":              lambda: _start_anketa(chat_id),
-        "/налоги":               lambda: _show_tax_calendar(chat_id),
-        "/податки":              lambda: _show_tax_calendar(chat_id),
-        "налоги":                lambda: _show_tax_calendar(chat_id),
-        "податки":               lambda: _show_tax_calendar(chat_id),
+        "задачи":                lambda: _btn_tasks(chat_id),
         "🔍 саурон":             lambda: _btn_sauron_search(chat_id),
+        "саурон":                lambda: _btn_sauron_search(chat_id),
         "📁 файл → саурон":     lambda: _btn_file_sauron(chat_id),
+        "файл саурон":           lambda: _btn_file_sauron(chat_id),
         "🔙 назад":              lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
     }
 
-    # ── Естественные фразы для поиска по файлу ───────────────────────────
     file_triggers = [
         "проверь файл", "проверить файл", "поиск по файлу",
         "найди в файле", "загрузи файл", "отправь файл",
@@ -1362,10 +1301,18 @@ def _btn_jarvis(chat_id):
 
 
 def _btn_status(chat_id):
-    """Системная диагностика — показывает здоровье всех подсистем."""
-    status = _jarvis_system_status()
-    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-    safe_send(chat_id, f"🩺 *Диагностика системы*\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status}", markup)
+    """Короткий статус оставленных функций."""
+    lines = ["🩺 *Статус бота*", "━━━━━━━━━━━━━━━━━━━━━━"]
+    lines.append("✅ Бот онлайн 24/7 на Railway")
+    try:
+        lines.append(f"🔍 Sauron: {sauron.status()}")
+    except Exception:
+        lines.append("🔍 Sauron: ⚠️ ошибка модуля")
+    calls_ok = any(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TELNYX_API_KEY"))
+    lines.append(f"📞 Звонки: {'✅ настроены' if calls_ok else '⚠️ не настроены'}")
+    lines.append("🧠 Умный режим: ✅ пиши обычным текстом")
+    safe_send(chat_id, "
+".join(lines), main_menu())
 
 
 def _btn_skills(chat_id):
@@ -2834,24 +2781,11 @@ def process_worker(chat_id: int, text: str):
         bot.send_message(chat_id, "✍️ Напиши сообщение — я позвоню Руслану и скажу его голосом:")
         waiting_for_call_msg[chat_id] = True
         return
-    # ── Аналитика ────────────────────────────────────
-    if "аналитика" in t or "📊" in t or "статистика таблиц" in t or "сводк" in t:
-        saved = list_sheets()
-        if not saved:
-            bot.send_message(chat_id, "📊 Нет сохранённых таблиц. Обратись к Руслану.", reply_markup=worker_menu())
-        else:
-            names = "\n".join([f"• {name}" for name in saved.keys()])
-            bot.send_message(chat_id, f"📊 Выбери таблицу:\n\n{names}", reply_markup=worker_menu())
-            waiting_for_sheet_id[chat_id] = "analytics"
-    elif "мои таблицы" in t or "📋" in t:
-        saved = list_sheets()
-        if not saved:
-            bot.send_message(chat_id, "Нет таблиц. Обратись к Руслану.", reply_markup=worker_menu())
-        else:
-            names = "\n".join([f"• *{name}*" for name in saved.keys()])
-            bot.send_message(chat_id, f"📋 *Доступные таблицы:*\n\n{names}",
-                             parse_mode="Markdown", reply_markup=worker_menu())
-    elif chat_id in waiting_for_sheet_id and waiting_for_sheet_id[chat_id] == "analytics":
+    # ── Таблицы отключены ─────────────────────────────
+    if "аналитика" in t or "📊" in t or "статистика таблиц" in t or "сводк" in t or "мои таблицы" in t or "📋" in t:
+        bot.send_message(chat_id, "📊 Раздел таблиц отключён.", reply_markup=worker_menu())
+        return
+    if chat_id in waiting_for_sheet_id and waiting_for_sheet_id[chat_id] == "analytics":
         waiting_for_sheet_id.pop(chat_id)
         name = text.strip().lower()
         sheet_id = find_sheet_id(name)
