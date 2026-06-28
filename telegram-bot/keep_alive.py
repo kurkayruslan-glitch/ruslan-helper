@@ -76,7 +76,10 @@ def _fmt_uptime(seconds: int) -> str:
 
 
 def run():
-    port = int(os.environ.get("PORT_KEEPALIVE", 8000))
+    # PORT — стандартная переменная Railway/Render/Heroku.
+    # PORT_KEEPALIVE — для обратной совместимости с Replit.
+    # Если ничего не задано — слушаем 8000.
+    port = int(os.environ.get("PORT") or os.environ.get("PORT_KEEPALIVE") or 8000)
     app.run(host='0.0.0.0', port=port)
 
 
