@@ -453,26 +453,404 @@ def get_balance() -> str:
         return f"⚠️ Ошибка баланса: {str(e)[:100]}"
 
 
+def _vk_status_line() -> str:
+    """Статус VK API для отчёта status() — без показа токена и без сетевых вызовов."""
+    if not _rel_vk:
+        return "VK API: ⚠️ модуль vk_api_client недоступен"
+    try:
+        if _rel_vk.is_available():
+            return "VK API: ✅ подключён (расширенный поиск родственников активен)"
+        return "VK API: ⚠️ не настроен (добавь VK_API_TOKEN для поиска родственников)"
+    except Exception:
+        return "VK API: ⚠️ ошибка проверки"
+
+
 def status() -> str:
-    """Статус интеграции — без показа значений secrets."""
+    """Статус интеграции — без показа значений secrets. Включает статус VK API."""
     key = _api_key()
     username, password = _credentials()
     api_url = os.environ.get("SAURON_API_URL", "")
 
     if key:
         url_note = f" · URL: {api_url}" if api_url else ""
-        return f"✅ API-ключ настроен{url_note}"
-
-    if username and password:
+        sauron_part = f"✅ API-ключ настроен{url_note}"
+    elif username and password:
         cached = _session_cache.get(username)
+        sauron_part = "✅ Логин/пароль настроены · сессия не активна"
         if cached:
             _, ts = cached
             age = int(time.time() - ts)
             if age < _SESSION_TTL:
-                return f"✅ Логин/пароль настроены · сессия {age // 60}м {age % 60}с назад"
-        return "✅ Логин/пароль настроены · сессия не активна"
+                sauron_part = f"✅ Логин/пароль настроены · сессия {age // 60}м {age % 60}с назад"
+    elif username and not password:
+        sauron_part = "⚠️ SAURON_USERNAME задан, но SAURON_PASSWORD отсутствует"
+    else:
+        sauron_part = "⚠️ Не настроен — добавь SAURON_API_KEY в Replit Secrets"
 
-    if username and not password:
-        return "⚠️ SAURON_USERNAME задан, но SAURON_PASSWORD отсутствует"
+    return f"{sauron_part}\n   {_vk_status_line()}"
 
-    return "⚠️ Не настроен — добавь SAURON_API_KEY в Replit Secrets"
+# GLOBAL RELATIVE SEARCH OVERRIDE
+_REL_MAX_PRIMARY = int(os.environ.get("REL_SEARCH_PRIMARY_RECORDS", "8"))
+_REL_MAX_SECONDARY = int(os.environ.get("REL_SEARCH_SECONDARY_QUERIES", "8"))
+_REL_MAX_VK = int(os.environ.get("REL_SEARCH_VK_PROFILES", "6"))
+_REL_MAX_OUT = int(os.environ.get("REL_SEARCH_MAX_RELATIVES", "14"))
+
+_REL_FAMILY_KWS = (
+    "родствен", "родств", "связь с лицом", "связи", "семья", "семей",
+    "мать", "отец", "родител", "сын", "дочь", "дети", "ребен", "ребён",
+    "брат", "сестр", "жена", "муж", "супруг", "супруга", "брак",
+    "дед", "баб", "внук", "внуч", "племян", "дядя", "тетя", "тётя",
+    "зять", "сноха", "свек", "тещ", "тёщ", "тесть", "опек",
+)
+_REL_NON_FAMILY_KWS = (
+    "клиент", "водитель", "работодатель", "сотрудник", "коллега",
+    "учредитель", "директор", "акционер", "владелец", "контрагент",
+)
+_REL_FIO_RE = re.compile(
+    r"\b([А-ЯЁІЇЄ][а-яёіїє'\-]{1,25})\s+"
+    r"([А-ЯЁІЇЄ][а-яёіїє'\-]{1,25})"
+    r"(?:\s+([А-ЯЁІЇЄ][а-яёіїє'\-]{1,25}))?\b"
+)
+_REL_PHONE_RE = re.compile(r"(?:\+?\d[\d\s()\-.]{7,}\d)")
+_REL_VK_RE = re.compile(
+    r"(?:https?://)?(?:m\.)?(?:vk\.com|vkontakte\.ru)/[A-Za-z0-9_.\-/]+|\b(?:id|club|public)\d{4,}\b",
+    re.I,
+)
+_REL_NAME_STOPS = {
+    "Республика", "Область", "Край", "Округ", "Район", "Город", "Улица",
+    "Проспект", "Переулок", "Украина", "Россия", "Российская", "Москва",
+    "Телефон", "Адрес", "Источник", "СНИЛС", "Паспорт", "Email", "Почта",
+}
+
+try:
+    import vk_api_client as _rel_vk
+except Exception:
+    _rel_vk = None
+
+
+def _rel_limit(text: str, n: int = 3900) -> str:
+    return text if len(text) <= n else text[:n] + "\n…_(обрезано)_"
+
+
+def _rel_clean(v) -> str:
+    return str(v or "").replace("\n", " ").strip()
+
+
+def _rel_record_fio(rec: dict) -> str:
+    direct = _rel_clean(rec.get("ФИО"))
+    if direct:
+        return direct
+    parts = [_rel_clean(rec.get(k)) for k in ("Фамилия", "Имя", "Отчество")]
+    return " ".join(p for p in parts if p)
+
+
+def _rel_digits(s: str) -> str:
+    return re.sub(r"\D+", "", s or "")
+
+
+def _rel_norm_phone(raw: str) -> str:
+    d = _rel_digits(raw)
+    if len(d) == 11 and d.startswith("8"):
+        return "7" + d[1:]
+    if len(d) == 10 and d.startswith("0"):
+        return "380" + d[1:]
+    return d
+
+
+def _rel_extract_phones(text: str) -> list[str]:
+    out, seen = [], set()
+    for m in _REL_PHONE_RE.finditer(text or ""):
+        p = _rel_norm_phone(m.group(0))
+        if 9 <= len(p) <= 15 and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _rel_extract_vk_refs(text: str) -> list[str]:
+    out, seen = [], set()
+    for m in _REL_VK_RE.finditer(text or ""):
+        ref = m.group(0).strip().rstrip(".,;)")
+        if ref and ref not in seen:
+            seen.add(ref)
+            out.append(ref)
+    return out
+
+
+def _rel_extract_fios(text: str) -> list[str]:
+    out, seen = [], set()
+    for m in _REL_FIO_RE.finditer(text or ""):
+        parts = [p for p in m.groups() if p]
+        if len(parts) < 2 or any(p in _REL_NAME_STOPS for p in parts):
+            continue
+        fio = " ".join(parts)
+        key = fio.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(fio)
+    return out
+
+
+def _rel_is_family_context(text: str) -> bool:
+    t = (text or "").lower()
+    if any(k in t for k in _REL_NON_FAMILY_KWS) and not any(k in t for k in _REL_FAMILY_KWS):
+        return False
+    return any(k in t for k in _REL_FAMILY_KWS)
+
+
+def _rel_same_person(a: str, b: str) -> bool:
+    aa = {x.lower() for x in (a or "").split() if len(x) > 2}
+    bb = {x.lower() for x in (b or "").split() if len(x) > 2}
+    return bool(aa and bb and len(aa & bb) >= min(2, len(aa), len(bb)))
+
+
+def _rel_dedupe(items: list[str]) -> list[str]:
+    out, seen = [], set()
+    for item in items:
+        item = _rel_clean(item)
+        key = item.lower()
+        if item and key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def _rel_add_candidate(candidates: dict, name: str, evidence: str, source: str,
+                       confidence: str = "средняя", phone: str = "", vk: str = ""):
+    name = _rel_clean(name)
+    if not name or len(name) < 5:
+        return
+    key = re.sub(r"\s+", " ", name.lower())
+    cur = candidates.setdefault(key, {
+        "name": name,
+        "evidence": [],
+        "sources": set(),
+        "phones": set(),
+        "vk": set(),
+        "confidence": "низкая",
+        "score": 0,
+    })
+    if evidence and evidence not in cur["evidence"]:
+        cur["evidence"].append(evidence)
+    if source:
+        cur["sources"].add(source)
+    if phone:
+        cur["phones"].add(phone)
+    if vk:
+        cur["vk"].add(vk)
+    weights = {"низкая": 1, "средняя": 2, "высокая": 3}
+    if weights.get(confidence, 1) > weights.get(cur["confidence"], 1):
+        cur["confidence"] = confidence
+    cur["score"] += weights.get(confidence, 1)
+
+
+def _rel_scan_sauron_records(records: list[dict], query: str) -> tuple[dict, list[str], list[str]]:
+    candidates, secondary, vk_refs = {}, [], []
+    for rec in records[:_REL_MAX_PRIMARY]:
+        main_fio = _rel_record_fio(rec) or query
+        blob = " ".join(f"{k}: {v}" for k, v in rec.items() if v)
+        vk_refs.extend(_rel_extract_vk_refs(blob))
+        secondary.extend(_rel_extract_phones(blob))
+        for key, val in rec.items():
+            text = f"{key}: {val}"
+            if not _rel_is_family_context(text):
+                continue
+            for fio in _rel_extract_fios(text):
+                if _rel_same_person(fio, main_fio) or _rel_same_person(fio, query):
+                    continue
+                conf = "высокая" if ("связ" in key.lower() or "род" in key.lower()) else "средняя"
+                _rel_add_candidate(candidates, fio, f"Sauron: семейное поле «{key}»", "Sauron", conf)
+                secondary.append(fio)
+    return candidates, _rel_dedupe(secondary), _rel_dedupe(vk_refs)
+
+
+def _rel_vk_profiles_from_refs(refs: list[str]) -> list[dict]:
+    if not _rel_vk or not getattr(_rel_vk, "is_available", lambda: False)():
+        return []
+    out = []
+    for ref in refs[:_REL_MAX_VK]:
+        try:
+            prof = _rel_vk.get_profile(ref)
+            if prof:
+                out.append(prof)
+        except Exception:
+            continue
+    return out
+
+
+def _rel_vk_search(query: str) -> tuple[list[dict], list[str]]:
+    profiles, notes = [], []
+    if not _rel_vk or not getattr(_rel_vk, "is_available", lambda: False)():
+        return profiles, ["VK API: токен не настроен"]
+    try:
+        ok, msg = _rel_vk.check_token()
+        notes.append(f"VK API: {'OK' if ok else 'ошибка'} ({msg})")
+        if not ok:
+            return profiles, notes
+    except Exception as e:
+        notes.append(f"VK API: проверка не удалась ({str(e)[:80]})")
+        return profiles, notes
+    try:
+        api_call = getattr(_rel_vk, "_api_call", None)
+        if not api_call:
+            return profiles, notes
+        resp = api_call("users.search", {
+            "q": query,
+            "count": str(_REL_MAX_VK),
+            "fields": "bdate,city,home_town,maiden_name,relatives,domain,contacts,is_closed,can_access_closed,country",
+            "name_case": "nom",
+        })
+        raw_items = resp.get("items", []) if isinstance(resp, dict) else (resp if isinstance(resp, list) else [])
+        for item in raw_items[:_REL_MAX_VK]:
+            uid = item.get("id") if isinstance(item, dict) else None
+            if not uid:
+                continue
+            prof = _rel_vk.get_profile(str(uid))
+            if prof:
+                profiles.append(prof)
+    except Exception as e:
+        notes.append(f"VK search: {str(e)[:80]}")
+    return profiles, notes
+
+
+def _rel_scan_vk_profiles(profiles: list[dict], candidates: dict, query: str) -> list[str]:
+    notes = []
+    for prof in profiles[:_REL_MAX_VK]:
+        full = f"{prof.get('last_name','')} {prof.get('first_name','')}".strip()
+        url = prof.get("profile_url", "")
+        if not full:
+            continue
+        if prof.get("is_closed") and not prof.get("can_access_closed"):
+            notes.append(f"VK: {full} закрыт/нет доступа ({url})")
+        else:
+            bits = [full]
+            if prof.get("bdate"):
+                bits.append(str(prof["bdate"]))
+            if prof.get("city") or prof.get("home_town"):
+                bits.append(str(prof.get("city") or prof.get("home_town")))
+            if url:
+                bits.append(url)
+            notes.append("VK профиль: " + " · ".join(bits))
+        for rel in prof.get("relatives_resolved", []) or []:
+            rname = _rel_clean(rel.get("name"))
+            rtype = _rel_clean(rel.get("type")) or "relative"
+            if rname and not _rel_same_person(rname, query):
+                _rel_add_candidate(candidates, rname, f"VK: указан как {rtype} у {full}", "VK relatives", "высокая", vk=url)
+    return notes
+
+
+def _rel_secondary_sauron(candidates: dict, secondary_queries: list[str]):
+    used = 0
+    for q in secondary_queries:
+        if used >= _REL_MAX_SECONDARY:
+            break
+        if not q or len(q) < 5:
+            continue
+        used += 1
+        try:
+            res = _api_post_search(q)
+        except Exception:
+            continue
+        recs = res.get("response", []) or []
+        if not recs:
+            continue
+        blob = " ".join(" ".join(str(v) for v in rec.values() if v) for rec in recs[:5])
+        phones = _rel_extract_phones(blob)
+        vk_refs = _rel_extract_vk_refs(blob)
+        target_names = [q] if _REL_FIO_RE.search(q) else _rel_extract_fios(blob)[:3]
+        for name in target_names:
+            _rel_add_candidate(
+                candidates,
+                name,
+                f"Sauron: вторичная проверка по «{q}» дала {len(recs)} записей",
+                "Sauron secondary",
+                "средняя",
+                phone=phones[0] if phones else "",
+                vk=vk_refs[0] if vk_refs else "",
+            )
+
+
+def _rel_format_global_result(result: dict, query: str) -> str:
+    records = result.get("response", []) or []
+    balance = result.get("balance", "")
+    if not records:
+        return f"По запросу «{query}» ничего не найдено."
+    candidates, secondary, vk_refs = _rel_scan_sauron_records(records, query)
+    vk_profiles = _rel_vk_profiles_from_refs(vk_refs)
+    vk_search_profiles, vk_notes = _rel_vk_search(query)
+    vk_notes.extend(_rel_scan_vk_profiles(vk_profiles + vk_search_profiles, candidates, query))
+    cand_names = [c["name"] for c in candidates.values()]
+    _rel_secondary_sauron(candidates, _rel_dedupe(secondary + cand_names))
+    lines = [
+        f"🌐 *Глобальный поиск родственников: «{query}»*",
+        "━" * 22,
+        f"Найдено базовых записей Sauron: *{len(records)}*",
+    ]
+    if balance:
+        lines.append(f"Баланс Sauron: _{balance}_")
+    lines.append("")
+    lines.append("*1. Основные совпадения Sauron*")
+    for i, rec in enumerate(records[:min(3, _REL_MAX_PRIMARY)], 1):
+        lines.append(_format_record(rec, i))
+        lines.append("")
+    cand_list = sorted(candidates.values(), key=lambda x: (-x["score"], x["name"]))
+    lines.append("*2. Кандидаты родственников / связей*")
+    if not cand_list:
+        lines.append("Явных родственников в найденных данных не выделено. Попробуй ФИО + дата рождения или телефон.")
+    else:
+        for i, c in enumerate(cand_list[:_REL_MAX_OUT], 1):
+            src = ", ".join(sorted(c["sources"]))
+            ev = "; ".join(c["evidence"][:3])
+            phones = "; ".join(sorted(c["phones"])[:3])
+            vk = "; ".join(sorted(c["vk"])[:2])
+            line = f"{i}. *{c['name']}* — уверенность: *{c['confidence']}*"
+            line += f"\n   Источник: {src}"
+            if ev:
+                line += f"\n   Доказательства: {ev}"
+            if phones:
+                line += f"\n   Телефоны: {phones}"
+            if vk:
+                line += f"\n   VK: {vk}"
+            lines.append(line)
+    lines.append("")
+    lines.append("*3. VK API*")
+    if vk_notes:
+        for note in vk_notes[:8]:
+            lines.append(f"• {note}")
+    else:
+        lines.append("• VK-сигналов нет или VK_API_TOKEN не дал данных по этому запросу.")
+    next_q = _rel_dedupe(secondary + [c["name"] for c in cand_list])[:10]
+    if next_q:
+        lines.append("")
+        lines.append("*4. Что ещё проверял / можно добить вручную*")
+        lines.append(", ".join(next_q))
+    lines.append("")
+    lines.append("_Важно: это поиск кандидатов и связей по базам/публичным VK-сигналам. Родство считается уверенным только когда есть семейное поле, VK relatives или несколько независимых совпадений._")
+    return _rel_limit("\n".join(lines))
+
+
+def search(query: str) -> str:
+    """Глобальный поиск человека и кандидатов родственников: Sauron + VK API."""
+    query = (query or "").strip()
+    if not query:
+        return "❓ Что искать? Укажи ФИО, номер телефона, адрес или ИНН."
+    if not _is_configured():
+        return (
+            "🔍 *Sauron не настроен*\n\n"
+            "Добавь в Railway/Replit Secrets:\n"
+            "• SAURON_API_KEY — API-ключ\n"
+            "• VK_API_TOKEN — для расширения через VK API"
+        )
+    if _api_key():
+        try:
+            result = _api_post_search(query)
+            return _rel_format_global_result(result, query)
+        except RuntimeError as e:
+            return f"🔍 Sauron\n\n⚠️ {str(e)}"
+        except Exception as e:
+            return f"🔍 Sauron\n\n❌ Неожиданная ошибка: {str(e)[:150]}"
+    sess, err = _get_session()
+    if err:
+        return f"🔍 *Sauron*\n\n⚠️ {err}"
+    result_text = _session_search(sess, query)
+    return f"🔍 *Sauron: «{query}»*\n{'━' * 22}\n" + (result_text or f"По запросу «{query}» ничего не найдено.")
