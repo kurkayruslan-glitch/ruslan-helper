@@ -12,6 +12,7 @@ import os
 import time
 import io
 import hashlib
+import html
 from urllib.parse import quote
 try:
     from openai import OpenAI
@@ -233,17 +234,345 @@ def _dialog_report_filename(original_filename: str) -> str:
     if not base:
         base = "audio"
     ts = _now_local().strftime("%Y%m%d_%H%M")
-    return f"dialog_analysis_{base}_{ts}.txt"
+    return f"dialog_analysis_{base}_{ts}.html"
+
+
+def _clean_dialog_analysis_markdown(analysis: str) -> str:
+    lines = (analysis or "").replace("\r\n", "\n").split("\n")
+    cleaned = []
+    at_top = True
+    for line in lines:
+        stripped = line.strip()
+        if at_top:
+            if not stripped:
+                continue
+            if re.match(r"^#\s*Анализ аудиозаписи разговора\s*$", stripped, re.IGNORECASE):
+                continue
+            if re.match(r"^(Файл|Длительность по распознаванию)\s*:", stripped, re.IGNORECASE):
+                continue
+            at_top = False
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+def _inline_markdown_to_html(text: str) -> str:
+    out = html.escape(text or "")
+    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    out = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", out)
+    out = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", out)
+    return out
+
+
+def _is_table_separator(line: str) -> bool:
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 2:
+        return False
+    return all(re.match(r"^:?-{3,}:?$", c or "") for c in cells)
+
+
+def _split_table_row(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _markdown_table_to_html(table_lines: list[str]) -> str:
+    rows = [_split_table_row(line) for line in table_lines if not _is_table_separator(line)]
+    if not rows:
+        return ""
+    headers = rows[0]
+    body_rows = rows[1:]
+    html_parts = ["<div class=\"table-wrap\"><table><thead><tr>"]
+    for cell in headers:
+        html_parts.append(f"<th>{_inline_markdown_to_html(cell)}</th>")
+    html_parts.append("</tr></thead><tbody>")
+    for row in body_rows:
+        if len(row) < len(headers):
+            row = row + [""] * (len(headers) - len(row))
+        html_parts.append("<tr>")
+        for cell in row[:len(headers)]:
+            html_parts.append(f"<td>{_inline_markdown_to_html(cell)}</td>")
+        html_parts.append("</tr>")
+    html_parts.append("</tbody></table></div>")
+    return "".join(html_parts)
+
+
+def _markdown_to_report_html(markdown_text: str) -> str:
+    lines = (markdown_text or "").replace("\r\n", "\n").split("\n")
+    out = []
+    paragraph = []
+    in_ul = False
+    in_ol = False
+
+    def flush_paragraph():
+        nonlocal paragraph
+        if paragraph:
+            text = " ".join(p.strip() for p in paragraph if p.strip())
+            out.append(f"<p>{_inline_markdown_to_html(text)}</p>")
+            paragraph = []
+
+    def close_lists():
+        nonlocal in_ul, in_ol
+        if in_ul:
+            out.append("</ul>")
+            in_ul = False
+        if in_ol:
+            out.append("</ol>")
+            in_ol = False
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if not stripped:
+            flush_paragraph()
+            close_lists()
+            i += 1
+            continue
+
+        if "|" in stripped and i + 1 < len(lines) and _is_table_separator(lines[i + 1]):
+            flush_paragraph()
+            close_lists()
+            table_lines = [line, lines[i + 1]]
+            i += 2
+            while i < len(lines) and "|" in lines[i].strip():
+                table_lines.append(lines[i])
+                i += 1
+            out.append(_markdown_table_to_html(table_lines))
+            continue
+
+        heading = re.match(r"^(#{1,4})\s+(.+)$", stripped)
+        if heading:
+            flush_paragraph()
+            close_lists()
+            level = 2 if len(heading.group(1)) <= 2 else 3
+            out.append(f"<h{level}>{_inline_markdown_to_html(heading.group(2).strip())}</h{level}>")
+            i += 1
+            continue
+
+        bullet = re.match(r"^[-•]\s+(.+)$", stripped)
+        if bullet:
+            flush_paragraph()
+            if in_ol:
+                out.append("</ol>")
+                in_ol = False
+            if not in_ul:
+                out.append("<ul>")
+                in_ul = True
+            out.append(f"<li>{_inline_markdown_to_html(bullet.group(1))}</li>")
+            i += 1
+            continue
+
+        numbered = re.match(r"^\d+[\.\)]\s+(.+)$", stripped)
+        if numbered:
+            flush_paragraph()
+            if in_ul:
+                out.append("</ul>")
+                in_ul = False
+            if not in_ol:
+                out.append("<ol>")
+                in_ol = True
+            out.append(f"<li>{_inline_markdown_to_html(numbered.group(1))}</li>")
+            i += 1
+            continue
+
+        close_lists()
+        paragraph.append(line)
+        i += 1
+
+    flush_paragraph()
+    close_lists()
+    return "\n".join(part for part in out if part)
+
+
+def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) -> str:
+    clean_analysis = _clean_dialog_analysis_markdown(analysis)
+    body_html = _markdown_to_report_html(clean_analysis)
+    safe_filename = html.escape(filename or "audio")
+    safe_duration = html.escape(duration_text or "не определена")
+    generated_at = html.escape(_now_local().strftime("%d.%m.%Y %H:%M"))
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Анализ диалога</title>
+  <style>
+    :root {{
+      --bg: #f3f5f7;
+      --paper: #ffffff;
+      --ink: #16202a;
+      --muted: #667085;
+      --line: #d9e0e7;
+      --accent: #176b87;
+      --accent-2: #102a43;
+      --soft: #eaf4f7;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      line-height: 1.55;
+    }}
+    .page {{
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 20px;
+    }}
+    .cover {{
+      background: linear-gradient(135deg, var(--accent-2), var(--accent));
+      color: #fff;
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: 0 16px 40px rgba(16, 42, 67, .18);
+    }}
+    .eyebrow {{
+      margin: 0 0 10px;
+      color: rgba(255,255,255,.78);
+      font-size: 13px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: clamp(28px, 7vw, 48px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }}
+    .subtitle {{
+      margin: 14px 0 0;
+      max-width: 760px;
+      color: rgba(255,255,255,.86);
+      font-size: 16px;
+    }}
+    .meta {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 22px;
+    }}
+    .meta-card {{
+      background: rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 12px;
+      padding: 12px;
+      min-width: 0;
+    }}
+    .meta-label {{
+      display: block;
+      color: rgba(255,255,255,.68);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }}
+    .meta-value {{
+      display: block;
+      overflow-wrap: anywhere;
+      font-weight: 700;
+    }}
+    .content {{
+      margin-top: 18px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: 0 10px 26px rgba(16, 42, 67, .08);
+    }}
+    h2 {{
+      margin: 34px 0 14px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--accent-2);
+      font-size: 24px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }}
+    h2:first-child {{ margin-top: 0; padding-top: 0; border-top: 0; }}
+    h3 {{
+      margin: 24px 0 10px;
+      color: var(--accent);
+      font-size: 18px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }}
+    p {{ margin: 10px 0; }}
+    ul, ol {{ padding-left: 22px; }}
+    li {{ margin: 6px 0; }}
+    code {{
+      background: var(--soft);
+      border: 1px solid #d3e9ef;
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: .95em;
+    }}
+    .table-wrap {{
+      width: 100%;
+      overflow-x: auto;
+      margin: 14px 0 22px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }}
+    table {{
+      width: 100%;
+      min-width: 680px;
+      border-collapse: collapse;
+      background: #fff;
+      font-size: 14px;
+    }}
+    th {{
+      background: var(--soft);
+      color: var(--accent-2);
+      font-weight: 800;
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }}
+    td {{
+      vertical-align: top;
+      padding: 10px 12px;
+      border-bottom: 1px solid #edf1f5;
+    }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .footer {{
+      margin: 18px 4px 0;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }}
+    @media (max-width: 720px) {{
+      .page {{ padding: 10px; }}
+      .cover {{ border-radius: 14px; padding: 20px; }}
+      .meta {{ grid-template-columns: 1fr; }}
+      .content {{ border-radius: 14px; padding: 18px; }}
+      h2 {{ font-size: 21px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="cover">
+      <p class="eyebrow">Ruslan Helper</p>
+      <h1>Анализ диалога</h1>
+      <p class="subtitle">Профессиональный разбор аудиозаписи: роли участников, важные реплики, ошибки, психология разговора и рекомендации.</p>
+      <div class="meta">
+        <div class="meta-card"><span class="meta-label">Файл</span><span class="meta-value">{safe_filename}</span></div>
+        <div class="meta-card"><span class="meta-label">Длительность</span><span class="meta-value">{safe_duration}</span></div>
+        <div class="meta-card"><span class="meta-label">Создано</span><span class="meta-value">{generated_at}</span></div>
+      </div>
+    </section>
+    <section class="content">
+      {body_html}
+    </section>
+    <p class="footer">Отчет подготовлен автоматически. Сомнительные места проверяй по исходной аудиозаписи.</p>
+  </main>
+</body>
+</html>"""
 
 
 def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, analysis: str, reply_markup=None):
-    report = (
-        "# Анализ аудиозаписи разговора\n\n"
-        f"- Исходный файл: {filename or 'audio'}\n"
-        f"- Длительность по Whisper: {duration_text or 'не определена'}\n"
-        f"- Время разбора: {_now_local().strftime('%d.%m.%Y %H:%M')} (Украина)\n\n"
-        f"{(analysis or '').strip()}\n"
-    )
+    report = _build_dialog_report_html(filename, duration_text, analysis)
     report_file = io.BytesIO(b"\xef\xbb\xbf" + report.encode("utf-8"))
     report_file.name = _dialog_report_filename(filename)
     caption_name = filename or "audio"
@@ -252,7 +581,7 @@ def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, 
     bot.send_document(
         chat_id,
         report_file,
-        caption=f"📄 Готово — анализ диалога файлом\n{caption_name}",
+        caption=f"📊 Готово — красивый HTML-отчёт\n{caption_name}",
         reply_markup=reply_markup,
     )
 
