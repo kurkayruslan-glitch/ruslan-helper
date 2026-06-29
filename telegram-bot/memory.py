@@ -30,6 +30,15 @@ def _ensure_schema():
                 )
                 """
             )
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS chat_memory (
+                    chat_id    TEXT PRIMARY KEY,
+                    summary    TEXT NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT {now_default_sql()}
+                )
+                """
+            )
             c.commit()
         _migrate_json_if_present()
         _initialized = True
@@ -129,7 +138,66 @@ def clear_all():
     _ensure_schema()
     with _lock, connect() as c, c.cursor() as cur:
         cur.execute("DELETE FROM memory_facts")
+        cur.execute("DELETE FROM chat_memory")
         c.commit()
+
+
+def get_chat_summary(chat_id: int) -> str:
+    _ensure_schema()
+    with _lock, connect() as c, c.cursor() as cur:
+        cur.execute(sql("SELECT summary FROM chat_memory WHERE chat_id = ?"), (str(chat_id),))
+        row = cur.fetchone()
+    return (row.get("summary") or "").strip() if row else ""
+
+
+def save_chat_summary(chat_id: int, summary: str) -> bool:
+    summary = (summary or "").strip()
+    _ensure_schema()
+    if not summary:
+        clear_chat_summary(chat_id)
+        return False
+    with _lock, connect() as c, c.cursor() as cur:
+        if is_sqlite():
+            cur.execute(
+                """
+                INSERT INTO chat_memory (chat_id, summary)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (str(chat_id), summary),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO chat_memory (chat_id, summary)
+                VALUES (%s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    summary = EXCLUDED.summary,
+                    updated_at = NOW()
+                """,
+                (str(chat_id), summary),
+            )
+        c.commit()
+    return True
+
+
+def clear_chat_summary(chat_id: int | None = None):
+    _ensure_schema()
+    with _lock, connect() as c, c.cursor() as cur:
+        if chat_id is None:
+            cur.execute("DELETE FROM chat_memory")
+        else:
+            cur.execute(sql("DELETE FROM chat_memory WHERE chat_id = ?"), (str(chat_id),))
+        c.commit()
+
+
+def format_chat_summary_for_prompt(chat_id: int) -> str:
+    summary = get_chat_summary(chat_id)
+    if not summary:
+        return ""
+    return f"\nКраткая память нашего диалога:\n{summary}\n"
 
 
 def format_for_prompt() -> str:
@@ -143,7 +211,7 @@ def format_for_prompt() -> str:
 def format_for_display() -> str:
     raw = _load_raw()
     if not raw:
-        return "🧠 Память пуста — я пока ничего не запомнил."
+        return "🧠 Память фактов пуста — я пока ничего не запомнил."
     lines = []
     for i, item in enumerate(raw, 1):
         fact = item.get("fact", "")
