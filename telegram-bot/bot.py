@@ -59,7 +59,12 @@ elif _backend == "gemini":
 else:
     from chatgpt import ask_grok
     print("🧠 LLM backend: openai (ChatGPT)")
-from memory import get_facts, add_fact, delete_fact, clear_facts, format_for_prompt, format_for_display, clear_all as clear_memory
+from memory import (
+    get_facts, add_fact, delete_fact, clear_facts,
+    format_for_prompt, format_for_display, clear_all as clear_memory,
+    get_chat_summary, save_chat_summary, clear_chat_summary,
+    format_chat_summary_for_prompt,
+)
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
 import tax_calendar
@@ -383,9 +388,11 @@ _remote_confirm_action: dict = {}  # chat_id → "shutdown" | "restart"
 # Чаты, ожидающие голосового ответа (запрос пришёл голосом)
 voice_request_chats: set = set()
 
-# История чата — сохраняется на диск, максимум HISTORY_MAX пар на пользователя
+# История чата — сохраняется на диск, максимум HISTORY_MAX сообщений на пользователя
 GROK_HISTORY_FILE = "grok_history.json"
-HISTORY_MAX = 40  # максимум сообщений в истории (пар user+assistant = 80 записей)
+HISTORY_MAX = int(os.environ.get("GROK_HISTORY_MAX", "80"))  # 80 сообщений = примерно 40 обменов
+CHAT_MEMORY_MAX_CHARS = int(os.environ.get("CHAT_MEMORY_MAX_CHARS", "3500"))
+CHAT_MEMORY_FOR_ALL = os.environ.get("CHAT_MEMORY_FOR_ALL", "0").lower() in ("1", "true", "yes", "on")
 
 def _load_grok_history() -> dict:
     if os.path.exists(GROK_HISTORY_FILE):
@@ -415,6 +422,7 @@ def _save_grok_history():
         json.dump(trimmed, f, ensure_ascii=False, indent=2)
 
 grok_history: dict = _load_grok_history()
+_chat_memory_lock = threading.Lock()
 
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
@@ -711,8 +719,9 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
 
     elif action_type == "forget":
         grok_history.pop(chat_id, None)
+        clear_chat_summary(chat_id)
         _save_grok_history()
-        bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с чистого листа!", reply_markup=main_menu())
+        bot.send_message(chat_id, "🗑️ История и краткая память диалога очищены. Начинаем с чистого листа!", reply_markup=main_menu())
 
     elif action_type == "remind":
         # action_param: "YYYY-MM-DDTHH:MM|текст напоминания"
@@ -931,10 +940,84 @@ def _extract_remember_tags(text: str) -> tuple[list, str]:
     return all_facts, clean
 
 
+_CHAT_MEMORY_SYSTEM = (
+    "Ты — модуль памяти Telegram-бота. Обновляй краткую долгосрочную память диалога. "
+    "Сохраняй только то, что пригодится в будущих разговорах: устойчивые факты о пользователе, "
+    "его проектах, целях, предпочтениях, настройках бота, текущих задачах, принятых решениях и важных контекстах. "
+    "Не сохраняй одноразовый шум, эмоции момента, случайные фразы, длинные тексты, секреты, пароли, API-ключи, "
+    "коды, номера карт и другие чувствительные данные. "
+    "Если новой полезной информации нет — сохрани прежнюю память без изменений. "
+    "Верни только обновлённую память на русском языке, короткими пунктами, без приветствий и без markdown-заголовка."
+)
+
+
+def _clean_chat_memory_summary(text: str, previous: str) -> str:
+    """Очищает ответ LLM-памяти от служебного мусора и ограничивает размер."""
+    import re
+    summary = (text or "").strip()
+    summary = re.sub(r"^```[a-zA-Zа-яА-Я0-9_-]*\s*", "", summary)
+    summary = re.sub(r"\s*```$", "", summary).strip()
+    summary = re.sub(r"\[ACTION:[^\]]+\]\s*", "", summary)
+    summary = re.sub(r"\[REMEMBER:[^\]]+\]\s*", "", summary, flags=re.IGNORECASE)
+    low = summary.lower().strip(" .!—-")
+    if low in ("без изменений", "нет новой информации", "ничего не добавлять", "память без изменений"):
+        summary = previous
+    if len(summary) > CHAT_MEMORY_MAX_CHARS:
+        cut = summary[:CHAT_MEMORY_MAX_CHARS]
+        summary = cut.rsplit("\n", 1)[0].strip() or cut.strip()
+    return summary
+
+
+def _update_chat_memory(chat_id: int, user_text: str, assistant_text: str):
+    """Фоново обновляет краткую память диалога через LLM."""
+    if chat_id != OWNER_ID and not CHAT_MEMORY_FOR_ALL:
+        return
+    user_text = (user_text or "").strip()
+    assistant_text = (assistant_text or "").strip()
+    if not user_text or not assistant_text:
+        return
+    if user_text.startswith("/") and not user_text.lower().startswith(("/memory", "/start")):
+        return
+
+    user_clip = user_text[:5000] + ("…" if len(user_text) > 5000 else "")
+    assistant_clip = assistant_text[:5000] + ("…" if len(assistant_text) > 5000 else "")
+
+    try:
+        with _chat_memory_lock:
+            previous = get_chat_summary(chat_id)
+            prompt = (
+                "Предыдущая память диалога:\n"
+                f"{previous or '(пока пусто)'}\n\n"
+                "Последний обмен:\n"
+                f"Пользователь: {user_clip}\n\n"
+                f"Бот: {assistant_clip}\n\n"
+                "Обнови память так, чтобы в следующем разговоре бот понимал контекст."
+            )
+            updated = ask_grok(prompt, [], memory_block=_CHAT_MEMORY_SYSTEM)
+            summary = _clean_chat_memory_summary(updated, previous)
+            if summary:
+                save_chat_summary(chat_id, summary)
+    except Exception as e:
+        print(f"Ошибка обновления памяти чата: {e}")
+
+
+def _schedule_chat_memory_update(chat_id: int, user_text: str, assistant_text: str):
+    """Запускает обновление памяти не блокируя ответ пользователю."""
+    try:
+        threading.Thread(
+            target=_update_chat_memory,
+            args=(chat_id, user_text, assistant_text),
+            daemon=True,
+            name=f"chat-memory-{chat_id}",
+        ).start()
+    except Exception as e:
+        print(f"Ошибка запуска обновления памяти: {e}")
+
+
 def _ask_grok_and_route(chat_id: int, text: str):
     """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
     history = grok_history.get(chat_id, [])
-    memory_block = format_for_prompt()
+    memory_block = format_for_prompt() + format_chat_summary_for_prompt(chat_id)
     # Добавляем текущую дату и время, чтобы Grok правильно рассчитывал относительные сроки
     now = _now_local()
     tz = _ukraine_tz_hours()
@@ -949,6 +1032,9 @@ def _ask_grok_and_route(chat_id: int, text: str):
         "Если не хватает данных — задай один короткий уточняющий вопрос. "
         "Если можно помочь сразу — помогай сразу. "
         "Никогда не проси пароли, коды SMS, токены или личные данные. "
+        "Если пользователь сообщает важный устойчивый факт о себе, проекте, настройке или задаче, "
+        "можешь добавить в конец ответа служебный тег [REMEMBER:короткий факт]. "
+        "Не добавляй туда секреты, пароли, токены, номера карт и одноразовые мелочи. "
         "Для поиска информации через Sauron используй [ACTION:search_sauron:запрос]. "
         "Все отключённые разделы не предлагай: таблицы, Тоха, Dota, Jarvis, Мой ПК, Я Тигр, ФОП, бронирование. "
     )
@@ -982,8 +1068,9 @@ def _ask_grok_and_route(chat_id: int, text: str):
     action_type, action_param, clean_reply = _parse_action(reply_without_remember)
 
     # Сохраняем в историю (без служебных тегов)
+    assistant_memory_text = clean_reply or reply_without_remember
     history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": clean_reply or reply_without_remember})
+    history.append({"role": "assistant", "content": assistant_memory_text})
     grok_history[chat_id] = history
     _save_grok_history()
 
@@ -1002,6 +1089,8 @@ def _ask_grok_and_route(chat_id: int, text: str):
         return  # forget сам выводит сообщение
     if action_type:
         _handle_grok_action(chat_id, action_type, action_param)
+
+    _schedule_chat_memory_update(chat_id, text, assistant_memory_text)
 
     # Показываем текстовый ответ Grok (если не пустой)
     if clean_reply and clean_reply.strip():
@@ -1664,6 +1753,9 @@ def _btn_show_memory(chat_id):
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
     try:
         text = format_for_display()
+        chat_summary = get_chat_summary(chat_id)
+        if chat_summary:
+            text += "\n\n🗂️ *Краткая память нашего диалога:*\n\n" + chat_summary
         if not text or not text.strip():
             text = "💾 Память пуста. Скажи «запомни что...» чтобы добавить факт."
         safe_send(chat_id, text, markup)
@@ -2177,8 +2269,9 @@ def _btn_file_sauron(chat_id: int):
 
 def _btn_forget(chat_id):
     grok_history.pop(chat_id, None)
+    clear_chat_summary(chat_id)
     _save_grok_history()
-    bot.send_message(chat_id, "🗑️ Готово — забыл нашу историю. Начинаем с нуля!", reply_markup=main_menu())
+    bot.send_message(chat_id, "🗑️ Готово — забыл историю и краткую память диалога. Начинаем с нуля!", reply_markup=main_menu())
 
 
 def _btn_sheets(chat_id):
@@ -2581,7 +2674,10 @@ def cmd_memory(message):
     # /memory clear — очистить память
     if len(args) > 1 and args[1].strip().lower() in ("clear", "очистить", "сбросить"):
         clear_memory()
-        bot.send_message(chat_id, "🗑️ Долгосрочная память очищена.", reply_markup=main_menu())
+        clear_chat_summary(chat_id)
+        grok_history.pop(chat_id, None)
+        _save_grok_history()
+        bot.send_message(chat_id, "🗑️ Долгосрочная память и история диалога очищены.", reply_markup=main_menu())
         return
     # /memory <факт> — добавить вручную
     if len(args) > 1:
@@ -2592,7 +2688,11 @@ def cmd_memory(message):
         else:
             bot.send_message(chat_id, f"🧠 Уже знаю это: {fact}", reply_markup=main_menu())
         return
-    safe_send(chat_id, format_for_display(), main_menu())
+    text = format_for_display()
+    chat_summary = get_chat_summary(chat_id)
+    if chat_summary:
+        text += "\n\n🗂️ *Краткая память нашего диалога:*\n\n" + chat_summary
+    safe_send(chat_id, text, main_menu())
 
 
 @bot.message_handler(commands=['start'])
