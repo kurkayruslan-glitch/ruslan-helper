@@ -21,7 +21,7 @@ from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha, send_sms
 from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets
 from roles import get_role, set_role, list_roles
-from calls import make_call
+from calls import make_call, make_ai_call, voice_call_available
 import pc_control
 import pc_apps
 import price_search
@@ -1339,20 +1339,82 @@ def process_text(chat_id, text):
             if not re.match(r"^\+?\d{7,15}$", number):
                 bot.send_message(chat_id, "⚠️ Не похоже на номер. Напиши в формате +380XXXXXXXXX:")
                 return
-            waiting_for_owner_call[chat_id] = {"step": "message", "number": number}
-            bot.send_message(chat_id, f"✅ Номер: *{number}*\n\nЧто сказать голосом?",
-                             parse_mode="Markdown")
+            waiting_for_owner_call[chat_id] = {"step": "message_or_mode", "number": number}
+            bot.send_message(
+                chat_id,
+                f"✅ Номер: *{number}*\n\n"
+                "Напиши текст — я позвоню и скажу его более живым голосом.\n\n"
+                "Или напиши *диалог* — тогда ИИ позвонит, послушает человека и попробует пообщаться.",
+                parse_mode="Markdown",
+            )
+            return
+        elif state["step"] == "message_or_mode":
+            number = state["number"]
+            if tl.strip() in ("диалог", "живой диалог", "ии диалог", "общение", "поговорить", "разговор"):
+                if not voice_call_available():
+                    waiting_for_owner_call[chat_id] = {"step": "message_or_mode", "number": number}
+                    bot.send_message(
+                        chat_id,
+                        "⚠️ Живой ИИ-звонок уже встроен, но ему нужен публичный URL сервера, "
+                        "чтобы Twilio мог присылать ответы человека обратно боту.\n\n"
+                        "Пока можешь написать обычный текст — я позвоню и озвучу его живее.",
+                    )
+                    return
+                waiting_for_owner_call[chat_id] = {"step": "dialog_goal", "number": number}
+                bot.send_message(
+                    chat_id,
+                    "🎙️ *Живой ИИ-звонок*\n\n"
+                    "Напиши цель разговора: что нужно сказать, выяснить или к какому итогу привести человека.",
+                    parse_mode="Markdown",
+                )
+                return
+            msg = t
+            waiting_for_owner_call[chat_id] = {
+                "step": "confirm",
+                "number": number,
+                "message": msg,
+                "mode": "static",
+            }
+            bot.send_message(
+                chat_id,
+                f"📞 *Готов позвонить*\n\n"
+                f"Номер: `{number}`\n"
+                f"Скажу живым голосом: _{msg}_\n\n"
+                f"⚠️ Это *реальный звонок*. Подтвердить?\n"
+                f"Напиши *да* чтобы позвонить, *нет* чтобы отменить.",
+                parse_mode="Markdown",
+            )
             return
         elif state["step"] == "message":
             number = state["number"]
             msg = t
             # Показываем план и просим подтверждение ПЕРЕД реальным звонком
-            waiting_for_owner_call[chat_id] = {"step": "confirm", "number": number, "message": msg}
+            waiting_for_owner_call[chat_id] = {"step": "confirm", "number": number, "message": msg, "mode": "static"}
             bot.send_message(
                 chat_id,
                 f"📞 *Готов позвонить*\n\n"
                 f"Номер: `{number}`\n"
-                f"Скажу: _{msg}_\n\n"
+                f"Скажу живым голосом: _{msg}_\n\n"
+                f"⚠️ Это *реальный звонок*. Подтвердить?\n"
+                f"Напиши *да* чтобы позвонить, *нет* чтобы отменить.",
+                parse_mode="Markdown",
+            )
+            return
+        elif state["step"] == "dialog_goal":
+            number = state["number"]
+            goal = t
+            waiting_for_owner_call[chat_id] = {
+                "step": "confirm",
+                "number": number,
+                "message": goal,
+                "mode": "dialog",
+            }
+            bot.send_message(
+                chat_id,
+                f"🎙️ *Готов запустить живой ИИ-звонок*\n\n"
+                f"Номер: `{number}`\n"
+                f"Цель разговора: _{goal}_\n\n"
+                "ИИ представится голосовым помощником Руслана, будет слушать ответы и говорить короткими репликами.\n\n"
                 f"⚠️ Это *реальный звонок*. Подтвердить?\n"
                 f"Напиши *да* чтобы позвонить, *нет* чтобы отменить.",
                 parse_mode="Markdown",
@@ -1361,16 +1423,27 @@ def process_text(chat_id, text):
         elif state["step"] == "confirm":
             number = state["number"]
             message = state["message"]
+            mode = state.get("mode", "static")
             waiting_for_owner_call.pop(chat_id)
             if tl.strip() in ("да", "yes", "давай", "подтверждаю", "звони", "ok", "ок"):
                 bot.send_message(chat_id, f"📞 Звоню на {number}...")
-                ok, info = make_call(number, message)
+                if mode == "dialog":
+                    ok, info = make_ai_call(number, message)
+                else:
+                    ok, info = make_call(number, message)
                 if ok:
-                    bot.send_message(
-                        chat_id,
-                        f"✅ Позвонил на *{number}*\nГолосом скажет: _{message}_",
-                        parse_mode="Markdown", reply_markup=main_menu(),
-                    )
+                    if mode == "dialog":
+                        bot.send_message(
+                            chat_id,
+                            f"✅ ИИ-звонок запущен на *{number}*\nЦель: _{message}_",
+                            parse_mode="Markdown", reply_markup=main_menu(),
+                        )
+                    else:
+                        bot.send_message(
+                            chat_id,
+                            f"✅ Позвонил на *{number}*\nГолосом скажет: _{message}_",
+                            parse_mode="Markdown", reply_markup=main_menu(),
+                        )
                 else:
                     bot.send_message(chat_id, f"❌ Ошибка звонка: {info}", reply_markup=main_menu())
             else:
@@ -1619,8 +1692,15 @@ def process_text(chat_id, text):
 # ── Вспомогательные функции для кнопок ───────────────────────────────────────
 
 def _btn_call(chat_id):
-    bot.send_message(chat_id, "📞 *Звонок*\n\nНа какой номер? Напиши в формате +380XXXXXXXXX:",
-                     parse_mode="Markdown")
+    bot.send_message(
+        chat_id,
+        "📞 *Звонок*\n\n"
+        "На какой номер? Напиши в формате +380XXXXXXXXX.\n\n"
+        "После номера можно:\n"
+        "• написать текст — бот позвонит и озвучит его живее;\n"
+        "• написать *диалог* — ИИ попробует поговорить с человеком.",
+        parse_mode="Markdown",
+    )
     waiting_for_owner_call[chat_id] = {"step": "number"}
 
 
@@ -1683,13 +1763,16 @@ def _jarvis_system_status() -> str:
         lines.append("🔍 Sauron: ⚠️ ошибка модуля")
 
     # Звонки
-    tw_ok = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
+    tw_from_ok = bool(os.environ.get("TWILIO_FROM_NUMBER") or os.environ.get("TWILIO_PHONE_NUMBER"))
+    tw_ok = bool(os.environ.get("TWILIO_ACCOUNT_SID") and os.environ.get("TWILIO_AUTH_TOKEN") and tw_from_ok)
     tx_ok = all(os.environ.get(k) for k in ("TELNYX_API_KEY", "TELNYX_FROM_NUMBER"))
     calls_str = " + ".join(filter(None, [
         "Twilio" if tw_ok else None,
         "Telnyx" if tx_ok else None,
     ]))
     lines.append(f"📞 Звонки: {('✅ ' + calls_str) if calls_str else '⚠️ не настроены'}")
+    if tw_ok:
+        lines.append(f"🎙️ ИИ-звонок с диалогом: {'✅ готов' if voice_call_available() else '⚠️ нужен PUBLIC_BASE_URL / Public Networking'}")
 
     # SMS Тоха
     sms_ok = bool(os.environ.get("TOHA_PHONE_NUMBER"))
@@ -1781,6 +1864,8 @@ def _btn_status(chat_id):
         lines.append("🔍 Sauron: ⚠️ ошибка модуля")
     calls_ok = any(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TELNYX_API_KEY"))
     lines.append(f"📞 Звонки: {'✅ настроены' if calls_ok else '⚠️ не настроены'}")
+    if os.environ.get("TWILIO_ACCOUNT_SID"):
+        lines.append(f"🎙️ Живой ИИ-звонок: {'✅ готов' if voice_call_available() else '⚠️ нужен PUBLIC_BASE_URL'}")
     lines.append("🧠 Умный режим: ✅ пиши обычным текстом")
     safe_send(chat_id, "\n".join(lines), main_menu())
 
@@ -1816,11 +1901,14 @@ def _btn_skills(chat_id):
     lines.append("  ✅ USDT TRC20 — аналитика кошелька")
 
     lines.append("\n📞 *Звонки и коммуникация*")
-    tw = all(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"))
+    tw_from = bool(os.environ.get("TWILIO_FROM_NUMBER") or os.environ.get("TWILIO_PHONE_NUMBER"))
+    tw = bool(os.environ.get("TWILIO_ACCOUNT_SID") and os.environ.get("TWILIO_AUTH_TOKEN") and tw_from)
     tx = all(os.environ.get(k) for k in ("TELNYX_API_KEY", "TELNYX_FROM_NUMBER"))
     if tw or tx:
         prov = "/".join(filter(None, ["Twilio" if tw else None, "Telnyx" if tx else None]))
-        lines.append(f"  ✅ Звонки через {prov} — голосовой сценарий + подтверждение")
+        lines.append(f"  ✅ Звонки через {prov} — живой голос + подтверждение")
+        if tw:
+            lines.append(f"  {'✅' if voice_call_available() else '⚠️'} ИИ может общаться в звонке{' ' if voice_call_available() else ' — нужен PUBLIC_BASE_URL/Public Networking'}")
     else:
         lines.append("  ⚠️ Звонки: добавь TWILIO_* или TELNYX_* в Secrets")
     sms_ok = bool(os.environ.get("TOHA_PHONE_NUMBER"))
