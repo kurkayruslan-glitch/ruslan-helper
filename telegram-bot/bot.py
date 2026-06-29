@@ -426,6 +426,7 @@ _chat_memory_lock = threading.Lock()
 
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
+USER_PROFILES_FILE = "user_profiles.json"
 
 def _load_known_users() -> dict:
     if os.path.exists(KNOWN_USERS_FILE):
@@ -445,12 +446,146 @@ def _save_known_users():
 known_users: dict = _load_known_users()
 
 
-def main_menu():
+def _load_user_profiles() -> dict:
+    if os.path.exists(USER_PROFILES_FILE):
+        try:
+            import json
+            with open(USER_PROFILES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+        except Exception:
+            pass
+    return {}
+
+
+def _save_user_profiles():
+    import json
+    with open(USER_PROFILES_FILE, "w", encoding="utf-8") as f:
+        json.dump(user_profiles, f, ensure_ascii=False, indent=2)
+
+
+user_profiles: dict = _load_user_profiles()
+
+
+def _track_user(message, event: str = "message", from_user=None):
+    """Запоминает, кто пользуется ботом, без сохранения текста сообщений."""
+    try:
+        user = from_user or getattr(message, "from_user", None)
+        chat = getattr(message, "chat", None)
+        if not user or not chat:
+            return
+        user_id = int(getattr(user, "id", 0) or getattr(chat, "id", 0))
+        chat_id = int(getattr(chat, "id", user_id) or user_id)
+        if not user_id:
+            return
+
+        now = _now_local().strftime("%Y-%m-%d %H:%M")
+        key = str(user_id)
+        profile = user_profiles.get(key, {})
+        username = (getattr(user, "username", None) or "").strip()
+        first_name = (getattr(user, "first_name", None) or "").strip()
+        last_name = (getattr(user, "last_name", None) or "").strip()
+        full_name = " ".join(p for p in (first_name, last_name) if p).strip()
+
+        profile.update({
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
+            "full_name": full_name,
+            "language_code": getattr(user, "language_code", "") or "",
+            "is_bot": bool(getattr(user, "is_bot", False)),
+            "chat_type": getattr(chat, "type", "") or "",
+            "last_seen": now,
+            "last_event": event,
+            "message_count": int(profile.get("message_count", 0)) + 1,
+        })
+        profile.setdefault("first_seen", now)
+        user_profiles[key] = profile
+
+        if username:
+            uname = username.lower()
+            for old_name, old_chat_id in list(known_users.items()):
+                if old_chat_id == chat_id and old_name != uname:
+                    known_users.pop(old_name, None)
+            known_users[uname] = chat_id
+            _save_known_users()
+        _save_user_profiles()
+    except Exception as e:
+        print(f"Ошибка учёта пользователя: {e}")
+
+
+def _md_escape(value) -> str:
+    text = str(value or "")
+    return text.replace("\\", "\\\\").replace("`", "\\`").replace("*", "\\*").replace("_", "\\_")
+
+
+def _format_users_report(limit: int = 50) -> str:
+    """Формирует отчёт владельцу: кто пользовался ботом и когда."""
+    role_names = {"owner": "Владелец", "driver": "Водитель", "worker": "Работник", "guest": "Гость"}
+    roles_data = list_roles()
+
+    profiles = {str(k): dict(v) for k, v in user_profiles.items()}
+    for username, chat_id in known_users.items():
+        key = str(chat_id)
+        profiles.setdefault(key, {
+            "user_id": chat_id,
+            "chat_id": chat_id,
+            "username": username,
+            "first_seen": "",
+            "last_seen": "",
+            "message_count": 0,
+        })
+
+    if not profiles:
+        return "👥 Пока никто не запускал бота."
+
+    items = list(profiles.values())
+    items.sort(key=lambda p: (p.get("last_seen") or p.get("first_seen") or ""), reverse=True)
+    shown = items[:limit]
+
+    lines = [
+        "👥 *Пользователи бота*",
+        "",
+        f"Всего известно: *{len(items)}*",
+        f"Показываю последних: *{len(shown)}*",
+        "",
+    ]
+    for i, profile in enumerate(shown, 1):
+        chat_id = int(profile.get("chat_id") or profile.get("user_id") or 0)
+        username = profile.get("username") or ""
+        name = profile.get("full_name") or " ".join(
+            p for p in (profile.get("first_name"), profile.get("last_name")) if p
+        ).strip()
+        if not name:
+            name = "Без имени"
+        role = role_names.get(roles_data.get(str(chat_id), "guest"), "Гость")
+        username_label = f"@{_md_escape(username)}" if username else "_без username_"
+        first_seen = profile.get("first_seen") or "?"
+        last_seen = profile.get("last_seen") or "?"
+        count = int(profile.get("message_count", 0) or 0)
+        last_event = profile.get("last_event") or "?"
+        lines.extend([
+            f"{i}. *{_md_escape(name)}* · {username_label}",
+            f"   ID: `{chat_id}` · роль: *{role}*",
+            f"   Первый вход: `{first_seen}`",
+            f"   Последний раз: `{last_seen}` · действий: `{count}` · `{_md_escape(last_event)}`",
+            "",
+        ])
+    if len(items) > limit:
+        lines.append(f"Ещё скрыто: {len(items) - limit}.")
+    return "\n".join(lines).strip()
+
+
+def main_menu(chat_id: int | None = None):
     """Главное меню — только нужные рабочие команды."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add("🩺 Статус", "📞 Звонок")
     markup.add("📋 Задачи")
     markup.add("🔍 Саурон", "📁 Файл → Саурон")
+    if chat_id == OWNER_ID:
+        markup.add("👥 Пользователи")
     return markup
 
 
@@ -654,15 +789,7 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=inline)
 
     elif action_type == "list_users":
-        roles_data = list_roles()
-        if not known_users:
-            bot.send_message(chat_id, "👥 Пока никто не запускал бота.")
-        else:
-            role_names = {"owner": "Владелец", "driver": "Водитель", "worker": "Работник", "guest": "Гость"}
-            lines = [f"• @{u} — {role_names.get(roles_data.get(str(uid), 'guest'), 'Гость')}"
-                     for u, uid in known_users.items()]
-            bot.send_message(chat_id, "👥 *Пользователи бота:*\n\n" + "\n".join(lines),
-                             parse_mode="Markdown")
+        _btn_users(chat_id)
 
     elif action_type == "assign_role":
         if not action_param or ":" not in action_param:
@@ -1328,6 +1455,9 @@ def process_text(chat_id, text):
             "таблицы": lambda: _btn_sheets(chat_id),
             "💸 расход ии": lambda: _btn_ai_budget(chat_id),
             "расход": lambda: _btn_ai_budget(chat_id),
+            "👥 пользователи": lambda: _btn_users(chat_id),
+            "пользователи": lambda: _btn_users(chat_id),
+            "кто пользуется ботом": lambda: _btn_users(chat_id),
             "🧠 что ты умеешь?": lambda: _btn_skills(chat_id),
             "что ты умеешь?": lambda: _btn_skills(chat_id),
             "что ты умеешь": lambda: _btn_skills(chat_id),
@@ -1354,6 +1484,10 @@ def process_text(chat_id, text):
         "позвонить":             lambda: _btn_call(chat_id),
         "📋 задачи":             lambda: _btn_tasks(chat_id),
         "задачи":                lambda: _btn_tasks(chat_id),
+        "👥 пользователи":       lambda: _btn_users(chat_id),
+        "пользователи":          lambda: _btn_users(chat_id),
+        "кто пользуется ботом":  lambda: _btn_users(chat_id),
+        "кто пользуется":        lambda: _btn_users(chat_id),
         "🔍 саурон":             lambda: _btn_sauron_search(chat_id),
         "саурон":                lambda: _btn_sauron_search(chat_id),
         "📁 файл → саурон":     lambda: _btn_file_sauron(chat_id),
@@ -1370,6 +1504,14 @@ def process_text(chat_id, text):
     ]
     if any(trigger in tl for trigger in file_triggers):
         _btn_file_sauron(chat_id)
+        return
+
+    user_report_triggers = [
+        "кто пользуется ботом", "кто пользовался ботом", "список пользователей",
+        "покажи пользователей", "пользователи бота", "активность пользователей",
+    ]
+    if any(trigger in tl for trigger in user_report_triggers):
+        _btn_users(chat_id)
         return
 
     label_key = tl.strip()
@@ -1761,6 +1903,14 @@ def _btn_show_memory(chat_id):
         safe_send(chat_id, text, markup)
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Ошибка чтения памяти: {e}", reply_markup=markup)
+
+
+def _btn_users(chat_id: int):
+    """Показывает владельцу список пользователей и последнюю активность."""
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Список пользователей доступен только Руслану.", reply_markup=main_menu())
+        return
+    safe_send(chat_id, _format_users_report(), main_menu(chat_id))
 
 
 def _jarvis_exit(chat_id):
@@ -2430,11 +2580,13 @@ def handle_sheet_command(chat_id, text, mode):
 @bot.message_handler(commands=['forget'])
 def cmd_forget(message):
     chat_id = message.chat.id
+    _track_user(message, "command:/forget")
     if not is_allowed(chat_id):
         return
     grok_history.pop(chat_id, None)
+    clear_chat_summary(chat_id)
     _save_grok_history()
-    bot.send_message(chat_id, "🗑️ История разговора очищена. Начинаем с нуля!", reply_markup=main_menu())
+    bot.send_message(chat_id, "🗑️ История и краткая память диалога очищены. Начинаем с чистого листа!", reply_markup=main_menu())
 
 
 ANKETA_QUESTIONS = [
@@ -2576,7 +2728,7 @@ def _finish_anketa(chat_id):
 # ──────────────────────────────────────────────
 CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_ALLOWED_EXT = {".py", ".json", ".txt", ".md"}
-CODE_DENYLIST = {"whitelist.json", "known_users.json", "memory.json"}  # содержат приватные данные
+CODE_DENYLIST = {"whitelist.json", "known_users.json", "user_profiles.json", "memory.json"}  # содержат приватные данные
 
 def _list_code_files() -> list[str]:
     files = []
@@ -2668,6 +2820,7 @@ def cmd_code(message):
 @bot.message_handler(commands=['memory'])
 def cmd_memory(message):
     chat_id = message.chat.id
+    _track_user(message, "command:/memory")
     if chat_id != OWNER_ID:
         return
     args = message.text.strip().split(maxsplit=1)
@@ -2695,9 +2848,19 @@ def cmd_memory(message):
     safe_send(chat_id, text, main_menu())
 
 
+@bot.message_handler(commands=['users', 'userlist'])
+def cmd_users(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/users")
+    if chat_id != OWNER_ID:
+        return
+    _btn_users(chat_id)
+
+
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
+    _track_user(message, "command:/start")
     if message.from_user and message.from_user.username:
         known_users[message.from_user.username.lower()] = chat_id
         _save_known_users()
@@ -2731,7 +2894,7 @@ def start(message):
             f"Нажми *⚡ Jarvis* для командного центра\n"
             f"или просто пиши/говори — пойму сам.",
             parse_mode="Markdown",
-            reply_markup=main_menu()
+            reply_markup=main_menu(chat_id)
         )
     elif role == "worker":
         bot.send_message(chat_id, "👋 Привет! Можешь написать Руслану или просто задать вопрос.", reply_markup=worker_menu())
@@ -2742,6 +2905,7 @@ def start(message):
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     chat_id = message.chat.id
+    _track_user(message, "voice")
     if not is_allowed(chat_id):
         return
 
@@ -2809,6 +2973,7 @@ def handle_voice(message):
 def handle_audio(message):
     """Принимает аудиофайлы (MP3 и др.) и анализирует диалог."""
     chat_id = message.chat.id
+    _track_user(message, "audio")
     if not is_allowed(chat_id):
         return
 
@@ -2953,6 +3118,7 @@ def build_location_markup(lat, lon, is_live=False):
 @bot.message_handler(content_types=['location'])
 def handle_location(message):
     chat_id = message.chat.id
+    _track_user(message, "location")
     if not is_allowed(chat_id):
         return
     lat = message.location.latitude
@@ -2983,6 +3149,7 @@ def handle_location(message):
 def handle_live_location_update(message):
     """Обновления живой геолокации"""
     chat_id = message.chat.id
+    _track_user(message, "live_location")
     if message.location is None:
         return
 
@@ -2996,6 +3163,7 @@ def handle_live_location_update(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "send_geo_toha")
 def callback_send_geo(call):
+    _track_user(call.message, "callback:send_geo_toha", from_user=call.from_user)
     bot.answer_callback_query(call.id, "Раздел Тоха отключён.")
     bot.send_message(call.message.chat.id, "🚕 Раздел Тоха отключён.", reply_markup=main_menu())
 
@@ -3078,6 +3246,7 @@ def process_driver(chat_id: int, text: str):
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     chat_id = message.chat.id
+    _track_user(message, "text")
     text = message.text or ""
     # Проверка секретного кода для незарегистрированных
     if not is_allowed(chat_id):
@@ -3123,6 +3292,7 @@ def handle_document(message):
     • py / json / md  → загрузка кода (только владелец)
     """
     chat_id = message.chat.id
+    _track_user(message, "document")
     if not is_allowed(chat_id):
         return
 
@@ -3241,6 +3411,7 @@ def handle_document(message):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     chat_id = call.message.chat.id
+    _track_user(call.message, f"callback:{call.data}", from_user=call.from_user)
     bot.answer_callback_query(call.id)
 
     # ── Поиск по файлу — подтверждение (legacy callback) ─────────────────
