@@ -11,12 +11,13 @@ from telebot import types
 import os
 import time
 import io
+import hashlib
 from urllib.parse import quote
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None  # на ПК без OpenAI-ключа просто не будет TTS
-from keep_alive import keep_alive
+from keep_alive import keep_alive, configure_telegram_webhook
 from sheets import get_values, append_values, get_sheet_info, format_table
 from sms import send_geo_to_toha, send_sms_to_toha, send_sms
 from analytics import analyze_sheet_data, analyze_sheet_with_ai, register_sheet, find_sheet_id, list_sheets
@@ -39,6 +40,25 @@ import sauron_file_search
 # ──────────────────────────────────────────────────────────────────
 DEPLOYMENT_MODE = os.environ.get("DEPLOYMENT_MODE", "development").lower()
 IS_PRODUCTION = DEPLOYMENT_MODE == "production"
+
+
+def _public_base_url() -> str:
+    url = (
+        os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("TWILIO_PUBLIC_BASE_URL")
+        or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        or ""
+    ).strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url.rstrip("/")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "да"}
 
 # Бэкенд ИИ: openai (ChatGPT), grok (xAI), gemini (Google), llama (Ollama).
 # По умолчанию — openai. Переключается через LLM_BACKEND в .env.
@@ -4218,15 +4238,43 @@ if __name__ == "__main__":
     _seed_tax_reminders_safe()
     print("🚀 Ruslan Personal Helper с SMS для Тохи!")
 
-    # Сбрасываем webhook перед стартом polling.
-    # Если webhook был активен (например после смены режима) — polling без этого не заработает.
+    _mode_label = "PRODUCTION 🟢 (24/7)" if IS_PRODUCTION else "DEVELOPMENT 🟡 (только пока открыт Replit)"
+    public_base = _public_base_url()
+    force_polling = _env_flag("TELEGRAM_FORCE_POLLING", False)
+
+    if public_base and not force_polling:
+        webhook_secret = (
+            os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+            or hashlib.sha256(TOKEN.encode("utf-8")).hexdigest()[:48]
+        )
+        configure_telegram_webhook(bot, webhook_secret)
+        webhook_url = f"{public_base}/api/telegram/webhook/{webhook_secret}"
+
+        try:
+            bot.remove_webhook()
+            time.sleep(0.5)
+            try:
+                bot.set_webhook(url=webhook_url, drop_pending_updates=False)
+            except TypeError:
+                bot.set_webhook(url=webhook_url)
+            print(f"🔗 Telegram webhook готов: {public_base}/api/telegram/webhook/<secret>")
+            print(f"🕐 Webhook start | Режим: {_mode_label} | {_now_local().strftime('%Y-%m-%d %H:%M')} Kyiv")
+        except Exception as _we:
+            print(f"⚠️  Webhook не включился: {_we}. Перехожу на polling.")
+            public_base = ""
+
+        if public_base:
+            while True:
+                time.sleep(3600)
+
+    # Fallback: local/dev mode without a public URL.
+    # Railway should normally use webhook mode to avoid Telegram 409 polling conflicts.
     try:
         bot.remove_webhook()
         print("🔗 Webhook сброшен — polling готов.")
     except Exception as _we:
         print(f"⚠️  Webhook сброс не удался (не критично): {_we}")
 
-    _mode_label = "PRODUCTION 🟢 (24/7)" if IS_PRODUCTION else "DEVELOPMENT 🟡 (только пока открыт Replit)"
     print(f"🕐 Polling start | Режим: {_mode_label} | {_now_local().strftime('%Y-%m-%d %H:%M')} Kyiv")
 
     while True:
