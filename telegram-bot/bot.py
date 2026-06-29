@@ -204,7 +204,7 @@ def _dialog_report_filename(original_filename: str) -> str:
     if not base:
         base = "audio"
     ts = _now_local().strftime("%Y%m%d_%H%M")
-    return f"dialog_analysis_{base}_{ts}.md"
+    return f"dialog_analysis_{base}_{ts}.txt"
 
 
 def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, analysis: str, reply_markup=None):
@@ -215,7 +215,7 @@ def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, 
         f"- Время разбора: {_now_local().strftime('%d.%m.%Y %H:%M')} (Украина)\n\n"
         f"{(analysis or '').strip()}\n"
     )
-    report_file = io.BytesIO(report.encode("utf-8"))
+    report_file = io.BytesIO(b"\xef\xbb\xbf" + report.encode("utf-8"))
     report_file.name = _dialog_report_filename(filename)
     caption_name = filename or "audio"
     if len(caption_name) > 80:
