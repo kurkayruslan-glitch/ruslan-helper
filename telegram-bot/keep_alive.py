@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import telebot
 from flask import Flask, request, Response
 from threading import Thread
 
@@ -11,6 +12,15 @@ app = Flask(__name__)
 
 _START_TIME = time.time()
 _VOICE_CALL_SESSIONS = {}
+_TELEGRAM_BOT = None
+_TELEGRAM_WEBHOOK_SECRET = ""
+
+
+def configure_telegram_webhook(bot, secret: str):
+    """Attach the Telegram bot instance to the Flask webhook route."""
+    global _TELEGRAM_BOT, _TELEGRAM_WEBHOOK_SECRET
+    _TELEGRAM_BOT = bot
+    _TELEGRAM_WEBHOOK_SECRET = (secret or "").strip()
 
 
 @app.route('/')
@@ -29,6 +39,7 @@ def health():
         "uptime_seconds": uptime,
         "uptime_human": _fmt_uptime(uptime),
         "voice_call": "ready",
+        "telegram_updates": "webhook" if _TELEGRAM_BOT else "polling_or_not_configured",
         "note": (
             "PRODUCTION — работает 24/7 на Railway/Reserved VM"
             if mode == "production"
@@ -62,6 +73,25 @@ def twiml():
         '</Response>'
     )
     return Response(xml, mimetype='text/xml; charset=utf-8')
+
+
+@app.route('/api/telegram/webhook/<secret>', methods=['POST'])
+def telegram_webhook(secret):
+    """Receive Telegram updates on Railway so polling conflicts cannot silence the bot."""
+    if not _TELEGRAM_WEBHOOK_SECRET or secret != _TELEGRAM_WEBHOOK_SECRET:
+        return Response("forbidden", status=403, mimetype='text/plain')
+    if _TELEGRAM_BOT is None:
+        return Response("telegram bot is not configured", status=503, mimetype='text/plain')
+
+    try:
+        raw_body = request.get_data(cache=False).decode("utf-8")
+        update = telebot.types.Update.de_json(raw_body)
+        if update:
+            _TELEGRAM_BOT.process_new_updates([update])
+        return Response("ok", mimetype='text/plain')
+    except Exception as e:
+        print(f"telegram webhook error: {e}")
+        return Response("error", status=500, mimetype='text/plain')
 
 
 @app.route('/api/voice/start', methods=['GET', 'POST'])
