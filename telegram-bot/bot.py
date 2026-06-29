@@ -196,6 +196,35 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
                 bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
 
 
+def _dialog_progress_text(filename: str, percent: int, stage: str, detail: str = "") -> str:
+    percent = max(0, min(100, int(percent)))
+    filled = round(percent / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    clean_name = (filename or "audio").replace("\n", " ").strip()
+    if len(clean_name) > 70:
+        clean_name = clean_name[:67] + "..."
+    lines = [
+        f"⏳ Обработка аудио: {clean_name}",
+        f"[{bar}] {percent}%",
+        stage,
+    ]
+    if detail:
+        lines.append(detail)
+    return "\n".join(lines)
+
+
+def _set_dialog_progress(chat_id: int, message_id: int | None, filename: str, percent: int, stage: str, detail: str = "") -> int:
+    text = _dialog_progress_text(filename, percent, stage, detail)
+    if not message_id:
+        return bot.send_message(chat_id, text).message_id
+    try:
+        bot.edit_message_text(text, chat_id, message_id)
+    except Exception as e:
+        if "message is not modified" not in str(e).lower():
+            print(f"Не удалось обновить прогресс аудио: {e}")
+    return message_id
+
+
 def _dialog_report_filename(original_filename: str) -> str:
     base = os.path.splitext(os.path.basename(original_filename or "audio"))[0]
     base = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", base).strip("_")
@@ -395,31 +424,52 @@ _DIALOG_ANALYSIS_SYSTEM = (
 )
 
 
-def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
+def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progress_message_id: int | None = None):
     """Расшифровывает аудиофайл через Whisper и анализирует диалог через текущий LLM."""
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
 
     if not voice_openai_client:
-        safe_send(
-            chat_id,
-            "❌ *Для анализа MP3/аудио нужен прямой OPENAI_API_KEY.*\n\n"
+        error_text = (
+            "❌ Для анализа MP3/аудио нужен прямой OPENAI_API_KEY.\n\n"
             "Добавь его в Railway Variables и перезапусти деплой.\n"
-            "_(Голосовой Whisper не работает через Replit AI proxy — нужен именно прямой ключ)_",
-            markup,
+            "(Голосовой Whisper не работает через Replit AI proxy — нужен именно прямой ключ)"
         )
+        if progress_message_id:
+            bot.edit_message_text(error_text, chat_id, progress_message_id)
+        else:
+            safe_send(chat_id, error_text, markup)
         return
 
     if len(audio_bytes) > _DIALOG_AUDIO_MAX_BYTES:
         limit_mb = _DIALOG_AUDIO_MAX_BYTES // (1024 * 1024)
-        safe_send(chat_id, f"❌ Файл слишком большой. Лимит — {limit_mb} МБ (задай DIALOG_AUDIO_MAX_BYTES чтобы изменить).", markup)
+        error_text = f"❌ Файл слишком большой. Лимит — {limit_mb} МБ (задай DIALOG_AUDIO_MAX_BYTES чтобы изменить)."
+        if progress_message_id:
+            bot.edit_message_text(error_text, chat_id, progress_message_id)
+        else:
+            safe_send(chat_id, error_text, markup)
         return
 
-    msg = bot.send_message(chat_id, "🎙️ Расшифровываю запись через Whisper…")
+    progress_message_id = _set_dialog_progress(
+        chat_id,
+        progress_message_id,
+        filename,
+        25,
+        "🎙️ Отправляю запись в Whisper...",
+        "Распознаю речь и таймкоды.",
+    )
     try:
         ext = os.path.splitext(filename)[1].lower() or ".mp3"
         audio_io = io.BytesIO(audio_bytes)
         audio_io.name = filename
 
+        _set_dialog_progress(
+            chat_id,
+            progress_message_id,
+            filename,
+            35,
+            "🎙️ Whisper слушает запись...",
+            "На длинных файлах это может занять пару минут.",
+        )
         transcript_obj = voice_openai_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_io,
@@ -431,13 +481,17 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
         if not transcript:
             bot.edit_message_text(
                 "⚠️ Не удалось расшифровать. Убедись что в файле есть речь.",
-                chat_id, msg.message_id,
+                chat_id, progress_message_id,
             )
             return
 
-        bot.edit_message_text(
-            f"📝 Расшифровка готова ({len(transcript)} симв.). Делаю анализ и подготовлю файл…",
-            chat_id, msg.message_id,
+        _set_dialog_progress(
+            chat_id,
+            progress_message_id,
+            filename,
+            55,
+            f"📝 Расшифровка готова ({len(transcript)} симв.).",
+            "Готовлю текст для глубокого анализа.",
         )
 
         bot.send_chat_action(chat_id, "typing")
@@ -448,6 +502,14 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
                 + "\n\n[СЕРЕДИНА ТРАНСКРИПТА СОКРАЩЕНА: запись слишком длинная для одного LLM-анализа]\n\n"
                 + analysis_transcript[-10000:]
             )
+        _set_dialog_progress(
+            chat_id,
+            progress_message_id,
+            filename,
+            70,
+            "🧠 Анализирую диалог...",
+            "Определяю роли, ошибки, сильные фразы и что улучшить.",
+        )
         analysis = ask_grok(
             "Сделай полный разбор аудиозаписи строго по формату из системной инструкции.\n"
             f"Файл: {filename}\n"
@@ -459,12 +521,24 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
             memory_block=_DIALOG_ANALYSIS_SYSTEM,
         )
 
-        try:
-            bot.edit_message_text("✅ Разбор готов. Отправляю аналитику файлом…", chat_id, msg.message_id)
-        except Exception:
-            pass
+        _set_dialog_progress(
+            chat_id,
+            progress_message_id,
+            filename,
+            90,
+            "📄 Разбор готов.",
+            "Собираю TXT-файл и отправляю в чат.",
+        )
         bot.send_chat_action(chat_id, "upload_document")
         _send_dialog_analysis_file(chat_id, filename, duration_text, analysis, markup)
+        _set_dialog_progress(
+            chat_id,
+            progress_message_id,
+            filename,
+            100,
+            "✅ Готово.",
+            "Файл с аналитикой отправлен ниже.",
+        )
 
     except Exception as e:
         err = str(e)
@@ -480,7 +554,7 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
         else:
             hint = f"Ошибка обработки: {err[:200]}"
         try:
-            bot.edit_message_text(f"❌ {hint}", chat_id, msg.message_id)
+            bot.edit_message_text(f"❌ {hint}", chat_id, progress_message_id)
         except Exception:
             safe_send(chat_id, f"❌ {hint}", markup)
 
@@ -3206,20 +3280,18 @@ def handle_audio(message):
     audio = message.audio
     filename = (audio.file_name or f"audio.mp3").strip()
 
-    msg_dl = bot.send_message(chat_id, f"📥 Скачиваю *{filename}*…", parse_mode="Markdown")
+    msg_dl = bot.send_message(chat_id, _dialog_progress_text(filename, 5, "📥 Получаю файл из Telegram..."))
     try:
+        _set_dialog_progress(chat_id, msg_dl.message_id, filename, 10, "📥 Скачиваю файл...")
         file_info = bot.get_file(audio.file_id)
         audio_bytes = bot.download_file(file_info.file_path)
+        size_mb = len(audio_bytes) / (1024 * 1024)
+        _set_dialog_progress(chat_id, msg_dl.message_id, filename, 20, "✅ Файл скачан.", f"Размер: {size_mb:.1f} МБ")
     except Exception as e:
         bot.edit_message_text(f"❌ Не смог скачать файл: {e}", chat_id, msg_dl.message_id)
         return
 
-    try:
-        bot.delete_message(chat_id, msg_dl.message_id)
-    except Exception:
-        pass
-
-    _analyze_dialog_audio(chat_id, audio_bytes, filename)
+    _analyze_dialog_audio(chat_id, audio_bytes, filename, msg_dl.message_id)
 
 
 def _run_file_sauron(chat_id: int, doc, filename: str):
@@ -3528,18 +3600,17 @@ def handle_document(message):
 
     # ── Роутинг: аудиофайлы → анализ диалога ─────────────────────────────
     if _is_audio_doc(filename, getattr(doc, 'mime_type', None)):
-        msg_dl = bot.send_message(chat_id, f"📥 Скачиваю *{filename}*…", parse_mode="Markdown")
+        msg_dl = bot.send_message(chat_id, _dialog_progress_text(filename, 5, "📥 Получаю файл из Telegram..."))
         try:
+            _set_dialog_progress(chat_id, msg_dl.message_id, filename, 10, "📥 Скачиваю файл...")
             file_info = bot.get_file(doc.file_id)
             audio_bytes = bot.download_file(file_info.file_path)
+            size_mb = len(audio_bytes) / (1024 * 1024)
+            _set_dialog_progress(chat_id, msg_dl.message_id, filename, 20, "✅ Файл скачан.", f"Размер: {size_mb:.1f} МБ")
         except Exception as e:
             bot.edit_message_text(f"❌ Не смог скачать файл: {e}", chat_id, msg_dl.message_id)
             return
-        try:
-            bot.delete_message(chat_id, msg_dl.message_id)
-        except Exception:
-            pass
-        _analyze_dialog_audio(chat_id, audio_bytes, filename)
+        _analyze_dialog_audio(chat_id, audio_bytes, filename, msg_dl.message_id)
         return
 
     # ── Роутинг: Sauron ───────────────────────────────────────────────────
