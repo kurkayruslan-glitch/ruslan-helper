@@ -196,6 +196,38 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
                 bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
 
 
+def _dialog_report_filename(original_filename: str) -> str:
+    base = os.path.splitext(os.path.basename(original_filename or "audio"))[0]
+    base = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", base).strip("_")
+    if len(base) > 40:
+        base = base[:40].strip("_")
+    if not base:
+        base = "audio"
+    ts = _now_local().strftime("%Y%m%d_%H%M")
+    return f"dialog_analysis_{base}_{ts}.md"
+
+
+def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, analysis: str, reply_markup=None):
+    report = (
+        "# Анализ аудиозаписи разговора\n\n"
+        f"- Исходный файл: {filename or 'audio'}\n"
+        f"- Длительность по Whisper: {duration_text or 'не определена'}\n"
+        f"- Время разбора: {_now_local().strftime('%d.%m.%Y %H:%M')} (Украина)\n\n"
+        f"{(analysis or '').strip()}\n"
+    )
+    report_file = io.BytesIO(report.encode("utf-8"))
+    report_file.name = _dialog_report_filename(filename)
+    caption_name = filename or "audio"
+    if len(caption_name) > 80:
+        caption_name = caption_name[:77] + "..."
+    bot.send_document(
+        chat_id,
+        report_file,
+        caption=f"📄 Готово — анализ диалога файлом\n{caption_name}",
+        reply_markup=reply_markup,
+    )
+
+
 def _tts_send_voice(chat_id: int, text: str):
     """Конвертирует текст в голос через OpenAI TTS (прямой ключ) и отправляет голосовым."""
     if not voice_openai_client:
@@ -403,19 +435,10 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
             )
             return
 
-        preview = transcript[:250] + ("…" if len(transcript) > 250 else "")
-        preview_text = f"📝 Расшифровка готова ({len(transcript)} симв.)\n\n_{preview}_"
-        try:
-            bot.edit_message_text(
-                preview_text,
-                chat_id, msg.message_id,
-                parse_mode="Markdown",
-            )
-        except Exception:
-            bot.edit_message_text(
-                f"📝 Расшифровка готова ({len(transcript)} симв.)\n\n{preview}",
-                chat_id, msg.message_id,
-            )
+        bot.edit_message_text(
+            f"📝 Расшифровка готова ({len(transcript)} симв.). Делаю анализ и подготовлю файл…",
+            chat_id, msg.message_id,
+        )
 
         bot.send_chat_action(chat_id, "typing")
         analysis_transcript = timed_transcript or transcript
@@ -436,8 +459,12 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str):
             memory_block=_DIALOG_ANALYSIS_SYSTEM,
         )
 
-        header = f"🎙️ *Анализ диалога: {filename}*\n{'─' * 32}\n\n"
-        safe_send(chat_id, header + analysis, markup)
+        try:
+            bot.edit_message_text("✅ Разбор готов. Отправляю аналитику файлом…", chat_id, msg.message_id)
+        except Exception:
+            pass
+        bot.send_chat_action(chat_id, "upload_document")
+        _send_dialog_analysis_file(chat_id, filename, duration_text, analysis, markup)
 
     except Exception as e:
         err = str(e)
