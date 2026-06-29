@@ -10,6 +10,7 @@ OPENAI_API_KEY = _DIRECT_OPENAI_KEY
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "2200"))
 AUDIO_ANALYSIS_MAX_TOKENS = int(os.environ.get("OPENAI_AUDIO_ANALYSIS_MAX_TOKENS", "7000"))
+VOICE_CALL_MAX_TOKENS = int(os.environ.get("OPENAI_VOICE_CALL_MAX_TOKENS", "220"))
 
 _explicit_base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
 _proxy_base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL", "").strip()
@@ -66,7 +67,12 @@ def ask_grok(user_message: str, history: list = None, memory_block: str = "") ->
                  if isinstance(m, dict) and "role" in m and "content" in m]
         messages.extend(valid)
     messages.append({"role": "user", "content": str(user_message)})
-    max_tokens = AUDIO_ANALYSIS_MAX_TOKENS if "Анализ аудиозаписи разговора" in memory_block else None
+    if "Анализ аудиозаписи разговора" in memory_block:
+        max_tokens = AUDIO_ANALYSIS_MAX_TOKENS
+    elif "голосовой помощник Руслана в телефонном звонке" in memory_block:
+        max_tokens = VOICE_CALL_MAX_TOKENS
+    else:
+        max_tokens = None
     return _call_api(messages, max_tokens=max_tokens)
 
 
