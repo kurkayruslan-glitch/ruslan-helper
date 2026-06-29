@@ -8,6 +8,8 @@ _DIRECT_OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 _PROXY_OPENAI_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY", "").strip()
 OPENAI_API_KEY = _DIRECT_OPENAI_KEY
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "2200"))
+AUDIO_ANALYSIS_MAX_TOKENS = int(os.environ.get("OPENAI_AUDIO_ANALYSIS_MAX_TOKENS", "7000"))
 
 _explicit_base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
 _proxy_base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL", "").strip()
@@ -21,10 +23,11 @@ else:
 HISTORY_WINDOW = 20
 
 
-def _call_api(messages: list, max_tokens: int = 2200) -> str:
+def _call_api(messages: list, max_tokens: int = None) -> str:
     key = _DIRECT_OPENAI_KEY or _PROXY_OPENAI_KEY
     if not key:
         return "❌ OpenAI не настроен — добавь OPENAI_API_KEY в Railway Variables"
+    max_tokens = max_tokens or DEFAULT_MAX_TOKENS
     try:
         resp = requests.post(
             f"{OPENAI_BASE_URL}/chat/completions",
@@ -63,7 +66,8 @@ def ask_grok(user_message: str, history: list = None, memory_block: str = "") ->
                  if isinstance(m, dict) and "role" in m and "content" in m]
         messages.extend(valid)
     messages.append({"role": "user", "content": str(user_message)})
-    return _call_api(messages)
+    max_tokens = AUDIO_ANALYSIS_MAX_TOKENS if "Анализ аудиозаписи разговора" in memory_block else None
+    return _call_api(messages, max_tokens=max_tokens)
 
 
 def analyze_sheet_with_grok(sheet_title: str, headers: list,
