@@ -1228,6 +1228,85 @@ def _profile_for_chat_id(chat_id: int) -> dict:
     return {}
 
 
+def _actor_id_for_request(chat_id: int, from_user=None) -> int:
+    try:
+        user_id = int(getattr(from_user, "id", 0) or 0)
+        if user_id:
+            return user_id
+    except Exception:
+        pass
+    try:
+        return int(chat_id)
+    except Exception:
+        return 0
+
+
+def _profile_from_user(from_user=None, fallback_chat_id: int | None = None) -> dict:
+    actor_id = _actor_id_for_request(fallback_chat_id or 0, from_user)
+    profile = dict(_profile_for_chat_id(actor_id)) if actor_id else {}
+    if from_user:
+        username = (getattr(from_user, "username", None) or "").strip()
+        first_name = (getattr(from_user, "first_name", None) or "").strip()
+        last_name = (getattr(from_user, "last_name", None) or "").strip()
+        full_name = " ".join(p for p in (first_name, last_name) if p).strip()
+        profile.update({
+            "user_id": actor_id,
+            "chat_id": actor_id,
+            "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
+            "full_name": full_name,
+            "language_code": getattr(from_user, "language_code", "") or "",
+            "is_bot": bool(getattr(from_user, "is_bot", False)),
+        })
+        if username:
+            _apply_pinned_profile_rule(profile, username)
+    return profile
+
+
+def _actor_identity_block(chat_id: int, from_user=None) -> str:
+    actor_id = _actor_id_for_request(chat_id, from_user)
+    profile = _profile_from_user(from_user, actor_id)
+    username = str(profile.get("username") or "").strip()
+    display_name = _profile_display_name(profile, "").strip()
+    role = "owner" if actor_id == OWNER_ID else get_role(actor_id)
+    role_label = {
+        "owner": "владелец",
+        "worker": "работник",
+        "driver": "водитель",
+        "guest": "гость",
+    }.get(role, role or "guest")
+
+    handle = f"@{username}" if username else ""
+    name_part = " / ".join(p for p in (display_name, handle) if p)
+    if not name_part:
+        name_part = f"id {actor_id}" if actor_id else "неизвестный пользователь"
+
+    lines = ["Текущий собеседник:"]
+    if actor_id == OWNER_ID:
+        lines.append("- Это Руслан, владелец бота. Можно обращаться к нему как к Руслану.")
+        lines.append("- Его личные факты, семья, бизнес и задачи относятся к текущему собеседнику.")
+    else:
+        lines.append(f"- Это НЕ Руслан. Это другой пользователь бота: {name_part}.")
+        lines.append(f"- Роль пользователя: {role_label}.")
+        lines.append("- Руслан — владелец бота и отдельный человек. Говори о Руслане в третьем лице.")
+        lines.append("- Не называй текущего пользователя Русланом и не применяй к нему факты Руслана: жена, дочь, бизнес, водитель, ФОП, кошельки, ПК.")
+        lines.append("- Не выполняй действия от имени Руслана для этого пользователя: SMS, звонки, CRM, ПК, код, роли, память владельца.")
+        lines.append("- Если пользователь хочет связаться с Русланом, помоги ему написать/позвонить Руслану доступным способом.")
+
+    try:
+        if actor_id and int(chat_id) != int(actor_id):
+            lines.append("- Сообщение пришло из группы: отвечай автору сообщения, а не группе как будто это Руслан.")
+    except Exception:
+        pass
+
+    display_rule = str(profile.get("display_rule") or "").strip()
+    if display_rule:
+        lines.append(f"- Особое правило обращения: {display_rule}")
+
+    return "\n".join(lines) + "\n"
+
+
 def _display_name_for_chat_id(chat_id: int, fallback: str = "работник") -> str:
     profile = _profile_for_chat_id(chat_id)
     display_name = _profile_display_name(profile, "")
@@ -1470,8 +1549,23 @@ def _parse_action(reply: str) -> tuple[str | None, str | None, str]:
     return None, None, reply
 
 
-def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None):
+def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None, actor_id: int | None = None):
     """Выполняет действие из ACTION-тега Grok."""
+    try:
+        actual_actor_id = int(actor_id if actor_id is not None else chat_id)
+    except Exception:
+        actual_actor_id = int(chat_id) if str(chat_id).lstrip("-").isdigit() else 0
+    owner_only_actions = {
+        "send_sms", "call_wife", "call_toha", "sms_toha",
+        "assign_role", "remember", "recall", "forget_fact", "forget_all_facts",
+        "show_code", "list_code", "open_url", "search_files", "search_content",
+        "screenshot", "screenshot_site", "open_folder", "launch_app", "close_app",
+        "list_apps", "crm_expense", "call_restaurant", "sheet_analytics", "sheets_list",
+    }
+    if actual_actor_id != OWNER_ID and action_type in owner_only_actions:
+        safe_send(chat_id, "Это действие только для Руслана.", _reply_markup_for_chat(chat_id))
+        return
+
     disabled_actions = {
         "call_toha", "sms_toha", "sheet_analytics", "sheets_list",
         "open_url", "search_files", "search_content", "screenshot",
@@ -1900,21 +1994,14 @@ def _schedule_chat_memory_update(chat_id: int, user_text: str, assistant_text: s
         logger.exception("Chat memory worker start failed: %s", e)
 
 
-def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
+def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = "", from_user=None):
     """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
     history = grok_history.get(chat_id, [])
+    actor_id = _actor_id_for_request(chat_id, from_user)
     memory_block = format_for_prompt() + format_chat_summary_for_prompt(chat_id)
     if extra_memory:
         memory_block += "\n\nКонтекст рабочей группы:\n" + extra_memory.strip() + "\n"
-    profile = _profile_for_chat_id(chat_id)
-    custom_name = str(profile.get("custom_name") or "").strip()
-    display_rule = str(profile.get("display_rule") or "").strip()
-    if custom_name:
-        memory_block = (
-            f'Профиль текущего пользователя: обращайся к нему только как "{custom_name}".\n'
-            + (display_rule + "\n" if display_rule else "")
-            + memory_block
-        )
+    memory_block = _actor_identity_block(chat_id, from_user) + memory_block
     # Добавляем текущую дату и время, чтобы Grok правильно рассчитывал относительные сроки
     now = _now_local()
     tz = _ukraine_tz_hours()
@@ -1974,7 +2061,7 @@ def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
     new_facts, reply_without_remember = _extract_remember_tags(reply)
     remember_matches = []  # обработано ниже — post-conflict код становится no-op
     saved_count = 0
-    if chat_id == OWNER_ID:
+    if actor_id == OWNER_ID:
         for fact in new_facts:
             if add_fact(fact.strip()):
                 saved_count += 1
@@ -2000,10 +2087,10 @@ def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
 
     # Выполняем основное действие (если есть)
     if action_type == "forget":
-        _handle_grok_action(chat_id, action_type, action_param)
+        _handle_grok_action(chat_id, action_type, action_param, actor_id=actor_id)
         return  # forget сам выводит сообщение
     if action_type:
-        _handle_grok_action(chat_id, action_type, action_param)
+        _handle_grok_action(chat_id, action_type, action_param, actor_id=actor_id)
 
     _schedule_chat_memory_update(chat_id, text, assistant_memory_text)
 
@@ -2019,7 +2106,7 @@ def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
         bot.send_message(chat_id, f"🧠 Запомнил {saved_count} {noun}.")
 
 
-def process_text(chat_id, text):
+def process_text(chat_id, text, from_user=None):
     import re
     t = text.strip()
     tl = t.lower()
@@ -2224,7 +2311,7 @@ def process_text(chat_id, text):
                              "Нажми *💰 USDT крипто* и попробуй снова.",
                              parse_mode="Markdown")
             return
-        _handle_grok_action(chat_id, "usdt", address)
+        _handle_grok_action(chat_id, "usdt", address, actor_id=_actor_id_for_request(chat_id, from_user))
         return
 
     # ══════════════════════════════════════════════════════════════════
@@ -2291,7 +2378,7 @@ def process_text(chat_id, text):
             ai_chat_mode.discard(chat_id)
             bot.send_message(chat_id, "👋 Вышли из ИИ-чата. Главное меню:", reply_markup=main_menu())
             return
-        _ask_grok_and_route(chat_id, t)
+        _ask_grok_and_route(chat_id, t, from_user=from_user)
         return
 
     # ══════════════════════════════════════════════════════════════════
@@ -2350,7 +2437,7 @@ def process_text(chat_id, text):
             _JARVIS_SHORTCUTS[cmd]()
             return
         # Всё остальное — в LLM с Jarvis-контекстом
-        _ask_grok_and_route(chat_id, t)
+        _ask_grok_and_route(chat_id, t, from_user=from_user)
         return
 
     BUTTON_LABELS = {
@@ -2400,7 +2487,7 @@ def process_text(chat_id, text):
     # ══════════════════════════════════════════════════════════════════
     # 3. ВСЁ ОСТАЛЬНОЕ → GROK (основной AI-мозг)
     # ══════════════════════════════════════════════════════════════════
-    _ask_grok_and_route(chat_id, t)
+    _ask_grok_and_route(chat_id, t, from_user=from_user)
 
 
 # ── Вспомогательные функции для кнопок ───────────────────────────────────────
@@ -4050,12 +4137,12 @@ def handle_voice(message):
             if not should_answer_in_group(message, BOT_USERNAME):
                 bot.edit_message_text("🎙️ Голосовое расшифровано и добавлено в память группы.", chat_id, msg.message_id)
                 return
-            _ask_grok_and_route(chat_id, text, extra_memory=recent_context(chat_id))
+            _ask_grok_and_route(chat_id, text, extra_memory=recent_context(chat_id), from_user=message.from_user)
             return
 
         voice_request_chats.add(chat_id)
         try:
-            process_text(chat_id, text)
+            process_text(chat_id, text, from_user=message.from_user)
         finally:
             voice_request_chats.discard(chat_id)
 
@@ -4277,7 +4364,7 @@ def callback_send_geo(call):
     bot.send_message(call.message.chat.id, "🚕 Раздел Тоха отключён.", reply_markup=main_menu())
 
 
-def process_worker(chat_id: int, text: str):
+def process_worker(chat_id: int, text: str, from_user=None):
     """Обработка команд для рабочего — аналитика + звонок Руслану"""
     raw_text = str(text or "").strip()
     t = raw_text.lower()
@@ -4338,6 +4425,7 @@ def process_worker(chat_id: int, text: str):
                 "Не отправляй его к кнопкам, если он задал обычный вопрос. "
                 "Если он явно хочет связаться с Русланом, подскажи кнопку 'Позвонить Руслану'."
             ),
+            from_user=from_user,
         )
 
 
@@ -4402,7 +4490,7 @@ def handle_message(message):
         if direct_sauron_query is not None:
             _run_sauron_search(chat_id, direct_sauron_query, reply_markup=None)
             return
-        _ask_grok_and_route(chat_id, group_question, extra_memory=recent_context(chat_id))
+        _ask_grok_and_route(chat_id, group_question, extra_memory=recent_context(chat_id), from_user=message.from_user)
         return
 
     if not is_allowed(chat_id):
@@ -4414,9 +4502,9 @@ def handle_message(message):
         return
     role = get_role(chat_id)
     if role == "worker":
-        process_worker(chat_id, text)
+        process_worker(chat_id, text, from_user=message.from_user)
     else:
-        process_text(chat_id, text)
+        process_text(chat_id, text, from_user=message.from_user)
 
 
 CODE_MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 МБ хватит на любой .py
