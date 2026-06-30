@@ -688,6 +688,8 @@ _DIALOG_ANALYSIS_SYSTEM = (
     "не учи выманивать их обманом, угрозами, шантажом, подделкой полномочий или незаконным давлением. Давай только "
     "жёсткие, настойчивые, но законные и прозрачные способы: "
     "объяснение цели, регламента, объёма данных, последствий отказа, согласие, официальный канал или личная сверка.\n\n"
+    "Контекст для всех аудиоразборов: это Днепровский офис. Учитывай это при определении ролей, места и рабочей "
+    "ситуации, но не выдумывай факты, которых нет в транскрипте.\n\n"
     "ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА:\n\n"
     "# Анализ аудиозаписи разговора\n\n"
     "Файл: `...`\n"
@@ -761,7 +763,7 @@ _DIALOG_ANALYSIS_SYSTEM = (
 
 
 def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progress_message_id: int | None = None):
-    """Расшифровывает аудиофайл через Whisper и анализирует диалог через текущий LLM."""
+    """Расшифровывает аудиофайл через Whisper и анализирует диалог через Kryven."""
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
 
     if not voice_openai_client:
@@ -769,6 +771,17 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
             "❌ Для анализа MP3/аудио нужен прямой OPENAI_API_KEY.\n\n"
             "Добавь его в Railway Variables и перезапусти деплой.\n"
             "(Голосовой Whisper не работает через Replit AI proxy — нужен именно прямой ключ)"
+        )
+        if progress_message_id:
+            bot.edit_message_text(error_text, chat_id, progress_message_id)
+        else:
+            safe_send(chat_id, error_text, markup)
+        return
+
+    if ask_kryven is None or not kryven_available():
+        error_text = (
+            "❌ Для разбора диалога через Kryven нужен KRYVEN_API_KEY в Railway Variables.\n\n"
+            "Расшифровка mp3 идёт через OpenAI Whisper, а глубокий отчёт теперь делает Kryven."
         )
         if progress_message_id:
             bot.edit_message_text(error_text, chat_id, progress_message_id)
@@ -843,11 +856,12 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
             progress_message_id,
             filename,
             70,
-            "🧠 Анализирую диалог...",
-            "Определяю роли, ошибки, сильные фразы и что улучшить.",
+            "🧠 Kryven анализирует диалог...",
+            "Передаю расшифровку в Kryven с контекстом: Днепровский офис.",
         )
-        analysis = ask_grok(
+        analysis = ask_kryven(
             "Сделай полный разбор аудиозаписи строго по формату из системной инструкции.\n"
+            "Контекст: это Днепровский офис.\n"
             f"Файл: {filename}\n"
             f"Длительность по Whisper: {duration_text or 'не определена'}\n"
             f"Размер файла: {len(audio_bytes)} байт\n\n"
@@ -881,7 +895,9 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
     except Exception as e:
         err = str(e)
         print(f"Ошибка анализа аудио ({filename}): {err}")
-        if "401" in err or "incorrect api key" in err.lower() or ("auth" in err.lower() and "key" in err.lower()):
+        if "kryven" in err.lower() and ("401" in err or "ключ" in err.lower() or "api key" in err.lower()):
+            hint = "Неверный KRYVEN_API_KEY — проверь ключ в Railway Variables."
+        elif "401" in err or "incorrect api key" in err.lower() or ("auth" in err.lower() and "key" in err.lower()):
             hint = "Неверный OPENAI_API_KEY — проверь ключ в Railway Variables."
         elif "413" in err or "too large" in err.lower() or "maximum" in err.lower():
             hint = "Файл слишком большой для Whisper API. Попробуй обрезать запись."
