@@ -17,6 +17,22 @@ from urllib.parse import quote
 from config import CONFIG, env_bool, local_now, ukraine_tz_hours
 from logging_setup import setup_logging
 from safe_json import read_json_file, write_json_file
+from dialog_reports import (
+    DIALOG_AUDIO_EXTS,
+    build_dialog_report_html,
+    build_local_dialog_fallback_report,
+    clean_dialog_analysis_markdown,
+    compact_dialog_transcript,
+    dialog_analysis_is_meaningful,
+    dialog_progress_text,
+    dialog_report_filename,
+    fmt_audio_time,
+    format_whisper_transcript,
+    is_audio_doc,
+    is_llm_error,
+    markdown_to_report_html,
+    split_dialog_transcript,
+)
 
 logger = setup_logging("ruslan-helper.bot")
 try:
@@ -134,7 +150,7 @@ else:
 # Лимит размера аудиофайла для анализа диалога (по умолчанию 24 МБ)
 _DIALOG_AUDIO_MAX_BYTES = CONFIG.dialog_audio_max_bytes
 # Расширения аудиофайлов, которые отправляются на анализ диалога
-_DIALOG_AUDIO_EXTS = {'.mp3', '.m4a', '.wav', '.ogg', '.oga', '.opus', '.aac', '.flac', '.webm'}
+_DIALOG_AUDIO_EXTS = DIALOG_AUDIO_EXTS
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -799,6 +815,44 @@ def _format_whisper_transcript(transcript_obj) -> tuple[str, str, str]:
     timed_text = "\n".join(timed_lines).strip() or text
     duration_text = _fmt_audio_time(duration) if duration not in ("", None) else ""
     return text, timed_text, duration_text
+
+
+# Новая реализация отчётов и форматирования вынесена в dialog_reports.py.
+# Старые функции выше оставлены как страховка на время мягкой миграции.
+_dialog_progress_text = dialog_progress_text
+_clean_dialog_analysis_markdown = clean_dialog_analysis_markdown
+_markdown_to_report_html = markdown_to_report_html
+_dialog_analysis_is_meaningful = dialog_analysis_is_meaningful
+_build_local_dialog_fallback_report = build_local_dialog_fallback_report
+_is_audio_doc = is_audio_doc
+_fmt_audio_time = fmt_audio_time
+_format_whisper_transcript = format_whisper_transcript
+_is_llm_error = is_llm_error
+_compact_dialog_transcript = compact_dialog_transcript
+_split_dialog_transcript = split_dialog_transcript
+
+
+def _dialog_report_filename(original_filename: str) -> str:
+    return dialog_report_filename(original_filename, _now_local())
+
+
+def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) -> str:
+    return build_dialog_report_html(filename, duration_text, analysis, generated_at=_now_local())
+
+
+def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, analysis: str, reply_markup=None):
+    report = _build_dialog_report_html(filename, duration_text, analysis)
+    report_file = io.BytesIO(b"\xef\xbb\xbf" + report.encode("utf-8"))
+    report_file.name = _dialog_report_filename(filename)
+    caption_name = filename or "audio"
+    if len(caption_name) > 80:
+        caption_name = caption_name[:77] + "..."
+    bot.send_document(
+        chat_id,
+        report_file,
+        caption=f"📊 Готово — красивый HTML-отчёт\n{caption_name}",
+        reply_markup=reply_markup,
+    )
 
 
 _DIALOG_ANALYSIS_SYSTEM = (
