@@ -81,9 +81,10 @@ else:
     from chatgpt import ask_grok
     print("🧠 LLM backend: openai (ChatGPT)")
 try:
-    from kryven import ask_kryven, kryven_available
+    from kryven import ask_kryven, ask_kryven_dialog_analysis, kryven_available
 except Exception as e:
     ask_kryven = None
+    ask_kryven_dialog_analysis = None
     def kryven_available() -> bool:
         return False
     print(f"🧠 Kryven backend unavailable: {e}")
@@ -762,6 +763,171 @@ _DIALOG_ANALYSIS_SYSTEM = (
 )
 
 
+_DIALOG_ANALYSIS_KRYVEN_SYSTEM = (
+    "Ты — эксперт по переговорам и разбору звонков. Делай профессиональный отчёт на русском языке. "
+    "Контекст: это Днепровский офис. Учитывай это как рабочий контекст, но не выдумывай факты.\n\n"
+    "Главный объект анализа — тот, кто собирает информацию. Определи его по смыслу разговора, а не по полу, "
+    "громкости или метке Speaker 1/Speaker 2. Оцени, какие данные он хотел взять, что получил, что упустил, "
+    "где потерял контроль, какие вопросы должен был задать и какими законными фразами мог дожать до результата. "
+    "Если речь о персональных, банковских, паспортных или других чувствительных данных — не учи обману, угрозам, "
+    "шантажу или незаконному давлению. Давай только настойчивые, прозрачные и законные способы: цель, регламент, "
+    "согласие, официальный канал, последствия отказа, личная сверка.\n\n"
+    "Формат отчёта строго такой:\n"
+    "# Анализ аудиозаписи разговора\n"
+    "Файл, длительность, качество, условные обозначения спикеров, главный объект анализа.\n\n"
+    "## Этап 1. Расшифровка\n"
+    "Таблица `| Время | Спикер | Реплика |`. Сохраняй ключевые повороты, отказы, возражения, эмоции и итог.\n\n"
+    "## Этап 2. Общая оценка\n"
+    "Цель разговора, достигнута ли цель, кто контролировал диалог, кто увереннее/слабее, эмоциональный фон. "
+    "Отдельно: что инфо-сборщик хотел получить, что реально получил, что не получил, почему, процент закрытия цели.\n\n"
+    "## Этап 3. Подробный анализ важных реплик\n"
+    "Таблица `| Время | Реплика | Оценка | Эмоция и реакция | Психология и приёмы | Ошибка/манипуляция | Как лучше |`.\n\n"
+    "## Этап 4. Таблица ошибок\n"
+    "Таблица `| Ошибка | Кто сделал | Где видно | Почему плохо | Как исправить |`. Для ошибок инфо-сборщика давай сильную законную фразу.\n\n"
+    "## Этап 5. Анализ переговорщиков\n"
+    "По каждому спикеру: роль, цель, сильные стороны, слабые стороны, ключевые ошибки, что делать иначе. "
+    "Для инфо-сборщика добавь: какие данные упустил, где обязан был дожать, следующий вопрос, как закрыть сопротивление.\n\n"
+    "## Этап 6. Психология\n"
+    "Триггеры, борьба за контроль, давление, неуверенность, возможная ложь без категоричных обвинений, раздражение, потеря контроля.\n\n"
+    "## Этап 7. Лучшие и худшие моменты\n"
+    "ТОП-10 лучших и ТОП-10 худших реплик с причинами.\n\n"
+    "## Этап 8. Как разговор мог провести профессиональный переговорщик\n"
+    "Идеальный короткий диалог без обмана, угроз и хаоса: признание опасений, регламент, варианты выбора, официальный канал.\n\n"
+    "## Этап 9. Итог\n"
+    "Главные ошибки, сильные стороны, что изменить, что тренировать, книги, упражнения, уровень переговорщиков, план развития на 30 дней.\n\n"
+    "## Короткий финальный вывод\n"
+    "Плотный вывод по главной проблеме, достижению цели и профессиональному исходу. Цитируй только то, что есть в материале."
+)
+
+
+_DIALOG_CHUNK_SYSTEM = (
+    "Ты готовишь рабочие заметки для финального разбора звонка. Контекст: Днепровский офис. "
+    "Фокус — человек, который собирает информацию. По фрагменту выдели: роли, цель, полученные/упущенные данные, "
+    "возражения, ошибки, сильные фразы, слабые фразы, эмоции, ключевые цитаты с таймкодами. "
+    "Не делай финальный отчёт, только плотные заметки."
+)
+
+
+def _is_llm_error(text: str) -> bool:
+    value = str(text or "").lstrip()
+    return value.startswith(("❌", "⏳"))
+
+
+def _compact_dialog_transcript(text: str, limit: int = 12000) -> str:
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    head_len = max(1000, int(limit * 0.55))
+    tail_len = max(1000, limit - head_len)
+    return (
+        text[:head_len].rstrip()
+        + "\n\n[СЕРЕДИНА ТРАНСКРИПТА СОКРАЩЕНА: Kryven не принял полный объём за один запрос]\n\n"
+        + text[-tail_len:].lstrip()
+    )
+
+
+def _split_dialog_transcript(text: str, max_chars: int = 8500, max_chunks: int = 8) -> list[str]:
+    lines = str(text or "").splitlines()
+    if not lines:
+        return []
+
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current).strip())
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+
+    if current:
+        chunks.append("\n".join(current).strip())
+
+    chunks = [chunk for chunk in chunks if chunk]
+    if len(chunks) <= max_chunks:
+        return chunks
+
+    keep_start = max_chunks // 2
+    keep_end = max_chunks - keep_start
+    middle_note = (
+        "[Часть средних фрагментов не отправлена отдельным запросом, потому что запись слишком длинная. "
+        "В финальном отчёте учитывай, что выводы ограничены доступным объёмом.]"
+    )
+    return chunks[:keep_start] + [middle_note] + chunks[-keep_end:]
+
+
+def _ask_kryven_for_dialog(prompt: str, system_prompt: str) -> str:
+    if ask_kryven_dialog_analysis is not None:
+        return ask_kryven_dialog_analysis(prompt, [], memory_block=system_prompt)
+    return ask_kryven(prompt, [], memory_block=system_prompt)
+
+
+def _build_dialog_final_prompt(
+    filename: str,
+    duration_text: str,
+    audio_size: int,
+    material: str,
+    material_label: str = "Транскрипт с примерными таймкодами Whisper",
+) -> str:
+    return (
+        "Сделай полный разбор аудиозаписи строго по формату из системной инструкции.\n"
+        "Контекст: это Днепровский офис.\n"
+        f"Файл: {filename}\n"
+        f"Длительность по Whisper: {duration_text or 'не определена'}\n"
+        f"Размер файла: {audio_size} байт\n\n"
+        f"{material_label}:\n\n"
+        f"{material}"
+    )
+
+
+def _build_kryven_chunk_notes(
+    chat_id: int,
+    progress_message_id: int,
+    filename: str,
+    transcript_text: str,
+) -> str:
+    chunks = _split_dialog_transcript(transcript_text)
+    if len(chunks) <= 1:
+        return ""
+
+    notes = []
+    total = len(chunks)
+    for idx, chunk in enumerate(chunks, 1):
+        percent = min(78, 60 + int(idx / total * 16))
+        _set_dialog_progress(
+            chat_id,
+            progress_message_id,
+            filename,
+            percent,
+            f"🧠 Kryven разбирает часть {idx}/{total}...",
+            "Делю длинный звонок на части, чтобы сервис не вернул пустой ответ.",
+        )
+        if chunk.startswith("[Часть средних фрагментов"):
+            notes.append(f"### Часть {idx}/{total}\n{chunk}")
+            continue
+
+        prompt = (
+            f"Файл: {filename}\n"
+            f"Часть: {idx}/{total}\n\n"
+            "Фрагмент транскрипта:\n\n"
+            f"{chunk}\n\n"
+            "Сделай рабочие заметки для финального отчёта."
+        )
+        note = _ask_kryven_for_dialog(prompt, _DIALOG_CHUNK_SYSTEM)
+        if _is_llm_error(note):
+            note = (
+                "Kryven не вернул заметки по этой части. Для финального отчёта используй этот сокращённый фрагмент:\n\n"
+                + _compact_dialog_transcript(chunk, 2500)
+            )
+        notes.append(f"### Часть {idx}/{total}\n{note.strip()}")
+
+    return "\n\n".join(notes).strip()
+
+
 def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progress_message_id: int | None = None):
     """Расшифровывает аудиофайл через Whisper и анализирует диалог через Kryven."""
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
@@ -845,12 +1011,6 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
 
         bot.send_chat_action(chat_id, "typing")
         analysis_transcript = timed_transcript or transcript
-        if len(analysis_transcript) > 30000:
-            analysis_transcript = (
-                analysis_transcript[:20000]
-                + "\n\n[СЕРЕДИНА ТРАНСКРИПТА СОКРАЩЕНА: запись слишком длинная для одного LLM-анализа]\n\n"
-                + analysis_transcript[-10000:]
-            )
         _set_dialog_progress(
             chat_id,
             progress_message_id,
@@ -859,18 +1019,46 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
             "🧠 Kryven анализирует диалог...",
             "Передаю расшифровку в Kryven с контекстом: Днепровский офис.",
         )
-        analysis = ask_kryven(
-            "Сделай полный разбор аудиозаписи строго по формату из системной инструкции.\n"
-            "Контекст: это Днепровский офис.\n"
-            f"Файл: {filename}\n"
-            f"Длительность по Whisper: {duration_text or 'не определена'}\n"
-            f"Размер файла: {len(audio_bytes)} байт\n\n"
-            "Транскрипт с примерными таймкодами Whisper:\n\n"
-            f"{analysis_transcript}",
-            [],
-            memory_block=_DIALOG_ANALYSIS_SYSTEM,
+
+        final_material = analysis_transcript
+        material_label = "Транскрипт с примерными таймкодами Whisper"
+        if len(analysis_transcript) > 16000:
+            notes = _build_kryven_chunk_notes(chat_id, progress_message_id, filename, analysis_transcript)
+            if notes:
+                final_material = notes
+                material_label = (
+                    "Рабочие заметки Kryven по частям длинной записи. "
+                    "Собери из них цельный финальный отчёт"
+                )
+
+        analysis = _ask_kryven_for_dialog(
+            _build_dialog_final_prompt(filename, duration_text, len(audio_bytes), final_material, material_label),
+            _DIALOG_ANALYSIS_KRYVEN_SYSTEM,
         )
-        if str(analysis).lstrip().startswith(("❌", "⏳")):
+
+        if _is_llm_error(analysis):
+            _set_dialog_progress(
+                chat_id,
+                progress_message_id,
+                filename,
+                82,
+                "🧠 Kryven делает облегчённую попытку...",
+                "Сервис вернул пустой ответ, отправляю более короткий запрос.",
+            )
+            compact_transcript = _compact_dialog_transcript(analysis_transcript, 11000)
+            analysis = _ask_kryven_for_dialog(
+                _build_dialog_final_prompt(
+                    filename,
+                    duration_text,
+                    len(audio_bytes),
+                    compact_transcript,
+                    "Сокращённый транскрипт с таймкодами Whisper",
+                )
+                + "\n\nЕсли материала мало для части разделов, сохрани структуру и честно укажи ограничение.",
+                _DIALOG_ANALYSIS_KRYVEN_SYSTEM,
+            )
+
+        if _is_llm_error(analysis):
             raise RuntimeError(str(analysis).strip())
 
         _set_dialog_progress(
@@ -897,6 +1085,8 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
         print(f"Ошибка анализа аудио ({filename}): {err}")
         if "kryven" in err.lower() and ("401" in err or "ключ" in err.lower() or "api key" in err.lower()):
             hint = "Неверный KRYVEN_API_KEY — проверь ключ в Railway Variables."
+        elif "kryven" in err.lower() and ("503" in err or "empty_response" in err.lower() or "пуст" in err.lower()):
+            hint = "Kryven сейчас не вернул текст отчёта. Бот уже сделал повторную и облегчённую попытку — попробуй отправить запись ещё раз через минуту."
         elif "401" in err or "incorrect api key" in err.lower() or ("auth" in err.lower() and "key" in err.lower()):
             hint = "Неверный OPENAI_API_KEY — проверь ключ в Railway Variables."
         elif "413" in err or "too large" in err.lower() or "maximum" in err.lower():
