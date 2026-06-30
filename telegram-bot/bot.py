@@ -974,7 +974,27 @@ USER_PROFILES_FILE = CONFIG.user_profiles_file
 PENDING_USER_MESSAGES_FILE = CONFIG.pending_user_messages_file
 PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
+    "skyyylit": "инопланетянин",
 }
+PINNED_PROFILE_RULES = {
+    "skyyylit": (
+        "Обращайся к этому пользователю как к инопланетянину, человеку из другой Вселенной, "
+        "гостю нашей планеты или похожими дружескими вариантами. Варьируй формулировки, "
+        "можно с лёгким стёбом, но без злой травли."
+    ),
+}
+
+
+def _apply_pinned_profile_rule(profile: dict, username: str) -> dict:
+    uname = str(username or "").lower().strip()
+    pinned_name = PINNED_PROFILE_NAMES.get(uname)
+    if pinned_name:
+        profile["custom_name"] = pinned_name
+        profile["display_rule"] = PINNED_PROFILE_RULES.get(
+            uname,
+            f'Обращаться к пользователю только как "{pinned_name}".',
+        )
+    return profile
 
 def _load_known_users() -> dict:
     data = read_json_file(KNOWN_USERS_FILE, {}, logger=logger)
@@ -1058,10 +1078,7 @@ def _track_user(message, event: str = "message", from_user=None):
             "last_event": event,
             "message_count": int(profile.get("message_count", 0)) + 1,
         })
-        pinned_name = PINNED_PROFILE_NAMES.get(username.lower())
-        if pinned_name:
-            profile["custom_name"] = pinned_name
-            profile["display_rule"] = f'Обращаться к пользователю только как "{pinned_name}".'
+        _apply_pinned_profile_rule(profile, username)
         profile.setdefault("first_seen", now)
         user_profiles[key] = profile
 
@@ -1117,7 +1134,22 @@ def _profile_for_chat_id(chat_id: int) -> dict:
         except Exception:
             continue
         if profile_chat_id == target_id:
+            username = str(profile.get("username") or "").strip()
+            if username:
+                _apply_pinned_profile_rule(profile, username)
             return profile
+    for username, known_chat_id in known_users.items():
+        try:
+            if int(known_chat_id) != target_id:
+                continue
+        except Exception:
+            continue
+        profile = {
+            "user_id": target_id,
+            "chat_id": target_id,
+            "username": username,
+        }
+        return _apply_pinned_profile_rule(profile, username)
     return {}
 
 
@@ -1147,7 +1179,7 @@ def _format_users_report(limit: int = 50) -> str:
     profiles = {str(k): dict(v) for k, v in user_profiles.items()}
     for username, chat_id in known_users.items():
         key = str(chat_id)
-        profiles.setdefault(key, {
+        profile = profiles.setdefault(key, {
             "user_id": chat_id,
             "chat_id": chat_id,
             "username": username,
@@ -1155,6 +1187,7 @@ def _format_users_report(limit: int = 50) -> str:
             "last_seen": "",
             "message_count": 0,
         })
+        _apply_pinned_profile_rule(profile, username)
     existing_usernames = {
         str(profile.get("username") or "").lower()
         for profile in profiles.values()
@@ -4243,7 +4276,8 @@ def process_worker(chat_id: int, text: str):
             raw_text,
             extra_memory=(
                 "Пользователь имеет роль worker. "
-                "На обычные сообщения отвечай как нормальный ИИ-помощник. "
+                "На обычные сообщения отвечай по-русски дерзко, живо, как умный кент, без стерильного тона. "
+                "Можно использовать мат и грубоватые дружеские подколы, если это уместно. "
                 "Не отправляй его к кнопкам, если он задал обычный вопрос. "
                 "Если он явно хочет связаться с Русланом, подскажи кнопку 'Позвонить Руслану'."
             ),
