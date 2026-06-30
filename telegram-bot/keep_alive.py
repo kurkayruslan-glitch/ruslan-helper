@@ -7,8 +7,10 @@ from flask import Flask, request, Response
 from threading import Thread
 
 from calls import _escape_xml, _say_xml, _call_language
+from logging_setup import setup_logging
 
 app = Flask(__name__)
+logger = setup_logging("ruslan-helper.keep_alive")
 
 _START_TIME = time.time()
 _VOICE_CALL_SESSIONS = {}
@@ -90,7 +92,7 @@ def telegram_webhook(secret):
             _TELEGRAM_BOT.process_new_updates([update])
         return Response("ok", mimetype='text/plain')
     except Exception as e:
-        print(f"telegram webhook error: {e}")
+        logger.exception("Telegram webhook error: %s", e)
         return Response("error", status=500, mimetype='text/plain')
 
 
@@ -195,7 +197,7 @@ def _ask_voice_ai(goal: str, speech: str, history: list) -> str:
         )
         return ask_grok(speech, history, memory_block=memory_block)
     except Exception as e:
-        print(f"voice AI error: {e}")
+        logger.exception("Voice AI error: %s", e)
         return "Сейчас не получается обработать ответ. Я передам Руслану, что вы ответили. [END_CALL]"
 
 
