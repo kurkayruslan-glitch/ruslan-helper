@@ -4,8 +4,10 @@ import threading
 from datetime import datetime
 
 from db import connect, is_sqlite, now_default_sql, sql, to_datetime
+from logging_setup import setup_logging
 
 MEMORY_FILE = "memory.json"
+logger = setup_logging("ruslan-helper.memory")
 
 _lock = threading.Lock()
 _init_lock = threading.Lock()
@@ -80,7 +82,7 @@ def _migrate_json_if_present():
             c.commit()
         os.rename(MEMORY_FILE, MEMORY_FILE + ".migrated")
     except Exception as e:
-        print(f"memory.json migration skipped: {e}")
+        logger.exception("memory.json migration skipped: %s", e)
 
 
 def _load_raw() -> list:
