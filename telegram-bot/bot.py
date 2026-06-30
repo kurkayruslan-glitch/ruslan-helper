@@ -309,6 +309,8 @@ def _markdown_to_report_html(markdown_text: str) -> str:
     paragraph = []
     in_ul = False
     in_ol = False
+    in_code = False
+    code_lines = []
 
     def flush_paragraph():
         nonlocal paragraph
@@ -326,10 +328,33 @@ def _markdown_to_report_html(markdown_text: str) -> str:
             out.append("</ol>")
             in_ol = False
 
+    def flush_code():
+        nonlocal code_lines
+        if code_lines:
+            code_text = html.escape("\n".join(code_lines))
+            out.append(f"<pre><code>{code_text}</code></pre>")
+            code_lines = []
+
     i = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
+
+        if in_code:
+            if stripped.startswith("```"):
+                in_code = False
+                flush_code()
+            else:
+                code_lines.append(line)
+            i += 1
+            continue
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            close_lists()
+            in_code = True
+            i += 1
+            continue
 
         if not stripped:
             flush_paragraph()
@@ -389,12 +414,72 @@ def _markdown_to_report_html(markdown_text: str) -> str:
 
     flush_paragraph()
     close_lists()
+    flush_code()
     return "\n".join(part for part in out if part)
+
+
+def _dialog_analysis_is_meaningful(analysis: str) -> bool:
+    clean = _clean_dialog_analysis_markdown(analysis)
+    if len(clean.strip()) < 500:
+        return False
+    lowered = clean.lower()
+    markers = (
+        "главные оценки",
+        "что найдено",
+        "общая оценка",
+        "оценка менеджера",
+        "контроль разговора",
+        "доверие",
+        "рекоменда",
+        "ошибк",
+    )
+    return sum(1 for marker in markers if marker in lowered) >= 3
+
+
+def _build_local_dialog_fallback_report(
+    filename: str,
+    duration_text: str,
+    transcript_text: str,
+    reason: str = "",
+) -> str:
+    excerpt = _compact_dialog_transcript(transcript_text, 14000)
+    note = reason.strip() or "Kryven не вернул содержательный аналитический текст."
+    return (
+        "# Анализ аудиозаписи разговора\n\n"
+        f"Файл: `{filename or 'audio'}`\n"
+        f"Длительность по распознаванию: {duration_text or 'не определена'}\n"
+        "Контекст: это скрипт Днепровского офиса.\n"
+        f"Качество аналитики: автоматический резервный отчёт. Причина: {note}\n\n"
+        "## Главные оценки 1-10\n\n"
+        "| Критерий | Балл 1-10 | Что видно в диалоге | Почему такой балл | Как улучшить безопасно |\n"
+        "|---|---:|---|---|---|\n"
+        "| Контроль разговора | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
+        "| Доверие | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
+        "| Ясность инструкции | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
+        "| Движение к легитимной цели | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
+        "| Комплаенс / безопасность | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
+        "| Потенциал конверсии | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n\n"
+        "## Что найдено в тексте\n\n"
+        "Полный автоматический поиск сигналов не выполнен, потому что аналитическая модель не вернула содержательный отчёт. "
+        "Ниже сохранена расшифровка, чтобы запись не потерялась и её можно было повторно отправить на анализ.\n\n"
+        "## Этап 1. Расшифровка\n\n"
+        "```text\n"
+        f"{excerpt}\n"
+        "```\n\n"
+        "## Итог\n\n"
+        "Файл не пустой: расшифровка сохранена. Для полноценной оценки менеджера, контроля, доверия, ясности инструкции "
+        "и соответствия скрипту Днепровского офиса отправь запись повторно или раздели её на более короткие части."
+    )
 
 
 def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) -> str:
     clean_analysis = _clean_dialog_analysis_markdown(analysis)
     body_html = _markdown_to_report_html(clean_analysis)
+    if not body_html.strip():
+        body_html = (
+            "<div class=\"notice\"><strong>Отчёт не содержит аналитического текста.</strong><br>"
+            "Модель вернула пустую шапку без разбора. Повтори обработку записи.</div>"
+        )
     safe_filename = html.escape(filename or "audio")
     safe_duration = html.escape(duration_text or "не определена")
     generated_at = html.escape(_now_local().strftime("%d.%m.%Y %H:%M"))
@@ -487,6 +572,14 @@ def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) 
       padding: 28px;
       box-shadow: 0 10px 26px rgba(16, 42, 67, .08);
     }}
+    .notice {{
+      border: 1px solid #f0c36d;
+      background: #fff8e6;
+      color: #5f4200;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 0 0 18px;
+    }}
     h2 {{
       margin: 34px 0 14px;
       padding-top: 18px;
@@ -507,6 +600,15 @@ def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) 
     p {{ margin: 10px 0; }}
     ul, ol {{ padding-left: 22px; }}
     li {{ margin: 6px 0; }}
+    pre {{
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #f7fafc;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      margin: 14px 0 22px;
+    }}
     code {{
       background: var(--soft);
       border: 1px solid #d3e9ef;
@@ -514,6 +616,12 @@ def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) 
       padding: 1px 5px;
       font-family: "SFMono-Regular", Consolas, monospace;
       font-size: .95em;
+    }}
+    pre code {{
+      background: transparent;
+      border: 0;
+      padding: 0;
+      font-size: .9em;
     }}
     .table-wrap {{
       width: 100%;
@@ -1115,6 +1223,35 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
 
         if _is_llm_error(analysis):
             raise RuntimeError(str(analysis).strip())
+
+        if not _dialog_analysis_is_meaningful(analysis):
+            _set_dialog_progress(
+                chat_id,
+                progress_message_id,
+                filename,
+                86,
+                "🧠 Kryven прислал слишком короткий отчёт...",
+                "Прошу модель пересобрать полный разбор, чтобы файл не был пустым.",
+            )
+            compact_transcript = _compact_dialog_transcript(analysis_transcript, 10000)
+            short_answer = str(analysis or "").strip()
+            repair_prompt = (
+                "Предыдущий ответ был пустым или слишком коротким и не подходит для отчёта.\n"
+                "Нужно заново сделать содержательный разбор по всем разделам системной инструкции.\n"
+                "Обязательно начни с `## Главные оценки 1-10`, затем `## Что найдено в тексте`, "
+                "затем расшифровка, общая оценка, оценка менеджера отдельно, ошибки, рекомендации и итог.\n\n"
+                f"Короткий предыдущий ответ:\n{short_answer[:1200] or '[пусто]'}\n\n"
+                "Сокращённый транскрипт:\n\n"
+                f"{compact_transcript}"
+            )
+            repaired_analysis = _ask_kryven_for_dialog(repair_prompt, _DIALOG_ANALYSIS_KRYVEN_SYSTEM)
+            if not _is_llm_error(repaired_analysis) and _dialog_analysis_is_meaningful(repaired_analysis):
+                analysis = repaired_analysis
+            else:
+                reason = "Kryven вернул пустой или слишком короткий отчёт даже после повторной попытки."
+                if _is_llm_error(repaired_analysis):
+                    reason = str(repaired_analysis).strip()
+                analysis = _build_local_dialog_fallback_report(filename, duration_text, analysis_transcript, reason)
 
         _set_dialog_progress(
             chat_id,
