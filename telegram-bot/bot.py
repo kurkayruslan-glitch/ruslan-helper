@@ -245,6 +245,81 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
                 bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
 
 
+def _extract_direct_sauron_query(text: str) -> str | None:
+    """Возвращает запрос, если пользователь явно просит Sauron без LLM-action."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    compact = " ".join(raw.split())
+    compact = re.sub(r"^[🔍\s]+", "", compact).strip()
+    low = compact.casefold()
+
+    if low in ("саурон", "sauron"):
+        return ""
+
+    prefixes = (
+        "саурон ",
+        "sauron ",
+        "саурон:",
+        "sauron:",
+        "найди в сауроне ",
+        "найди через саурон ",
+        "поищи в сауроне ",
+        "поищи через саурон ",
+        "ищи в сауроне ",
+        "ищи через саурон ",
+        "поиск в сауроне ",
+        "пробей в сауроне ",
+        "пробей через саурон ",
+        "проверь в сауроне ",
+        "проверь через саурон ",
+    )
+    for prefix in prefixes:
+        if low.startswith(prefix):
+            return compact[len(prefix):].strip(" :—-")
+
+    match = re.match(
+        r"^(?:найди|поищи|ищи|поиск|пробей|проверь)\s+(?:через\s+|в\s+)?саурон(?:е)?\s+(.+)$",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip(" :—-")
+    return None
+
+
+def _run_sauron_search(chat_id: int, query: str, reply_markup=None):
+    """Запускает Sauron и отправляет результат, не светя запрос в логах."""
+    query = (query or "").strip()
+    if not query:
+        _btn_sauron_search(chat_id)
+        return
+
+    progress_msg = None
+    try:
+        progress_msg = bot.send_message(chat_id, f"🔍 Ищу «{query}» на Sauron…")
+        bot.send_chat_action(chat_id, "typing")
+    except Exception:
+        pass
+
+    try:
+        result = sauron.search(query)
+    except Exception as e:
+        logger.exception("Sauron search failed for chat_id=%s", chat_id)
+        result = f"❌ Ошибка Sauron: {str(e)[:200]}"
+
+    if progress_msg is not None:
+        try:
+            bot.delete_message(chat_id, progress_msg.message_id)
+        except Exception:
+            pass
+
+    if reply_markup is None and chat_id > 0:
+        reply_markup = jarvis_menu() if chat_id in jarvis_mode else main_menu(chat_id)
+    safe_send(chat_id, result, reply_markup)
+
+
 # ──────────────────────────────────────────────
 # Разбор аудио и HTML-отчёты
 # Основная логика живёт в dialog_reports.py. Здесь остаются только
@@ -1647,16 +1722,7 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         safe_send(chat_id, pc_apps.list_apps())
 
     elif action_type == "search_sauron":
-        query = (action_param or "").strip()
-        if not query:
-            safe_send(chat_id, "🔍 Что искать на Sauron? Укажи ФИО, номер или другой запрос.")
-            return
-        bot.send_message(chat_id, f"🔍 Ищу «{query}» на Sauron…")
-        try:
-            result = sauron.search(query)
-        except Exception as e:
-            result = f"❌ Ошибка Sauron: {str(e)[:200]}"
-        safe_send(chat_id, result)
+        _run_sauron_search(chat_id, action_param or "")
 
     elif action_type == "search_price":
         safe_send(chat_id, "🔎 Ищу цены, секунду…")
@@ -2130,17 +2196,8 @@ def process_text(chat_id, text):
             return
         waiting_for_sauron_query.discard(chat_id)
         query = t
-        msg = bot.send_message(chat_id, f"🔍 Ищу «{query}» на Sauron…")
-        try:
-            result = sauron.search(query)
-        except Exception as e:
-            result = f"❌ Ошибка Sauron: {str(e)[:200]}"
         markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
-        try:
-            bot.delete_message(chat_id, msg.message_id)
-        except Exception:
-            pass
-        safe_send(chat_id, result, markup)
+        _run_sauron_search(chat_id, query, markup)
         return
 
     # Ожидаем файл для поиска через Sauron
@@ -4341,11 +4398,19 @@ def handle_message(message):
         group_question = strip_bot_mention(text, BOT_USERNAME)
         if not group_question:
             group_question = "Ответь по контексту этой рабочей группы."
+        direct_sauron_query = _extract_direct_sauron_query(group_question)
+        if direct_sauron_query is not None:
+            _run_sauron_search(chat_id, direct_sauron_query, reply_markup=None)
+            return
         _ask_grok_and_route(chat_id, group_question, extra_memory=recent_context(chat_id))
         return
 
     if not is_allowed(chat_id):
         bot.send_message(chat_id, "🔒 Нет доступа. Попроси Руслана добавить твой Telegram ID в whitelist.")
+        return
+    direct_sauron_query = _extract_direct_sauron_query(text)
+    if direct_sauron_query is not None:
+        _run_sauron_search(chat_id, direct_sauron_query)
         return
     role = get_role(chat_id)
     if role == "worker":
