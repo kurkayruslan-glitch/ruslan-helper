@@ -14,6 +14,11 @@ import io
 import hashlib
 import html
 from urllib.parse import quote
+from config import CONFIG, env_bool, local_now, ukraine_tz_hours
+from logging_setup import setup_logging
+from safe_json import read_json_file, write_json_file
+
+logger = setup_logging("ruslan-helper.bot")
 try:
     from openai import OpenAI
 except Exception:
@@ -39,47 +44,36 @@ import sauron_file_search
 # Устанавливается автоматически через run command в Deployment:
 #   cd telegram-bot && DEPLOYMENT_MODE=production python3 -u bot.py
 # ──────────────────────────────────────────────────────────────────
-DEPLOYMENT_MODE = os.environ.get("DEPLOYMENT_MODE", "development").lower()
-IS_PRODUCTION = DEPLOYMENT_MODE == "production"
+DEPLOYMENT_MODE = CONFIG.deployment_mode
+IS_PRODUCTION = CONFIG.is_production
 
 
 def _public_base_url() -> str:
-    url = (
-        os.environ.get("PUBLIC_BASE_URL")
-        or os.environ.get("TWILIO_PUBLIC_BASE_URL")
-        or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-        or ""
-    ).strip()
-    if url and not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url.rstrip("/")
+    return CONFIG.public_base_url
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on", "да"}
+    return env_bool(name, default)
 
 # Бэкенд ИИ: openai (ChatGPT), grok (xAI), gemini (Google), llama (Ollama).
 # По умолчанию — openai. Переключается через LLM_BACKEND в .env.
-_backend = os.environ.get("LLM_BACKEND", "openai").lower()
+_backend = CONFIG.llm_backend
 if _backend == "llama":
     from llama import ask_grok
-    print("🧠 LLM backend: llama (Ollama)")
+    logger.info("LLM backend: llama (Ollama)")
 elif _backend == "grok":
     from grok import ask_grok
     _grok_key = os.environ.get("XAI_API_KEY", "")
     if _grok_key:
-        print(f"🧠 LLM backend: grok (xAI), модель: {os.environ.get('GROK_MODEL','grok-3')}")
+        logger.info("LLM backend: grok (xAI), model: %s", os.environ.get("GROK_MODEL", "grok-3"))
     else:
-        print("🧠 LLM backend: grok (xAI) ⚠️  XAI_API_KEY не задан — бот запустится, но ИИ-ответы вернут ошибку.")
+        logger.warning("LLM backend: grok (xAI), but XAI_API_KEY is not set.")
 elif _backend == "gemini":
     from gemini import ask_grok
-    print("🧠 LLM backend: gemini (Google)")
+    logger.info("LLM backend: gemini (Google)")
 else:
     from chatgpt import ask_grok
-    print("🧠 LLM backend: openai (ChatGPT)")
+    logger.info("LLM backend: openai (ChatGPT)")
 try:
     from kryven import ask_kryven, ask_kryven_dialog_analysis, kryven_available
 except Exception as e:
@@ -87,7 +81,7 @@ except Exception as e:
     ask_kryven_dialog_analysis = None
     def kryven_available() -> bool:
         return False
-    print(f"🧠 Kryven backend unavailable: {e}")
+    logger.warning("Kryven backend unavailable: %s", e)
 from memory import (
     get_facts, add_fact, delete_fact, clear_facts,
     format_for_prompt, format_for_display, clear_all as clear_memory,
@@ -102,37 +96,23 @@ import sheet_monitor
 import threading
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TOKEN = CONFIG.telegram_bot_token
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
 def _ukraine_tz_hours() -> int:
-    """UTC+3 летом (последнее вс марта — последнее вс октября), UTC+2 зимой.
-    Если задан TZ_OFFSET_HOURS в .env — использует его (ручной override)."""
-    manual = os.environ.get("TZ_OFFSET_HOURS", "").strip()
-    if manual.lstrip("-").isdigit():
-        return int(manual)
-    now_utc = datetime.utcnow()
-    y = now_utc.year
-    dst_start = max(
-        datetime(y, 3, d) for d in range(25, 32)
-        if datetime(y, 3, d).weekday() == 6
-    ).replace(hour=1)   # 01:00 UTC = 03:00 местного
-    dst_end = max(
-        datetime(y, 10, d) for d in range(25, 32)
-        if datetime(y, 10, d).weekday() == 6
-    ).replace(hour=1)   # 01:00 UTC = 03:00 местного
-    return 3 if dst_start <= now_utc < dst_end else 2
+    """Текущий UTC offset для локального времени бота."""
+    return ukraine_tz_hours()
 
 
 def _now_local() -> datetime:
     """Текущее местное время (Украина, с учётом летнего/зимнего времени)."""
-    return datetime.utcnow() + timedelta(hours=_ukraine_tz_hours())
+    return local_now()
 
-OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
-OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
+OPENAI_BASE_URL = CONFIG.openai_proxy_base_url
+OPENAI_API_KEY = CONFIG.openai_proxy_api_key
 
 # Клиент для текстового ИИ-чата — через Replit proxy (если есть) или прямой ключ
 if OpenAI and OPENAI_API_KEY:
@@ -145,14 +125,14 @@ else:
 
 # Клиент ТОЛЬКО для голоса (STT/TTS) — исключительно прямой OPENAI_API_KEY.
 # Replit AI proxy НЕ поддерживает audio-эндпоинты (whisper, tts-1) → UNSUPPORTED_MODEL.
-_DIRECT_OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
+_DIRECT_OPENAI_KEY = CONFIG.openai_direct_api_key
 if OpenAI and _DIRECT_OPENAI_KEY:
     voice_openai_client = OpenAI(api_key=_DIRECT_OPENAI_KEY)
 else:
     voice_openai_client = None  # голос недоступен; текстовый чат продолжает работать
 
 # Лимит размера аудиофайла для анализа диалога (по умолчанию 24 МБ)
-_DIALOG_AUDIO_MAX_BYTES = int(os.environ.get("DIALOG_AUDIO_MAX_BYTES", str(24 * 1024 * 1024)))
+_DIALOG_AUDIO_MAX_BYTES = CONFIG.dialog_audio_max_bytes
 # Расширения аудиофайлов, которые отправляются на анализ диалога
 _DIALOG_AUDIO_EXTS = {'.mp3', '.m4a', '.wav', '.ogg', '.oga', '.opus', '.aac', '.flac', '.webm'}
 
@@ -161,25 +141,21 @@ bot = telebot.TeleBot(TOKEN)
 # ──────────────────────────────────────────────
 # ДОСТУП — бот открыт для всех пользователей
 # ──────────────────────────────────────────────
-OWNER_ID = 7959647798          # Руслан — всегда имеет доступ
+OWNER_ID = CONFIG.owner_id     # Руслан — всегда имеет доступ
 # Старый секретный код оставлен только для совместимости; вход по нему больше не нужен
-SECRET_CODE = os.environ.get("BOT_SECRET_CODE", "ruslan2024vip")
-WHITELIST_FILE = "whitelist.json"
+SECRET_CODE = CONFIG.bot_secret_code
+WHITELIST_FILE = CONFIG.whitelist_file
 
 def _load_whitelist() -> set:
-    if os.path.exists(WHITELIST_FILE):
-        try:
-            import json
-            with open(WHITELIST_FILE) as f:
-                return set(json.load(f))
-        except Exception:
-            pass
-    return {OWNER_ID}
+    data = read_json_file(WHITELIST_FILE, [], logger=logger)
+    try:
+        return set(data)
+    except TypeError:
+        logger.warning("Whitelist file has invalid format: %s", WHITELIST_FILE)
+        return {OWNER_ID}
 
 def _save_whitelist():
-    import json
-    with open(WHITELIST_FILE, "w") as f:
-        json.dump(list(allowed_users), f)
+    write_json_file(WHITELIST_FILE, list(allowed_users), logger=logger)
 
 allowed_users: set = _load_whitelist()
 allowed_users.add(OWNER_ID)
@@ -230,7 +206,7 @@ def _set_dialog_progress(chat_id: int, message_id: int | None, filename: str, pe
         bot.edit_message_text(text, chat_id, message_id)
     except Exception as e:
         if "message is not modified" not in str(e).lower():
-            print(f"Не удалось обновить прогресс аудио: {e}")
+            logger.warning("Cannot update audio progress message: %s", e)
     return message_id
 
 
@@ -769,7 +745,7 @@ def _tts_send_voice(chat_id: int, text: str):
         audio_bytes.name = "reply.ogg"
         bot.send_voice(chat_id, audio_bytes)
     except Exception as e:
-        print(f"TTS ошибка: {e}")
+        logger.exception("TTS failed: %s", e)
         # Graceful fallback — текстовый ответ уже отправлен выше
 
 
@@ -1363,7 +1339,7 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
 
     except Exception as e:
         err = str(e)
-        print(f"Ошибка анализа аудио ({filename}): {err}")
+        logger.exception("Audio analysis failed for %s: %s", filename, err)
         if "kryven" in err.lower() and ("401" in err or "ключ" in err.lower() or "api key" in err.lower()):
             hint = "Неверный KRYVEN_API_KEY — проверь ключ в Railway Variables."
         elif "kryven" in err.lower() and ("503" in err or "empty_response" in err.lower() or "пуст" in err.lower()):
@@ -1477,19 +1453,17 @@ _remote_confirm_action: dict = {}  # chat_id → "shutdown" | "restart"
 voice_request_chats: set = set()
 
 # История чата — сохраняется на диск, максимум HISTORY_MAX сообщений на пользователя
-GROK_HISTORY_FILE = "grok_history.json"
-HISTORY_MAX = int(os.environ.get("GROK_HISTORY_MAX", "80"))  # 80 сообщений = примерно 40 обменов
-CHAT_MEMORY_MAX_CHARS = int(os.environ.get("CHAT_MEMORY_MAX_CHARS", "3500"))
-CHAT_MEMORY_FOR_ALL = os.environ.get("CHAT_MEMORY_FOR_ALL", "0").lower() in ("1", "true", "yes", "on")
+GROK_HISTORY_FILE = CONFIG.grok_history_file
+HISTORY_MAX = CONFIG.grok_history_max  # 80 сообщений = примерно 40 обменов
+CHAT_MEMORY_MAX_CHARS = CONFIG.chat_memory_max_chars
+CHAT_MEMORY_FOR_ALL = CONFIG.chat_memory_for_all
 
 def _load_grok_history() -> dict:
-    if os.path.exists(GROK_HISTORY_FILE):
-        try:
-            import json
-            with open(GROK_HISTORY_FILE) as f:
-                return {int(k): v for k, v in json.load(f).items()}
-        except Exception:
-            pass
+    data = read_json_file(GROK_HISTORY_FILE, {}, logger=logger)
+    try:
+        return {int(k): v for k, v in data.items() if isinstance(v, list)}
+    except (TypeError, ValueError) as exc:
+        logger.warning("Chat history file has invalid format: %s (%s)", GROK_HISTORY_FILE, exc)
     return {}
 
 def _trim_history(history: list) -> list:
@@ -1503,79 +1477,63 @@ def _trim_history(history: list) -> list:
     return trimmed
 
 def _save_grok_history():
-    import json
     # Обрезаем перед записью — так файл не растёт бесконечно
     trimmed = {str(k): _trim_history(v) for k, v in grok_history.items()}
-    with open(GROK_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(trimmed, f, ensure_ascii=False, indent=2)
+    write_json_file(GROK_HISTORY_FILE, trimmed, logger=logger)
 
 grok_history: dict = _load_grok_history()
 _chat_memory_lock = threading.Lock()
 
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
-KNOWN_USERS_FILE = "known_users.json"
-USER_PROFILES_FILE = "user_profiles.json"
-PENDING_USER_MESSAGES_FILE = "pending_user_messages.json"
+KNOWN_USERS_FILE = CONFIG.known_users_file
+USER_PROFILES_FILE = CONFIG.user_profiles_file
+PENDING_USER_MESSAGES_FILE = CONFIG.pending_user_messages_file
 PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
 }
 
 def _load_known_users() -> dict:
-    if os.path.exists(KNOWN_USERS_FILE):
-        try:
-            import json
-            with open(KNOWN_USERS_FILE) as f:
-                return {k: int(v) for k, v in json.load(f).items()}
-        except Exception:
-            pass
+    data = read_json_file(KNOWN_USERS_FILE, {}, logger=logger)
+    try:
+        return {k: int(v) for k, v in data.items()}
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning("Known users file has invalid format: %s (%s)", KNOWN_USERS_FILE, exc)
     return {}
 
 def _save_known_users():
-    import json
-    with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(known_users, f, ensure_ascii=False, indent=2)
+    write_json_file(KNOWN_USERS_FILE, known_users, logger=logger)
 
 known_users: dict = _load_known_users()
 
 
 def _load_user_profiles() -> dict:
-    if os.path.exists(USER_PROFILES_FILE):
-        try:
-            import json
-            with open(USER_PROFILES_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            return {str(k): v for k, v in data.items() if isinstance(v, dict)}
-        except Exception:
-            pass
+    data = read_json_file(USER_PROFILES_FILE, {}, logger=logger)
+    try:
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+    except AttributeError as exc:
+        logger.warning("User profiles file has invalid format: %s (%s)", USER_PROFILES_FILE, exc)
     return {}
 
 
 def _save_user_profiles():
-    import json
-    with open(USER_PROFILES_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_profiles, f, ensure_ascii=False, indent=2)
+    write_json_file(USER_PROFILES_FILE, user_profiles, logger=logger)
 
 
 def _load_pending_user_messages() -> dict:
-    if os.path.exists(PENDING_USER_MESSAGES_FILE):
-        try:
-            import json
-            with open(PENDING_USER_MESSAGES_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            return {
-                str(k).lower(): [str(item) for item in v if str(item).strip()]
-                for k, v in data.items()
-                if isinstance(v, list)
-            }
-        except Exception:
-            pass
+    data = read_json_file(PENDING_USER_MESSAGES_FILE, {}, logger=logger)
+    try:
+        return {
+            str(k).lower(): [str(item) for item in v if str(item).strip()]
+            for k, v in data.items()
+            if isinstance(v, list)
+        }
+    except AttributeError as exc:
+        logger.warning("Pending messages file has invalid format: %s (%s)", PENDING_USER_MESSAGES_FILE, exc)
     return {}
 
 
 def _save_pending_user_messages(data: dict):
-    import json
-    with open(PENDING_USER_MESSAGES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_file(PENDING_USER_MESSAGES_FILE, data, logger=logger)
 
 
 user_profiles: dict = _load_user_profiles()
@@ -1637,10 +1595,10 @@ def _track_user(message, event: str = "message", from_user=None):
                     try:
                         bot.send_message(chat_id, pending_text)
                     except Exception as send_error:
-                        print(f"Не удалось отправить отложенное сообщение @{uname}: {send_error}")
+                        logger.warning("Cannot send pending message to @%s: %s", uname, send_error)
         _save_user_profiles()
     except Exception as e:
-        print(f"Ошибка учёта пользователя: {e}")
+        logger.exception("User tracking failed: %s", e)
 
 
 def _md_escape(value) -> str:
@@ -1801,9 +1759,9 @@ def _sync_bot_commands():
     try:
         commands = [types.BotCommand(command, description) for command, description in BOT_COMMANDS]
         bot.set_my_commands(commands)
-        print(f"⚡ Telegram quick commands synced: {len(commands)}")
+        logger.info("Telegram quick commands synced: %s", len(commands))
     except Exception as e:
-        print(f"⚠️ Не удалось обновить быстрые команды Telegram: {e}")
+        logger.warning("Telegram quick commands sync failed: %s", e)
 
 
 def ai_chat_menu():
@@ -2342,7 +2300,7 @@ def _update_chat_memory(chat_id: int, user_text: str, assistant_text: str):
             if summary:
                 save_chat_summary(chat_id, summary)
     except Exception as e:
-        print(f"Ошибка обновления памяти чата: {e}")
+        logger.exception("Chat memory update failed: %s", e)
 
 
 def _schedule_chat_memory_update(chat_id: int, user_text: str, assistant_text: str):
@@ -2355,7 +2313,7 @@ def _schedule_chat_memory_update(chat_id: int, user_text: str, assistant_text: s
             name=f"chat-memory-{chat_id}",
         ).start()
     except Exception as e:
-        print(f"Ошибка запуска обновления памяти: {e}")
+        logger.exception("Chat memory worker start failed: %s", e)
 
 
 def _ask_grok_and_route(chat_id: int, text: str):
@@ -3973,9 +3931,9 @@ def _seed_tax_reminders_safe():
             months_ahead=12,
         )
         if created:
-            print(f"💰 Налоговый календарь ФОП: добавлено {created} новых напоминаний.")
+            logger.info("FOP tax calendar seeded: %s new reminders.", created)
     except Exception as e:
-        print(f"⚠️ Не удалось засеять налоговые напоминания: {e}")
+        logger.exception("FOP tax calendar seeding failed: %s", e)
 
 
 def _start_anketa(chat_id: int):
@@ -4312,7 +4270,7 @@ def start(message):
     if message.from_user and message.from_user.username:
         known_users[message.from_user.username.lower()] = chat_id
         _save_known_users()
-        print(f"✅ Запомнил пользователя @{message.from_user.username} → {chat_id}")
+        logger.info("Known user saved: @%s -> %s", message.from_user.username, chat_id)
     if not is_allowed(chat_id):
         bot.send_message(chat_id, "🔒 Введи секретный код для доступа:",
                          reply_markup=types.ReplyKeyboardRemove())
@@ -4402,7 +4360,7 @@ def handle_voice(message):
 
     except Exception as e:
         err_str = str(e)
-        print(f"Ошибка voice: {err_str}")
+        logger.exception("Voice processing failed: %s", err_str)
         if "timeout" in err_str.lower():
             hint = "Сервер не ответил вовремя — попробуй ещё раз."
         elif "rate" in err_str.lower():
@@ -4604,7 +4562,7 @@ def handle_live_location_update(message):
     last_location[chat_id] = (lat, lon)
 
     # Тихо обновляем координаты, без спама сообщениями
-    print(f"📍 Обновление live location от {chat_id}: {lat}, {lon}")
+    logger.info("Live location update from %s: %s, %s", chat_id, lat, lon)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "send_geo_toha")
@@ -5204,26 +5162,19 @@ def _show_sheet_monitor_settings(chat_id, sheet_id):
 # УТРЕННЯЯ СВОДКА И ПЛАНИРОВЩИК НАПОМИНАНИЙ
 # ──────────────────────────────────────────────
 
-MORNING_BRIEFING_HOUR = 8   # 08:00 по местному времени
-MORNING_BRIEFING_FILE = "morning_briefing.json"
+MORNING_BRIEFING_HOUR = CONFIG.morning_briefing_hour   # 08:00 по местному времени
+MORNING_BRIEFING_FILE = CONFIG.morning_briefing_file
 
 _morning_lock = threading.Lock()
 
 
 def _load_last_briefing_date() -> str:
-    if os.path.exists(MORNING_BRIEFING_FILE):
-        try:
-            with open(MORNING_BRIEFING_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("last_date", "")
-        except Exception:
-            pass
-    return ""
+    data = read_json_file(MORNING_BRIEFING_FILE, {}, logger=logger)
+    return str(data.get("last_date", "")) if isinstance(data, dict) else ""
 
 
 def _save_last_briefing_date(date_str: str):
-    with open(MORNING_BRIEFING_FILE, "w", encoding="utf-8") as f:
-        json.dump({"last_date": date_str}, f)
+    write_json_file(MORNING_BRIEFING_FILE, {"last_date": date_str}, logger=logger)
 
 
 def _fetch_weather_kyiv() -> str:
@@ -5343,7 +5294,7 @@ def _send_morning_briefing():
             _save_last_briefing_date(today)
 
     except Exception as e:
-        print(f"Ошибка утренней сводки: {e}")
+        logger.exception("Morning briefing failed: %s", e)
 
 
 _last_sheet_monitor_run: datetime | None = None
@@ -5365,7 +5316,7 @@ def _maybe_run_sheet_monitor(now_local: datetime):
     try:
         alerts = sheet_monitor.check_all(now_local)
     except Exception as e:
-        print(f"Ошибка мониторинга таблиц: {e}")
+        logger.exception("Sheet monitoring failed: %s", e)
         return
     # Помечаем как успешный запуск только после завершения, чтобы при сбое
     # повторить раньше, а не ждать целый интервал.
@@ -5400,7 +5351,7 @@ def _maybe_run_sheet_monitor(now_local: datetime):
         try:
             safe_send(OWNER_ID, alert["text"], inline)
         except Exception as e:
-            print(f"Не удалось отправить алерт мониторинга: {e}")
+            logger.exception("Cannot send sheet monitoring alert: %s", e)
         return
 
     lines = [f"🔔 *Изменения сразу в {len(alerts)} таблицах:*", ""]
@@ -5431,12 +5382,12 @@ def _maybe_run_sheet_monitor(now_local: datetime):
     try:
         safe_send(OWNER_ID, "\n".join(lines), inline)
     except Exception as e:
-        print(f"Не удалось отправить сводный алерт мониторинга: {e}")
+        logger.exception("Cannot send grouped sheet monitoring alert: %s", e)
 
 
 def _scheduler_loop():
     """Фоновый поток: проверяет напоминания каждую минуту, отправляет утреннюю сводку в 8:00."""
-    print("⏰ Планировщик напоминаний запущен.")
+    logger.info("Reminder scheduler started.")
     while True:
         try:
             now = _now_local()
@@ -5461,12 +5412,12 @@ def _scheduler_loop():
                     safe_send(chat_id, f"⏰ *Напоминание!*\n\n{text}", main_menu())
                     mark_fired(reminder_id)
                 except Exception as e:
-                    print(f"Ошибка отправки напоминания {reminder_id}: {e}")
+                    logger.exception("Reminder send failed: %s (%s)", reminder_id, e)
                     # Увеличиваем счётчик ошибок; после MAX_FAILURES — деактивируем
                     mark_failed(reminder_id)
 
         except Exception as e:
-            print(f"Ошибка в планировщике: {e}")
+            logger.exception("Scheduler loop failed: %s", e)
 
         time.sleep(60)
 
@@ -5479,7 +5430,7 @@ if __name__ == "__main__":
     scheduler_thread.start()
     # Засеваем налоговый календарь ФОП — идемпотентно, дубли не создаст
     _seed_tax_reminders_safe()
-    print("🚀 Ruslan Personal Helper с SMS для Тохи!")
+    logger.info("Ruslan Personal Helper started.")
 
     _mode_label = "PRODUCTION 🟢 (24/7)" if IS_PRODUCTION else "DEVELOPMENT 🟡 (только пока открыт Replit)"
     public_base = _public_base_url()
@@ -5500,10 +5451,10 @@ if __name__ == "__main__":
                 bot.set_webhook(url=webhook_url, drop_pending_updates=False)
             except TypeError:
                 bot.set_webhook(url=webhook_url)
-            print(f"🔗 Telegram webhook готов: {public_base}/api/telegram/webhook/<secret>")
-            print(f"🕐 Webhook start | Режим: {_mode_label} | {_now_local().strftime('%Y-%m-%d %H:%M')} Kyiv")
+            logger.info("Telegram webhook ready: %s/api/telegram/webhook/<secret>", public_base)
+            logger.info("Webhook start | mode: %s | %s Kyiv", _mode_label, _now_local().strftime("%Y-%m-%d %H:%M"))
         except Exception as _we:
-            print(f"⚠️  Webhook не включился: {_we}. Перехожу на polling.")
+            logger.exception("Webhook setup failed, falling back to polling: %s", _we)
             public_base = ""
 
         if public_base:
@@ -5514,11 +5465,11 @@ if __name__ == "__main__":
     # Railway should normally use webhook mode to avoid Telegram 409 polling conflicts.
     try:
         bot.remove_webhook()
-        print("🔗 Webhook сброшен — polling готов.")
+        logger.info("Webhook removed, polling is ready.")
     except Exception as _we:
-        print(f"⚠️  Webhook сброс не удался (не критично): {_we}")
+        logger.warning("Webhook removal failed, continuing: %s", _we)
 
-    print(f"🕐 Polling start | Режим: {_mode_label} | {_now_local().strftime('%Y-%m-%d %H:%M')} Kyiv")
+    logger.info("Polling start | mode: %s | %s Kyiv", _mode_label, _now_local().strftime("%Y-%m-%d %H:%M"))
 
     while True:
         try:
@@ -5526,15 +5477,12 @@ if __name__ == "__main__":
         except Exception as e:
             err = str(e)
             if "409" in err or "Conflict" in err:
-                print(
-                    "⛔ 409 CONFLICT: бот уже запущен в другом месте!\n"
-                    "   Telegram разрешает ОДИН активный polling на токен.\n"
-                    "   Останови деплой (Deployments → Stop) ИЛИ workspace-воркфлоу —\n"
-                    "   должен работать ТОЛЬКО ОДИН экземпляр.\n"
-                    "   Повтор через 30 секунд..."
+                logger.error(
+                    "409 CONFLICT: bot is already running in another place. "
+                    "Only one active polling instance is allowed. Retry in 30 seconds."
                 )
                 time.sleep(30)
             else:
-                print(f"Ошибка polling: {e}. Перезапуск через 5 секунд...")
+                logger.exception("Polling failed, restart in 5 seconds: %s", e)
                 time.sleep(5)
 
