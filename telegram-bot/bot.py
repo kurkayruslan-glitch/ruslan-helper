@@ -64,6 +64,7 @@ import crm
 import sauron
 import file_search
 import sauron_file_search
+import photo_editor
 
 # ──────────────────────────────────────────────────────────────────
 # РЕЖИМ ЗАПУСКА
@@ -166,6 +167,11 @@ _DIALOG_AUDIO_EXTS = DIALOG_AUDIO_EXTS
 
 bot = telebot.TeleBot(TOKEN)
 BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "Ruslan_pomohnik_bot").strip().lstrip("@")
+PHOTO_EDITOR_ALLOWED_USERNAMES = {
+    value.strip().lstrip("@").lower()
+    for value in os.environ.get("PHOTO_EDITOR_ALLOWED_USERNAMES", "skyyylit").split(",")
+    if value.strip()
+}
 
 
 def _chat_is_group(message_or_chat_id) -> bool:
@@ -941,6 +947,9 @@ waiting_for_sauron_query: set = set()
 waiting_for_file_sauron: set = set()          # chat_id ожидает отправки файла
 file_sauron_pending: dict = {}                 # chat_id → {"records": [...], "filename": str}
 
+# Фоторедактор: chat_id → {"prompt": str, "actor_id": int}
+waiting_for_photo_edit: dict = {}
+
 # Чаты в режиме свободного ИИ-диалога («🤖 ИИ чат»)
 ai_chat_mode: set = set()
 
@@ -1307,6 +1316,75 @@ def _actor_identity_block(chat_id: int, from_user=None) -> str:
     return "\n".join(lines) + "\n"
 
 
+PHOTO_EDIT_DEFAULT_PROMPT = "Улучши фото естественно: свет, резкость, цвета. Не меняй смысл сцены."
+PHOTO_EDIT_PREFIXES = (
+    "редактируй",
+    "отредактируй",
+    "фоторедактор",
+    "обработай фото",
+    "обработай",
+    "измени фото",
+    "измени",
+    "улучши фото",
+    "улучши",
+)
+
+
+def _photo_editor_allowed(chat_id: int, from_user=None) -> bool:
+    if _env_flag("PHOTO_EDITOR_FOR_ALL", False):
+        return True
+    actor_id = _actor_id_for_request(chat_id, from_user)
+    if actor_id == OWNER_ID:
+        return True
+    username = (getattr(from_user, "username", None) or "").strip().lstrip("@").lower()
+    if username and username in PHOTO_EDITOR_ALLOWED_USERNAMES:
+        return True
+    profile = _profile_from_user(from_user, actor_id)
+    profile_username = str(profile.get("username") or "").strip().lstrip("@").lower()
+    return bool(profile_username and profile_username in PHOTO_EDITOR_ALLOWED_USERNAMES)
+
+
+def _extract_photo_edit_prompt(text: str, bot_username: str | None = None) -> str | None:
+    raw = strip_bot_mention(str(text or ""), bot_username).strip()
+    if not raw:
+        return None
+
+    parts = raw.split(maxsplit=1)
+    command = parts[0].split("@", 1)[0].lower() if parts else ""
+    if command in ("/photo", "/foto", "/editphoto", "/image"):
+        return parts[1].strip() if len(parts) > 1 and parts[1].strip() else PHOTO_EDIT_DEFAULT_PROMPT
+
+    low = raw.casefold()
+    for prefix in PHOTO_EDIT_PREFIXES:
+        if low == prefix:
+            return PHOTO_EDIT_DEFAULT_PROMPT
+        if low.startswith(prefix + " "):
+            prompt = raw[len(prefix):].strip(" :—-\n\t")
+            return prompt or PHOTO_EDIT_DEFAULT_PROMPT
+    return None
+
+
+def _btn_photo_editor(chat_id: int, prompt: str | None = None, from_user=None):
+    if not _photo_editor_allowed(chat_id, from_user):
+        bot.send_message(chat_id, "🖼 Фоторедактор пока доступен только Руслану и @skyyylit.")
+        return
+    if not photo_editor.image_editor_available(CONFIG.openai_direct_api_key):
+        bot.send_message(chat_id, "⚠️ Фоторедактору нужен прямой OPENAI_API_KEY в Railway Variables.")
+        return
+
+    clean_prompt = (prompt or PHOTO_EDIT_DEFAULT_PROMPT).strip()
+    waiting_for_photo_edit[chat_id] = {
+        "prompt": clean_prompt,
+        "actor_id": _actor_id_for_request(chat_id, from_user),
+    }
+    bot.send_message(
+        chat_id,
+        "🖼 Кидай фото одним сообщением.\n"
+        f"Задача: {clean_prompt}",
+        reply_markup=None if _chat_is_group(chat_id) else main_menu(chat_id),
+    )
+
+
 def _display_name_for_chat_id(chat_id: int, fallback: str = "работник") -> str:
     profile = _profile_for_chat_id(chat_id)
     display_name = _profile_display_name(profile, "")
@@ -1404,6 +1482,8 @@ def main_menu(chat_id: int | None = None):
     markup.add("🩺 Статус", "📞 Звонок")
     markup.add("📋 Задачи")
     markup.add("🔍 Саурон", "📁 Файл → Саурон")
+    if chat_id is not None and _photo_editor_allowed(chat_id):
+        markup.add("🖼 Фоторедактор")
     if chat_id == OWNER_ID:
         markup.add("👥 Пользователи")
     return markup
@@ -1417,6 +1497,7 @@ BOT_COMMANDS = (
     ("tasks", "задачи и напоминания"),
     ("sauron", "поиск через Sauron"),
     ("file_sauron", "поиск по файлу через Sauron"),
+    ("photo", "фоторедактор"),
     ("ai_mode", "текущий режим ИИ"),
     ("kryven", "включить Kryven"),
     ("openai", "вернуть обычный ИИ"),
@@ -2457,6 +2538,8 @@ def process_text(chat_id, text, from_user=None):
         "саурон":                lambda: _btn_sauron_search(chat_id),
         "📁 файл → саурон":     lambda: _btn_file_sauron(chat_id),
         "файл саурон":           lambda: _btn_file_sauron(chat_id),
+        "🖼 фоторедактор":       lambda: _btn_photo_editor(chat_id, from_user=from_user),
+        "фоторедактор":          lambda: _btn_photo_editor(chat_id, from_user=from_user),
         "🔙 назад":              lambda: bot.send_message(chat_id, "Главное меню 👇", reply_markup=main_menu()),
     }
 
@@ -2477,6 +2560,11 @@ def process_text(chat_id, text, from_user=None):
     ]
     if any(trigger in tl for trigger in user_report_triggers):
         _btn_users(chat_id)
+        return
+
+    photo_prompt = _extract_photo_edit_prompt(t)
+    if photo_prompt is not None:
+        _btn_photo_editor(chat_id, photo_prompt, from_user=from_user)
         return
 
     label_key = tl.strip()
@@ -2665,6 +2753,7 @@ def _btn_status(chat_id):
         lines.append("🔍 Sauron: ⚠️ ошибка модуля")
     active_ai = _chat_ai_backend_label(chat_id)
     lines.append(f"🧠 ИИ-ответы: {active_ai}")
+    lines.append(f"🖼 Фоторедактор: {'✅ готов' if photo_editor.image_editor_available(CONFIG.openai_direct_api_key) else '⚠️ нужен OPENAI_API_KEY'}")
     calls_ok = any(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TELNYX_API_KEY"))
     lines.append(f"📞 Звонки: {'✅ настроены' if calls_ok else '⚠️ не настроены'}")
     if os.environ.get("TWILIO_ACCOUNT_SID"):
@@ -2686,6 +2775,9 @@ def _btn_skills(chat_id):
     else:
         lines.append("  ✅ Свободный диалог на русском")
         lines.append("  ⚠️ Голос/TTS: нужен OPENAI_API_KEY")
+    image_ok = photo_editor.image_editor_available(CONFIG.openai_direct_api_key)
+    lines.append(f"  {'✅' if image_ok else '⚠️'} Фоторедактор по команде /photo{' ' if image_ok else ' — нужен OPENAI_API_KEY'}")
+    lines.append("  ✅ Доступ к фоторедактору: Руслан и @skyyylit")
 
     lines.append("\n🧠 *Память и контекст*")
     try:
@@ -3944,6 +4036,17 @@ def cmd_file_sauron(message):
     _btn_file_sauron(chat_id)
 
 
+@bot.message_handler(commands=['photo', 'foto', 'editphoto', 'image'])
+def cmd_photo_editor(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/photo")
+    if not _message_is_allowed(message):
+        return
+    text = message.text or ""
+    prompt = _extract_photo_edit_prompt(text, BOT_USERNAME) or PHOTO_EDIT_DEFAULT_PROMPT
+    _btn_photo_editor(chat_id, prompt, from_user=message.from_user)
+
+
 @bot.message_handler(commands=['openai', 'chatgpt', 'kryven_off'])
 def cmd_openai_backend(message):
     chat_id = message.chat.id
@@ -4062,7 +4165,7 @@ def start(message):
     elif role == "worker":
         bot.send_message(chat_id, "👋 Привет! Можешь написать Руслану или просто задать вопрос.", reply_markup=worker_menu())
     else:
-        bot.send_message(chat_id, "👋 Привет! Пиши обычным текстом или выбери кнопку ниже.", reply_markup=main_menu())
+        bot.send_message(chat_id, "👋 Привет! Пиши обычным текстом или выбери кнопку ниже.", reply_markup=main_menu(chat_id))
 
 
 @bot.message_handler(content_types=['voice'])
@@ -4188,6 +4291,83 @@ def handle_audio(message):
         return
 
     _analyze_dialog_audio(chat_id, audio_bytes, filename, msg_dl.message_id)
+
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    chat_id = message.chat.id
+    _track_user(message, "photo")
+    if not _message_is_allowed(message):
+        return
+
+    actor_id = _actor_id_for_request(chat_id, message.from_user)
+    pending = waiting_for_photo_edit.get(chat_id)
+    pending_for_actor = bool(pending and int(pending.get("actor_id") or 0) == int(actor_id))
+    caption = message.caption or ""
+    caption_prompt = _extract_photo_edit_prompt(caption, BOT_USERNAME)
+
+    if _chat_is_group(message):
+        if group_enabled(chat_id):
+            remember_message(
+                chat_id,
+                _chat_title(message),
+                message.from_user,
+                f"Отправлено фото. Подпись: {caption}" if caption else "Отправлено фото.",
+                kind="photo",
+                message_id=getattr(message, "message_id", 0),
+            )
+        if not pending_for_actor and not should_answer_in_group(message, BOT_USERNAME):
+            return
+
+    if caption_prompt is None and not pending_for_actor:
+        return
+
+    prompt = (caption_prompt or str(pending.get("prompt") or PHOTO_EDIT_DEFAULT_PROMPT)).strip()
+    if pending_for_actor:
+        waiting_for_photo_edit.pop(chat_id, None)
+
+    if not _photo_editor_allowed(chat_id, message.from_user):
+        bot.send_message(chat_id, "🖼 Фоторедактор пока доступен только Руслану и @skyyylit.")
+        return
+    if not photo_editor.image_editor_available(CONFIG.openai_direct_api_key):
+        bot.send_message(chat_id, "⚠️ Фоторедактору нужен прямой OPENAI_API_KEY в Railway Variables.")
+        return
+
+    progress = bot.send_message(chat_id, "🖼 Принял фото. Редактирую, подожди немного…")
+    try:
+        bot.send_chat_action(chat_id, "upload_photo")
+        source_photo = message.photo[-1]
+        file_info = bot.get_file(source_photo.file_id)
+        image_bytes = bot.download_file(file_info.file_path)
+        edited = photo_editor.edit_photo(
+            image_bytes,
+            prompt,
+            api_key=CONFIG.openai_direct_api_key,
+        )
+        output = io.BytesIO(edited)
+        output.name = "edited_photo.png"
+        try:
+            bot.delete_message(chat_id, progress.message_id)
+        except Exception:
+            pass
+        try:
+            bot.send_photo(chat_id, output, caption=f"Готово: {prompt[:180]}", reply_markup=_reply_markup_for_chat(chat_id))
+        except Exception:
+            output.seek(0)
+            bot.send_document(chat_id, output, caption=f"Готово: {prompt[:180]}", reply_markup=_reply_markup_for_chat(chat_id))
+    except Exception as e:
+        logger.exception("Photo edit failed: %s", e)
+        hint = str(e)
+        if "OPENAI_API_KEY" in hint:
+            hint = "Нужен прямой OPENAI_API_KEY в Railway Variables."
+        elif "timeout" in hint.lower() or "долго" in hint.lower():
+            hint = "OpenAI долго не отвечает. Попробуй ещё раз или фото попроще."
+        elif "401" in hint or "auth" in hint.lower() or "api key" in hint.lower():
+            hint = "Проверь OPENAI_API_KEY в Railway Variables."
+        try:
+            bot.edit_message_text(f"❌ Не смог отредактировать фото: {hint[:500]}", chat_id, progress.message_id)
+        except Exception:
+            bot.send_message(chat_id, f"❌ Не смог отредактировать фото: {hint[:500]}")
 
 
 def _run_file_sauron(chat_id: int, doc, filename: str):
