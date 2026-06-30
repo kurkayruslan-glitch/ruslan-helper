@@ -849,6 +849,8 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
             [],
             memory_block=_DIALOG_ANALYSIS_SYSTEM,
         )
+        if str(analysis).lstrip().startswith(("❌", "⏳")):
+            raise RuntimeError(str(analysis).strip())
 
         _set_dialog_progress(
             chat_id,
@@ -856,7 +858,7 @@ def _analyze_dialog_audio(chat_id: int, audio_bytes: bytes, filename: str, progr
             filename,
             90,
             "📄 Разбор готов.",
-            "Собираю TXT-файл и отправляю в чат.",
+            "Собираю HTML-отчет и отправляю в чат.",
         )
         bot.send_chat_action(chat_id, "upload_document")
         _send_dialog_analysis_file(chat_id, filename, duration_text, analysis, markup)
