@@ -1680,6 +1680,25 @@ def _format_users_report(limit: int = 50) -> str:
             "last_seen": "",
             "message_count": 0,
         })
+    existing_usernames = {
+        str(profile.get("username") or "").lower()
+        for profile in profiles.values()
+        if isinstance(profile, dict)
+    }
+    for username, custom_name in PINNED_PROFILE_NAMES.items():
+        if username in existing_usernames:
+            continue
+        profiles[f"pinned:{username}"] = {
+            "user_id": 0,
+            "chat_id": 0,
+            "username": username,
+            "custom_name": custom_name,
+            "first_seen": "ждет сообщения боту",
+            "last_seen": "ждет сообщения боту",
+            "last_event": "закрепленное имя",
+            "message_count": 0,
+            "pending": True,
+        }
 
     if not profiles:
         return "👥 Пока никто не запускал бота."
@@ -1707,7 +1726,7 @@ def _format_users_report(limit: int = 50) -> str:
         last_event = profile.get("last_event") or "?"
         lines.extend([
             f"{i}. *{_md_escape(name)}* · {username_label}",
-            f"   ID: `{chat_id}` · роль: *{role}*",
+            f"   ID: `{chat_id}` · роль: *{role}*" if chat_id else "   ID: _появится после сообщения боту_ · роль: *Гость*",
             f"   Первый вход: `{first_seen}`",
             f"   Последний раз: `{last_seen}` · действий: `{count}` · `{_md_escape(last_event)}`",
             "",
