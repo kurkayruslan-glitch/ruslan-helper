@@ -6,11 +6,13 @@ from grok import SYSTEM_PROMPT, ANALYST_PROMPT
 
 _DIRECT_OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 _PROXY_OPENAI_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY", "").strip()
-OPENAI_API_KEY = _DIRECT_OPENAI_KEY
+OPENAI_API_KEY = _DIRECT_OPENAI_KEY or _PROXY_OPENAI_KEY
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "2200"))
 AUDIO_ANALYSIS_MAX_TOKENS = int(os.environ.get("OPENAI_AUDIO_ANALYSIS_MAX_TOKENS", "7000"))
 VOICE_CALL_MAX_TOKENS = int(os.environ.get("OPENAI_VOICE_CALL_MAX_TOKENS", "220"))
+DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_CHAT_TIMEOUT_SECONDS", "90"))
+AUDIO_ANALYSIS_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_AUDIO_ANALYSIS_TIMEOUT_SECONDS", "240"))
 
 _explicit_base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
 _proxy_base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL", "").strip()
@@ -24,11 +26,13 @@ else:
 HISTORY_WINDOW = 20
 
 
-def _call_api(messages: list, max_tokens: int = None) -> str:
+def _call_api(messages: list, max_tokens: int | None = None, timeout_seconds: int | None = None) -> str:
     key = _DIRECT_OPENAI_KEY or _PROXY_OPENAI_KEY
     if not key:
-        return "❌ OpenAI не настроен — добавь OPENAI_API_KEY в Railway Variables"
+        return "❌ OpenAI не настроен — добавь OPENAI_API_KEY в Railway Variables."
+
     max_tokens = max_tokens or DEFAULT_MAX_TOKENS
+    timeout_seconds = timeout_seconds or DEFAULT_TIMEOUT_SECONDS
     try:
         resp = requests.post(
             f"{OPENAI_BASE_URL}/chat/completions",
@@ -40,44 +44,63 @@ def _call_api(messages: list, max_tokens: int = None) -> str:
                 "model": OPENAI_MODEL,
                 "messages": messages,
                 "max_tokens": max_tokens,
-                "temperature": 0.9,
+                "temperature": 0.5,
             },
-            timeout=60,
+            timeout=timeout_seconds,
         )
         if resp.status_code == 401:
             return "❌ Неверный API ключ OpenAI."
         if resp.status_code == 429:
-            return "⏳ Лимит запросов OpenAI. Подожди минуту."
+            return "⏳ Лимит запросов OpenAI. Подожди минуту и повтори."
         if resp.status_code != 200:
             return f"❌ Ошибка OpenAI ({resp.status_code}): {resp.text[:300]}"
         return resp.json()["choices"][0]["message"]["content"].strip()
     except requests.exceptions.Timeout:
-        return "⏳ OpenAI не ответил вовремя. Попробуй ещё раз."
+        return "⏳ OpenAI не ответил вовремя. Попробуй файл короче или повтори позже."
     except Exception as e:
         return f"❌ Ошибка OpenAI: {str(e)[:200]}"
 
 
+def _is_audio_analysis_request(user_message: str, memory_block: str) -> bool:
+    text = f"{memory_block}\n{user_message}"
+    markers = (
+        "Анализ аудиозаписи разговора",
+        "Транскрипт с примерными таймкодами Whisper",
+        "Сделай полный разбор аудиозаписи",
+        "главная цель разбора",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_voice_call_request(memory_block: str) -> bool:
+    return "голосовой помощник Руслана в телефонном звонке" in memory_block
+
+
 def ask_grok(user_message: str, history: list = None, memory_block: str = "") -> str:
-    """Чат с ChatGPT. Совместимое имя функции (так зовёт bot.py)."""
+    """Чат с ChatGPT. Имя оставлено совместимым с остальными backend'ами."""
     system_content = SYSTEM_PROMPT + ("\n" + memory_block if memory_block else "")
     messages = [{"role": "system", "content": system_content}]
     if history:
         window = history[-HISTORY_WINDOW:]
-        valid = [m for m in window
-                 if isinstance(m, dict) and "role" in m and "content" in m]
+        valid = [
+            m for m in window
+            if isinstance(m, dict) and "role" in m and "content" in m
+        ]
         messages.extend(valid)
     messages.append({"role": "user", "content": str(user_message)})
-    if "Анализ аудиозаписи разговора" in memory_block:
-        max_tokens = AUDIO_ANALYSIS_MAX_TOKENS
-    elif "голосовой помощник Руслана в телефонном звонке" in memory_block:
-        max_tokens = VOICE_CALL_MAX_TOKENS
-    else:
-        max_tokens = None
-    return _call_api(messages, max_tokens=max_tokens)
+
+    if _is_audio_analysis_request(str(user_message), memory_block):
+        return _call_api(
+            messages,
+            max_tokens=AUDIO_ANALYSIS_MAX_TOKENS,
+            timeout_seconds=AUDIO_ANALYSIS_TIMEOUT_SECONDS,
+        )
+    if _is_voice_call_request(memory_block):
+        return _call_api(messages, max_tokens=VOICE_CALL_MAX_TOKENS)
+    return _call_api(messages)
 
 
-def analyze_sheet_with_grok(sheet_title: str, headers: list,
-                             data_rows: list, raw_stats: str) -> str:
+def analyze_sheet_with_grok(sheet_title: str, headers: list, data_rows: list, raw_stats: str) -> str:
     """Анализ Google Таблицы через ChatGPT."""
     preview_rows = data_rows[:80]
     table_lines = [" | ".join(str(c) for c in headers), "-" * 60]
@@ -98,4 +121,4 @@ def analyze_sheet_with_grok(sheet_title: str, headers: list,
         {"role": "system", "content": ANALYST_PROMPT},
         {"role": "user", "content": prompt},
     ]
-    return _call_api(messages, max_tokens=2400)
+    return _call_api(messages, max_tokens=2400, timeout_seconds=120)
