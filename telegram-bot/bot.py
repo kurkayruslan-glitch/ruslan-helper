@@ -148,11 +148,10 @@ WHITELIST_FILE = CONFIG.whitelist_file
 
 def _load_whitelist() -> set:
     data = read_json_file(WHITELIST_FILE, [], logger=logger)
-    try:
+    if isinstance(data, (list, tuple, set)):
         return set(data)
-    except TypeError:
-        logger.warning("Whitelist file has invalid format: %s", WHITELIST_FILE)
-        return {OWNER_ID}
+    logger.warning("Whitelist file has invalid format: %s", WHITELIST_FILE)
+    return {OWNER_ID}
 
 def _save_whitelist():
     write_json_file(WHITELIST_FILE, list(allowed_users), logger=logger)
@@ -1462,7 +1461,7 @@ def _load_grok_history() -> dict:
     data = read_json_file(GROK_HISTORY_FILE, {}, logger=logger)
     try:
         return {int(k): v for k, v in data.items() if isinstance(v, list)}
-    except (TypeError, ValueError) as exc:
+    except (AttributeError, TypeError, ValueError) as exc:
         logger.warning("Chat history file has invalid format: %s (%s)", GROK_HISTORY_FILE, exc)
     return {}
 
