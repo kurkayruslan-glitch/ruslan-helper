@@ -190,19 +190,23 @@ def _reply_markup_for_chat(chat_id: int):
 # ДОСТУП — бот открыт для всех пользователей
 # ──────────────────────────────────────────────
 OWNER_ID = CONFIG.owner_id     # Руслан — всегда имеет доступ
-# Старый секретный код оставлен только для совместимости; вход по нему больше не нужен
-SECRET_CODE = CONFIG.bot_secret_code
 WHITELIST_FILE = CONFIG.whitelist_file
 
 def _load_whitelist() -> set:
     data = read_json_file(WHITELIST_FILE, [], logger=logger)
+    users = {OWNER_ID}
     if isinstance(data, (list, tuple, set)):
-        return set(data)
+        for value in data:
+            try:
+                users.add(int(value))
+            except (TypeError, ValueError):
+                logger.warning("Invalid whitelist entry ignored: %r", value)
+        return users
     logger.warning("Whitelist file has invalid format: %s", WHITELIST_FILE)
-    return {OWNER_ID}
+    return users
 
 def _save_whitelist():
-    write_json_file(WHITELIST_FILE, list(allowed_users), logger=logger)
+    write_json_file(WHITELIST_FILE, sorted(int(x) for x in allowed_users), logger=logger)
 
 allowed_users: set = _load_whitelist()
 allowed_users.add(OWNER_ID)
@@ -211,8 +215,21 @@ def is_allowed(chat_id: int) -> bool:
     return True
 
 def grant_access(chat_id: int):
-    # Public access is enabled; keep function for old handlers.
-    return None
+    try:
+        allowed_users.add(int(chat_id))
+        _save_whitelist()
+    except (TypeError, ValueError):
+        logger.warning("Invalid chat id for whitelist: %r", chat_id)
+
+
+def _group_is_disabled(message) -> bool:
+    return _chat_is_group(message) and not group_enabled(message.chat.id)
+
+
+def _message_is_allowed(message) -> bool:
+    if _chat_is_group(message):
+        return group_enabled(message.chat.id)
+    return is_allowed(message.chat.id)
 
 # ──────────────────────────────────────────────
 
@@ -1809,7 +1826,9 @@ def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
         "Ты — Ruslan Helper, умный персональный ассистент Руслана. "
         "Думай как сильный ChatGPT/Codex: внимательно понимай запрос, рассуждай, "
         "предлагай следующий шаг и помогай доводить дело до результата. "
-        "Общайся на русском языке: дружелюбно, спокойно, уверенно, без воды. "
+        "Общайся на русском языке: дерзко, живо, как умный кент в Telegram, без воды. "
+        "Можно использовать мат, жёсткие подколы и грубоватые фразы, если это уместно по контексту. "
+        "Не превращайся в токсичную помойку: без угроз, травли, унижения по национальности, религии, полу, болезни или другим личным признакам. "
         "Если не хватает данных — задай один короткий уточняющий вопрос. "
         "Если можно помочь сразу — помогай сразу. "
         "Никогда не проси пароли, коды SMS, токены или личные данные. "
@@ -2336,7 +2355,7 @@ def _btn_ai_chat(chat_id):
 # ⚡ JARVIS MODE — функции командного центра
 # ══════════════════════════════════════════════════════════════════
 
-def _jarvis_system_status() -> str:
+def _jarvis_system_status(chat_id: int) -> str:
     """Генерирует компактный статус-блок всех подсистем."""
     now = _now_local()
     tz = _ukraine_tz_hours()
@@ -2445,7 +2464,7 @@ def _btn_jarvis(chat_id):
     else:
         greet = "Добрый вечер"
 
-    status = _jarvis_system_status()
+    status = _jarvis_system_status(chat_id)
     silence_hint = "🔇 _Режим тишины активен_\n" if chat_id in silence_mode else ""
     text = (
         "⚡ *КОМАНДНЫЙ ЦЕНТР*\n"
@@ -3369,7 +3388,7 @@ def handle_sheet_command(chat_id, text, mode):
 def cmd_forget(message):
     chat_id = message.chat.id
     _track_user(message, "command:/forget")
-    if not is_allowed(chat_id):
+    if not _message_is_allowed(message):
         return
     grok_history.pop(chat_id, None)
     clear_chat_summary(chat_id)
@@ -3432,6 +3451,8 @@ def _start_anketa(chat_id: int):
 
 @bot.message_handler(commands=['anketa', 'анкета', 'profile'])
 def cmd_anketa(message):
+    if not _message_is_allowed(message):
+        return
     _start_anketa(message.chat.id)
 
 
@@ -3597,6 +3618,8 @@ def _send_code_file(chat_id: int, name: str):
 
 @bot.message_handler(commands=['files', 'code_list'])
 def cmd_files(message):
+    if not _message_is_allowed(message):
+        return
     _send_code_list(message.chat.id)
 
 @bot.message_handler(commands=['code'])
@@ -3615,6 +3638,8 @@ def cmd_code(message):
 def cmd_kryven(message):
     chat_id = message.chat.id
     _track_user(message, "command:/kryven")
+    if not _message_is_allowed(message):
+        return
     if not kryven_available():
         bot.send_message(
             chat_id,
@@ -3635,6 +3660,8 @@ def cmd_kryven(message):
 def cmd_help(message):
     chat_id = message.chat.id
     _track_user(message, "command:/help")
+    if not _message_is_allowed(message):
+        return
     _btn_skills(chat_id)
 
 
@@ -3642,6 +3669,8 @@ def cmd_help(message):
 def cmd_status(message):
     chat_id = message.chat.id
     _track_user(message, "command:/status")
+    if not _message_is_allowed(message):
+        return
     _btn_status(chat_id)
 
 
@@ -3649,6 +3678,8 @@ def cmd_status(message):
 def cmd_call(message):
     chat_id = message.chat.id
     _track_user(message, "command:/call")
+    if not _message_is_allowed(message):
+        return
     _btn_call(chat_id)
 
 
@@ -3656,6 +3687,8 @@ def cmd_call(message):
 def cmd_tasks(message):
     chat_id = message.chat.id
     _track_user(message, "command:/tasks")
+    if not _message_is_allowed(message):
+        return
     if _chat_is_group(message):
         safe_send(chat_id, tasks_report(chat_id))
         return
@@ -3673,12 +3706,17 @@ def cmd_work_group(message):
     text = message.text or ""
     command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
     args = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+    user_id = int(getattr(message.from_user, "id", 0) or 0)
+
+    if command != "/group_on" and not group_enabled(chat_id):
+        if user_id == OWNER_ID and command == "/group_status":
+            bot.send_message(chat_id, "Group bot: disabled")
+        return
 
     if command == "/group_tasks":
         safe_send(chat_id, tasks_report(chat_id))
         return
 
-    user_id = int(getattr(message.from_user, "id", 0) or 0)
     if user_id != OWNER_ID:
         bot.send_message(chat_id, "Эту настройку может менять только Руслан.")
         return
@@ -3715,6 +3753,8 @@ def cmd_work_group(message):
 def cmd_sauron(message):
     chat_id = message.chat.id
     _track_user(message, "command:/sauron")
+    if not _message_is_allowed(message):
+        return
     _btn_sauron_search(chat_id)
 
 
@@ -3722,6 +3762,8 @@ def cmd_sauron(message):
 def cmd_file_sauron(message):
     chat_id = message.chat.id
     _track_user(message, "command:/file_sauron")
+    if not _message_is_allowed(message):
+        return
     _btn_file_sauron(chat_id)
 
 
@@ -3729,6 +3771,8 @@ def cmd_file_sauron(message):
 def cmd_openai_backend(message):
     chat_id = message.chat.id
     _track_user(message, "command:/openai")
+    if not _message_is_allowed(message):
+        return
     _set_chat_ai_backend(chat_id, "default")
     bot.send_message(
         chat_id,
@@ -3741,6 +3785,8 @@ def cmd_openai_backend(message):
 def cmd_ai_mode(message):
     chat_id = message.chat.id
     _track_user(message, "command:/ai_mode")
+    if not _message_is_allowed(message):
+        return
     active = _chat_ai_backend_label(chat_id)
     kryven_state = "✅ настроен" if kryven_available() else "⚠️ нет KRYVEN_API_KEY"
     bot.send_message(
@@ -3799,12 +3845,14 @@ def cmd_users(message):
 def start(message):
     chat_id = message.chat.id
     _track_user(message, "command:/start")
+    if _chat_is_group(message):
+        return
     if message.from_user and message.from_user.username:
         known_users[message.from_user.username.lower()] = chat_id
         _save_known_users()
         logger.info("Known user saved: @%s -> %s", message.from_user.username, chat_id)
     if not is_allowed(chat_id):
-        bot.send_message(chat_id, "🔒 Введи секретный код для доступа:",
+        bot.send_message(chat_id, "🔒 Нет доступа. Попроси Руслана добавить твой Telegram ID в whitelist.",
                          reply_markup=types.ReplyKeyboardRemove())
         return
     role = get_role(chat_id)
@@ -3844,7 +3892,7 @@ def start(message):
 def handle_voice(message):
     chat_id = message.chat.id
     _track_user(message, "voice")
-    if not is_allowed(chat_id):
+    if not _message_is_allowed(message):
         return
 
     # Голос работает ТОЛЬКО через прямой OPENAI_API_KEY — Replit proxy не поддерживает audio.
@@ -3943,7 +3991,7 @@ def handle_audio(message):
     """Принимает аудиофайлы (MP3 и др.) и анализирует диалог."""
     chat_id = message.chat.id
     _track_user(message, "audio")
-    if not is_allowed(chat_id):
+    if not _message_is_allowed(message):
         return
 
     audio = message.audio
@@ -4088,7 +4136,7 @@ def build_location_markup(lat, lon, is_live=False):
 def handle_location(message):
     chat_id = message.chat.id
     _track_user(message, "location")
-    if not is_allowed(chat_id):
+    if not _message_is_allowed(message):
         return
     lat = message.location.latitude
     lon = message.location.longitude
@@ -4119,6 +4167,8 @@ def handle_live_location_update(message):
     """Обновления живой геолокации"""
     chat_id = message.chat.id
     _track_user(message, "live_location")
+    if not _message_is_allowed(message):
+        return
     if message.location is None:
         return
 
@@ -4139,7 +4189,8 @@ def callback_send_geo(call):
 
 def process_worker(chat_id: int, text: str):
     """Обработка команд для рабочего — аналитика + звонок Руслану"""
-    t = text.lower()
+    raw_text = str(text or "").strip()
+    t = raw_text.lower()
     # ── Ожидаем текст для звонка ──────────────────────
     if chat_id in waiting_for_call_msg:
         waiting_for_call_msg.pop(chat_id)
@@ -4184,7 +4235,19 @@ def process_worker(chat_id: int, text: str):
         result = analyze_sheet_with_ai(sheet_id)
         safe_send(chat_id, result, reply_markup=worker_menu())
     else:
-        bot.send_message(chat_id, "Нажми кнопку 👇", reply_markup=worker_menu())
+        if not raw_text:
+            bot.send_message(chat_id, "Нажми кнопку 👇", reply_markup=worker_menu())
+            return
+        _ask_grok_and_route(
+            chat_id,
+            raw_text,
+            extra_memory=(
+                "Пользователь имеет роль worker. "
+                "На обычные сообщения отвечай как нормальный ИИ-помощник. "
+                "Не отправляй его к кнопкам, если он задал обычный вопрос. "
+                "Если он явно хочет связаться с Русланом, подскажи кнопку 'Позвонить Руслану'."
+            ),
+        )
 
 
 def process_driver(chat_id: int, text: str):
@@ -4215,6 +4278,21 @@ def handle_message(message):
     text = message.text or ""
 
     if _chat_is_group(message):
+        group_cmd = (text or "").strip().lower()
+        if group_cmd in (
+            "выключи чат в группе",
+            "выключи бота в группе",
+            "убери бота с группы",
+            "убери бота из группы",
+            "бот молчи",
+            "бот не отвечай",
+        ):
+            if getattr(message.from_user, "id", None) == OWNER_ID:
+                set_group_enabled(chat_id, False)
+                bot.send_message(chat_id, "✅ Бот выключен в этой группе. Включить обратно: /group_on")
+            return
+        if not group_enabled(chat_id):
+            return
         if group_enabled(chat_id):
             remember_message(
                 chat_id,
@@ -4232,15 +4310,8 @@ def handle_message(message):
         _ask_grok_and_route(chat_id, group_question, extra_memory=recent_context(chat_id))
         return
 
-    # Проверка секретного кода для незарегистрированных
     if not is_allowed(chat_id):
-        if text.strip() == SECRET_CODE:
-            grant_access(chat_id)
-            bot.send_message(chat_id,
-                             "✅ Код принят. Ожидай — Руслан назначит тебе доступ.",
-                             reply_markup=types.ReplyKeyboardRemove())
-        else:
-            bot.send_message(chat_id, "🔒 Нет доступа.")
+        bot.send_message(chat_id, "🔒 Нет доступа. Попроси Руслана добавить твой Telegram ID в whitelist.")
         return
     role = get_role(chat_id)
     if role == "worker":
@@ -4277,7 +4348,7 @@ def handle_document(message):
     """
     chat_id = message.chat.id
     _track_user(message, "document")
-    if not is_allowed(chat_id):
+    if not _message_is_allowed(message):
         return
 
     doc      = message.document
@@ -5071,4 +5142,3 @@ if __name__ == "__main__":
             else:
                 logger.exception("Polling failed, restart in 5 seconds: %s", e)
                 time.sleep(5)
-
