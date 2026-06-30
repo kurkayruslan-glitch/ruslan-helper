@@ -86,6 +86,8 @@ from memory import (
     get_chat_summary, save_chat_summary, clear_chat_summary,
     format_chat_summary_for_prompt,
 )
+from kryven import ask_kryven
+from ai_backend_modes import is_kryven_enabled, enable_kryven, disable_kryven
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
 import tax_calendar
@@ -125,6 +127,11 @@ def _now_local() -> datetime:
 
 OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
 OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
+
+# Kryven API key for chat-level AI backend switching
+KRYVEN_API_KEY = os.environ.get("KRYVEN_API_KEY", "").strip()
+if KRYVEN_API_KEY:
+    print("🧠 Kryven API key loaded — /kryven command available")
 
 # Клиент для текстового ИИ-чата — через Replit proxy (если есть) или прямой ключ
 if OpenAI and OPENAI_API_KEY:
@@ -920,6 +927,9 @@ jarvis_mode: set = set()
 
 # Чаты в режиме тишины — короткие ответы без подсказок
 silence_mode: set = set()
+
+# Чаты с включённым режимом Kryven AI
+kryven_mode: set = set()
 
 # Журнал действий раздела «Мой ПК» (in-memory, последние 200 записей)
 remote_action_log: list = []
@@ -1723,7 +1733,21 @@ def _ask_grok_and_route(chat_id: int, text: str):
     if chat_id in silence_mode:
         memory_block += "\n[ТИШИНА]: Только факт или ответ. Максимум 2 предложения."
     bot.send_chat_action(chat_id, "typing")
-    reply = ask_grok(text, history, memory_block=memory_block)
+    # Route through Kryven if enabled for this chat
+
+    if is_kryven_enabled(chat_id):
+
+        if KRYVEN_API_KEY:
+
+            reply = ask_kryven(text, history, memory_block=memory_block, system_prompt=personality)
+
+        else:
+
+            reply = "❌ Kryven не настроен — добавь KRYVEN_API_KEY в Railway Variables."
+
+    else:
+
+        reply = ask_grok(text, history, memory_block=memory_block)
 
     # Извлекаем оба формата тегов памяти: [REMEMBER:] и [ACTION:remember:] (только для владельца)
     new_facts, reply_without_remember = _extract_remember_tags(reply)
@@ -3486,6 +3510,63 @@ def cmd_users(message):
     if chat_id != OWNER_ID:
         return
     _btn_users(chat_id)
+
+
+@bot.message_handler(commands=['kryven', 'kryven_on'])
+def cmd_kryven_on(message):
+    """Enable Kryven AI mode for this chat."""
+    chat_id = message.chat.id
+    _track_user(message, "command:/kryven")
+    
+    if not KRYVEN_API_KEY:
+        safe_send(chat_id, "❌ Kryven не настроен — KRYVEN_API_KEY не задан в Railway Variables.")
+        return
+    
+    enable_kryven(chat_id)
+    kryven_mode.add(chat_id)
+    safe_send(
+        chat_id,
+        "✅ Режим Kryven включен!\n\n"
+        "Теперь все ответы будут идти через Kryven AI.\n"
+        "Для возврата к обычному режиму используй /openai или /chatgpt.",
+        main_menu()
+    )
+
+
+@bot.message_handler(commands=['openai', 'chatgpt', 'kryven_off'])
+def cmd_kryven_off(message):
+    """Disable Kryven AI mode and return to default backend."""
+    chat_id = message.chat.id
+    _track_user(message, "command:/openai")
+    
+    disable_kryven(chat_id)
+    kryven_mode.discard(chat_id)
+    safe_send(
+        chat_id,
+        "✅ Вернулся в обычный режим (OpenAI/ChatGPT).\n\n"
+        "Для включения Kryven используй /kryven.",
+        main_menu()
+    )
+
+
+@bot.message_handler(commands=['ai_mode', 'aimode'])
+def cmd_ai_mode(message):
+    """Show current AI mode and configuration status."""
+    chat_id = message.chat.id
+    _track_user(message, "command:/ai_mode")
+    
+    current_mode = "🔵 Kryven" if is_kryven_enabled(chat_id) else "🔴 OpenAI (default)"
+    kryven_status = "✅ Настроен" if KRYVEN_API_KEY else "❌ Не настроен"
+    
+    response = (
+        f"*Текущий режим ИИ:* {current_mode}\n\n"
+        f"*Статус Kryven:* {kryven_status}\n\n"
+        f"*Команды:*\n"
+        f"/kryven — включить Kryven\n"
+        f"/openai — вернуться в OpenAI\n"
+        f"/ai_mode — показать этот статус"
+    )
+    safe_send(chat_id, response, main_menu())
 
 
 @bot.message_handler(commands=['start'])
