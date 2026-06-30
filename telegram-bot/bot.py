@@ -1515,6 +1515,7 @@ _chat_memory_lock = threading.Lock()
 # Известные пользователи: username (без @) → chat_id (сохраняем на диск)
 KNOWN_USERS_FILE = "known_users.json"
 USER_PROFILES_FILE = "user_profiles.json"
+PENDING_USER_MESSAGES_FILE = "pending_user_messages.json"
 PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
 }
@@ -1553,6 +1554,28 @@ def _save_user_profiles():
     import json
     with open(USER_PROFILES_FILE, "w", encoding="utf-8") as f:
         json.dump(user_profiles, f, ensure_ascii=False, indent=2)
+
+
+def _load_pending_user_messages() -> dict:
+    if os.path.exists(PENDING_USER_MESSAGES_FILE):
+        try:
+            import json
+            with open(PENDING_USER_MESSAGES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                str(k).lower(): [str(item) for item in v if str(item).strip()]
+                for k, v in data.items()
+                if isinstance(v, list)
+            }
+        except Exception:
+            pass
+    return {}
+
+
+def _save_pending_user_messages(data: dict):
+    import json
+    with open(PENDING_USER_MESSAGES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 user_profiles: dict = _load_user_profiles()
@@ -1606,6 +1629,15 @@ def _track_user(message, event: str = "message", from_user=None):
                     known_users.pop(old_name, None)
             known_users[uname] = chat_id
             _save_known_users()
+            pending = _load_pending_user_messages()
+            messages = pending.pop(uname, [])
+            if messages:
+                _save_pending_user_messages(pending)
+                for pending_text in messages[:5]:
+                    try:
+                        bot.send_message(chat_id, pending_text)
+                    except Exception as send_error:
+                        print(f"Не удалось отправить отложенное сообщение @{uname}: {send_error}")
         _save_user_profiles()
     except Exception as e:
         print(f"Ошибка учёта пользователя: {e}")
@@ -4046,7 +4078,13 @@ def _finish_anketa(chat_id):
 # ──────────────────────────────────────────────
 CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 CODE_ALLOWED_EXT = {".py", ".json", ".txt", ".md"}
-CODE_DENYLIST = {"whitelist.json", "known_users.json", "user_profiles.json", "memory.json"}  # содержат приватные данные
+CODE_DENYLIST = {
+    "whitelist.json",
+    "known_users.json",
+    "user_profiles.json",
+    "pending_user_messages.json",
+    "memory.json",
+}  # содержат приватные данные
 
 def _list_code_files() -> list[str]:
     files = []
