@@ -80,14 +80,19 @@ elif _backend == "gemini":
 else:
     from chatgpt import ask_grok
     print("🧠 LLM backend: openai (ChatGPT)")
+try:
+    from kryven import ask_kryven, kryven_available
+except Exception as e:
+    ask_kryven = None
+    def kryven_available() -> bool:
+        return False
+    print(f"🧠 Kryven backend unavailable: {e}")
 from memory import (
     get_facts, add_fact, delete_fact, clear_facts,
     format_for_prompt, format_for_display, clear_all as clear_memory,
     get_chat_summary, save_chat_summary, clear_chat_summary,
     format_chat_summary_for_prompt,
 )
-from kryven import ask_kryven
-from ai_backend_modes import is_kryven_enabled, enable_kryven, disable_kryven
 from tron import get_usdt_transactions, get_account_balance, build_tx_summary
 from reminders import add_reminder, get_due, mark_fired, mark_failed, list_pending, cancel_reminder
 import tax_calendar
@@ -127,11 +132,6 @@ def _now_local() -> datetime:
 
 OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
 OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
-
-# Kryven API key for chat-level AI backend switching
-KRYVEN_API_KEY = os.environ.get("KRYVEN_API_KEY", "").strip()
-if KRYVEN_API_KEY:
-    print("🧠 Kryven API key loaded — /kryven command available")
 
 # Клиент для текстового ИИ-чата — через Replit proxy (если есть) или прямой ключ
 if OpenAI and OPENAI_API_KEY:
@@ -922,14 +922,62 @@ file_sauron_pending: dict = {}                 # chat_id → {"records": [...], 
 # Чаты в режиме свободного ИИ-диалога («🤖 ИИ чат»)
 ai_chat_mode: set = set()
 
+# Режим ИИ по чатам: default — штатный backend, kryven — Kryven API.
+AI_BACKEND_MODES_FILE = "ai_backend_modes.json"
+
+def _load_ai_backend_modes() -> dict:
+    if os.path.exists(AI_BACKEND_MODES_FILE):
+        try:
+            import json
+            with open(AI_BACKEND_MODES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                int(chat_id): str(mode).lower()
+                for chat_id, mode in data.items()
+                if str(mode).lower() in ("default", "kryven")
+            }
+        except Exception:
+            pass
+    return {}
+
+
+def _save_ai_backend_modes():
+    import json
+    with open(AI_BACKEND_MODES_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            {str(chat_id): mode for chat_id, mode in chat_ai_backend_modes.items()},
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+chat_ai_backend_modes: dict = _load_ai_backend_modes()
+
+
+def _get_chat_ai_backend(chat_id: int) -> str:
+    return chat_ai_backend_modes.get(chat_id, "default")
+
+
+def _set_chat_ai_backend(chat_id: int, mode: str):
+    mode = (mode or "default").lower()
+    if mode == "kryven":
+        chat_ai_backend_modes[chat_id] = "kryven"
+    else:
+        chat_ai_backend_modes.pop(chat_id, None)
+    _save_ai_backend_modes()
+
+
+def _chat_ai_backend_label(chat_id: int) -> str:
+    if _get_chat_ai_backend(chat_id) == "kryven":
+        return "Kryven"
+    return os.environ.get("LLM_BACKEND", "openai").lower()
+
 # Чаты в режиме Jarvis — командный центр
 jarvis_mode: set = set()
 
 # Чаты в режиме тишины — короткие ответы без подсказок
 silence_mode: set = set()
-
-# Чаты с включённым режимом Kryven AI
-kryven_mode: set = set()
 
 # Журнал действий раздела «Мой ПК» (in-memory, последние 200 записей)
 remote_action_log: list = []
@@ -1140,6 +1188,33 @@ def main_menu(chat_id: int | None = None):
     if chat_id == OWNER_ID:
         markup.add("👥 Пользователи")
     return markup
+
+
+BOT_COMMANDS = (
+    ("start", "главное меню"),
+    ("help", "что умеет бот"),
+    ("status", "статус бота"),
+    ("call", "звонок или ИИ-звонок"),
+    ("tasks", "задачи и напоминания"),
+    ("sauron", "поиск через Sauron"),
+    ("file_sauron", "поиск по файлу через Sauron"),
+    ("ai_mode", "текущий режим ИИ"),
+    ("kryven", "включить Kryven"),
+    ("openai", "вернуть обычный ИИ"),
+    ("memory", "память бота"),
+    ("forget", "очистить историю диалога"),
+    ("users", "кто пользуется ботом"),
+)
+
+
+def _sync_bot_commands():
+    """Обновляет меню быстрых команд Telegram."""
+    try:
+        commands = [types.BotCommand(command, description) for command, description in BOT_COMMANDS]
+        bot.set_my_commands(commands)
+        print(f"⚡ Telegram quick commands synced: {len(commands)}")
+    except Exception as e:
+        print(f"⚠️ Не удалось обновить быстрые команды Telegram: {e}")
 
 
 def ai_chat_menu():
@@ -1733,20 +1808,12 @@ def _ask_grok_and_route(chat_id: int, text: str):
     if chat_id in silence_mode:
         memory_block += "\n[ТИШИНА]: Только факт или ответ. Максимум 2 предложения."
     bot.send_chat_action(chat_id, "typing")
-    # Route through Kryven if enabled for this chat
-
-    if is_kryven_enabled(chat_id):
-
-        if KRYVEN_API_KEY:
-
-            reply = ask_kryven(text, history, memory_block=memory_block, system_prompt=personality)
-
+    if _get_chat_ai_backend(chat_id) == "kryven":
+        if ask_kryven is None:
+            reply = "❌ Kryven backend не загрузился. Переключись обратно командой /openai."
         else:
-
-            reply = "❌ Kryven не настроен — добавь KRYVEN_API_KEY в Railway Variables."
-
+            reply = ask_kryven(text, history, memory_block=memory_block)
     else:
-
         reply = ask_grok(text, history, memory_block=memory_block)
 
     # Извлекаем оба формата тегов памяти: [REMEMBER:] и [ACTION:remember:] (только для владельца)
@@ -2019,6 +2086,32 @@ def process_text(chat_id, text):
     # 1.5 ЯВНЫЕ КОМАНДЫ ПАМЯТИ — «запомни что...» (только для владельца)
     # ══════════════════════════════════════════════════════════════════
 
+    if tl.strip() in ("kryven", "кривен", "включи kryven", "включи кривен", "режим kryven", "режим кривен"):
+        if not kryven_available():
+            bot.send_message(
+                chat_id,
+                "❌ Kryven пока не настроен: нужен KRYVEN_API_KEY в Railway Variables.",
+                reply_markup=main_menu(chat_id),
+            )
+            return
+        _set_chat_ai_backend(chat_id, "kryven")
+        bot.send_message(
+            chat_id,
+            "🧠 Kryven включён. Следующие обычные ответы пойдут через Kryven.\n\n"
+            "Вернуть обычный режим: /openai",
+            reply_markup=main_menu(chat_id),
+        )
+        return
+
+    if tl.strip() in ("openai", "chatgpt", "чатгпт", "обычный ии", "выключи kryven", "выключи кривен"):
+        _set_chat_ai_backend(chat_id, "default")
+        bot.send_message(
+            chat_id,
+            "✅ Обычный ИИ-режим включён. Следующие ответы снова пойдут через основной backend.",
+            reply_markup=main_menu(chat_id),
+        )
+        return
+
     if chat_id == OWNER_ID:
         remember_prefixes = [
             "запомни что ", "запомни: ", "запомни ",
@@ -2214,7 +2307,7 @@ def _jarvis_system_status() -> str:
     lines = []
 
     # ИИ backend
-    backend = os.environ.get("LLM_BACKEND", "openai").lower()
+    backend = _chat_ai_backend_label(chat_id)
     key_map = {
         "openai":  ("OPENAI_API_KEY", "AI_INTEGRATIONS_OPENAI_API_KEY"),
         "grok":    ("XAI_API_KEY",),
@@ -2338,11 +2431,13 @@ def _btn_status(chat_id):
         lines.append(f"🔍 Sauron: {sauron.status()}")
     except Exception:
         lines.append("🔍 Sauron: ⚠️ ошибка модуля")
+    active_ai = _chat_ai_backend_label(chat_id)
+    lines.append(f"🧠 ИИ-ответы: {active_ai}")
     calls_ok = any(os.environ.get(k) for k in ("TWILIO_ACCOUNT_SID", "TELNYX_API_KEY"))
     lines.append(f"📞 Звонки: {'✅ настроены' if calls_ok else '⚠️ не настроены'}")
     if os.environ.get("TWILIO_ACCOUNT_SID"):
         lines.append(f"🎙️ Живой ИИ-звонок: {'✅ готов' if voice_call_available() else '⚠️ нужен PUBLIC_BASE_URL'}")
-    lines.append("🧠 Умный режим: ✅ пиши обычным текстом")
+    lines.append("💬 Умный режим: ✅ пиши обычным текстом")
     safe_send(chat_id, "\n".join(lines), main_menu())
 
 
@@ -2524,6 +2619,8 @@ def _btn_ai_budget(chat_id):
         "grok":    "grok-3 — см. xai.com/pricing",
         "gemini":  "gemini-flash ≈ бесплатный лимит + платный",
         "llama":   "Бесплатно (локальный Ollama)",
+        "Kryven":  "kryven-flash ≈ $0.50/1M входящих · $4/1M исходящих",
+        "kryven":  "kryven-flash ≈ $0.50/1M входящих · $4/1M исходящих",
     }
     lines = [
         "💸 *Бюджет ИИ*\n",
@@ -3472,6 +3569,98 @@ def cmd_code(message):
     _send_code_file(chat_id, parts[1].strip())
 
 
+@bot.message_handler(commands=['kryven', 'kryven_on'])
+def cmd_kryven(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/kryven")
+    if not kryven_available():
+        bot.send_message(
+            chat_id,
+            "❌ Kryven пока не настроен: нужен KRYVEN_API_KEY в Railway Variables.",
+            reply_markup=main_menu(chat_id),
+        )
+        return
+    _set_chat_ai_backend(chat_id, "kryven")
+    bot.send_message(
+        chat_id,
+        "🧠 Kryven включён. Следующие обычные ответы пойдут через Kryven.\n\n"
+        "Вернуть обычный режим: /openai",
+        reply_markup=main_menu(chat_id),
+    )
+
+
+@bot.message_handler(commands=['help', 'menu'])
+def cmd_help(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/help")
+    _btn_skills(chat_id)
+
+
+@bot.message_handler(commands=['status'])
+def cmd_status(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/status")
+    _btn_status(chat_id)
+
+
+@bot.message_handler(commands=['call'])
+def cmd_call(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/call")
+    _btn_call(chat_id)
+
+
+@bot.message_handler(commands=['tasks'])
+def cmd_tasks(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/tasks")
+    _btn_tasks(chat_id)
+
+
+@bot.message_handler(commands=['sauron'])
+def cmd_sauron(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/sauron")
+    _btn_sauron_search(chat_id)
+
+
+@bot.message_handler(commands=['file_sauron', 'filesauron'])
+def cmd_file_sauron(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/file_sauron")
+    _btn_file_sauron(chat_id)
+
+
+@bot.message_handler(commands=['openai', 'chatgpt', 'kryven_off'])
+def cmd_openai_backend(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/openai")
+    _set_chat_ai_backend(chat_id, "default")
+    bot.send_message(
+        chat_id,
+        "✅ Обычный ИИ-режим включён. Следующие ответы снова пойдут через основной backend.",
+        reply_markup=main_menu(chat_id),
+    )
+
+
+@bot.message_handler(commands=['ai_mode', 'aimode'])
+def cmd_ai_mode(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/ai_mode")
+    active = _chat_ai_backend_label(chat_id)
+    kryven_state = "✅ настроен" if kryven_available() else "⚠️ нет KRYVEN_API_KEY"
+    bot.send_message(
+        chat_id,
+        "🧠 *Режим ИИ*\n\n"
+        f"Сейчас: *{active}*\n"
+        f"Kryven: {kryven_state}\n\n"
+        "/kryven — отвечать через Kryven\n"
+        "/openai — вернуть обычный режим",
+        parse_mode="Markdown",
+        reply_markup=main_menu(chat_id),
+    )
+
+
 @bot.message_handler(commands=['memory'])
 def cmd_memory(message):
     chat_id = message.chat.id
@@ -3510,63 +3699,6 @@ def cmd_users(message):
     if chat_id != OWNER_ID:
         return
     _btn_users(chat_id)
-
-
-@bot.message_handler(commands=['kryven', 'kryven_on'])
-def cmd_kryven_on(message):
-    """Enable Kryven AI mode for this chat."""
-    chat_id = message.chat.id
-    _track_user(message, "command:/kryven")
-    
-    if not KRYVEN_API_KEY:
-        safe_send(chat_id, "❌ Kryven не настроен — KRYVEN_API_KEY не задан в Railway Variables.")
-        return
-    
-    enable_kryven(chat_id)
-    kryven_mode.add(chat_id)
-    safe_send(
-        chat_id,
-        "✅ Режим Kryven включен!\n\n"
-        "Теперь все ответы будут идти через Kryven AI.\n"
-        "Для возврата к обычному режиму используй /openai или /chatgpt.",
-        main_menu()
-    )
-
-
-@bot.message_handler(commands=['openai', 'chatgpt', 'kryven_off'])
-def cmd_kryven_off(message):
-    """Disable Kryven AI mode and return to default backend."""
-    chat_id = message.chat.id
-    _track_user(message, "command:/openai")
-    
-    disable_kryven(chat_id)
-    kryven_mode.discard(chat_id)
-    safe_send(
-        chat_id,
-        "✅ Вернулся в обычный режим (OpenAI/ChatGPT).\n\n"
-        "Для включения Kryven используй /kryven.",
-        main_menu()
-    )
-
-
-@bot.message_handler(commands=['ai_mode', 'aimode'])
-def cmd_ai_mode(message):
-    """Show current AI mode and configuration status."""
-    chat_id = message.chat.id
-    _track_user(message, "command:/ai_mode")
-    
-    current_mode = "🔵 Kryven" if is_kryven_enabled(chat_id) else "🔴 OpenAI (default)"
-    kryven_status = "✅ Настроен" if KRYVEN_API_KEY else "❌ Не настроен"
-    
-    response = (
-        f"*Текущий режим ИИ:* {current_mode}\n\n"
-        f"*Статус Kryven:* {kryven_status}\n\n"
-        f"*Команды:*\n"
-        f"/kryven — включить Kryven\n"
-        f"/openai — вернуться в OpenAI\n"
-        f"/ai_mode — показать этот статус"
-    )
-    safe_send(chat_id, response, main_menu())
 
 
 @bot.message_handler(commands=['start'])
@@ -4741,6 +4873,7 @@ def _scheduler_loop():
 
 if __name__ == "__main__":
     keep_alive()
+    _sync_bot_commands()
     # Запускаем планировщик напоминаний в фоновом потоке
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="reminder-scheduler")
     scheduler_thread.start()
