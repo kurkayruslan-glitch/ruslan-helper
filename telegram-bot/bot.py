@@ -1519,7 +1519,6 @@ PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
 }
 
-
 def _load_known_users() -> dict:
     if os.path.exists(KNOWN_USERS_FILE):
         try:
@@ -1593,11 +1592,11 @@ def _track_user(message, event: str = "message", from_user=None):
             "last_event": event,
             "message_count": int(profile.get("message_count", 0)) + 1,
         })
-                pinned_name = PINNED_PROFILE_NAMES.get(username.lower())
+        pinned_name = PINNED_PROFILE_NAMES.get(username.lower())
         if pinned_name:
             profile["custom_name"] = pinned_name
             profile["display_rule"] = f'Обращаться к пользователю только как "{pinned_name}".'
-profile.setdefault("first_seen", now)
+        profile.setdefault("first_seen", now)
         user_profiles[key] = profile
 
         if username:
@@ -1616,6 +1615,22 @@ def _md_escape(value) -> str:
     text = str(value or "")
     return text.replace("\\", "\\\\").replace("`", "\\`").replace("*", "\\*").replace("_", "\\_")
 
+
+def _profile_display_name(profile: dict, fallback: str = "Без имени") -> str:
+    if not isinstance(profile, dict):
+        return fallback
+    custom_name = str(profile.get("custom_name") or "").strip()
+    if custom_name:
+        return custom_name
+    full_name = str(profile.get("full_name") or "").strip()
+    if full_name:
+        return full_name
+    first_name = str(profile.get("first_name") or "").strip()
+    last_name = str(profile.get("last_name") or "").strip()
+    name = " ".join(p for p in (first_name, last_name) if p).strip()
+    return name or fallback
+
+
 def _profile_for_chat_id(chat_id: int) -> dict:
     try:
         target_id = int(chat_id)
@@ -1630,6 +1645,23 @@ def _profile_for_chat_id(chat_id: int) -> dict:
             return profile
     return {}
 
+
+def _display_name_for_chat_id(chat_id: int, fallback: str = "работник") -> str:
+    profile = _profile_for_chat_id(chat_id)
+    display_name = _profile_display_name(profile, "")
+    if display_name:
+        return display_name
+    try:
+        target_id = int(chat_id)
+    except Exception:
+        return fallback
+    for username, known_chat_id in known_users.items():
+        try:
+            if int(known_chat_id) == target_id:
+                return f"@{username}"
+        except Exception:
+            continue
+    return fallback
 
 
 def _format_users_report(limit: int = 50) -> str:
@@ -1666,11 +1698,7 @@ def _format_users_report(limit: int = 50) -> str:
     for i, profile in enumerate(shown, 1):
         chat_id = int(profile.get("chat_id") or profile.get("user_id") or 0)
         username = profile.get("username") or ""
-                name = str(profile.get("custom_name") or "").strip() or profile.get("full_name") or " ".join(
-            p for p in (profile.get("first_name"), profile.get("last_name")) if p
-        ).strip()
-        if not name:
-            name = "Без имени"
+        name = _profile_display_name(profile)
         role = role_names.get(roles_data.get(str(chat_id), "guest"), "Гость")
         username_label = f"@{_md_escape(username)}" if username else "_без username_"
         first_seen = profile.get("first_seen") or "?"
@@ -2283,7 +2311,7 @@ def _ask_grok_and_route(chat_id: int, text: str):
     """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
     history = grok_history.get(chat_id, [])
     memory_block = format_for_prompt() + format_chat_summary_for_prompt(chat_id)
-        profile = _profile_for_chat_id(chat_id)
+    profile = _profile_for_chat_id(chat_id)
     custom_name = str(profile.get("custom_name") or "").strip()
     display_rule = str(profile.get("display_rule") or "").strip()
     if custom_name:
@@ -2292,7 +2320,6 @@ def _ask_grok_and_route(chat_id: int, text: str):
             + (display_rule + "\n" if display_rule else "")
             + memory_block
         )
-
     # Добавляем текущую дату и время, чтобы Grok правильно рассчитывал относительные сроки
     now = _now_local()
     tz = _ukraine_tz_hours()
@@ -4540,19 +4567,7 @@ def process_worker(chat_id: int, text: str):
         if not owner_phone:
             bot.send_message(chat_id, "⚠️ Номер Руслана не настроен. Обратись напрямую.", reply_markup=worker_menu())
             return
-        username = ""
-        for u, cid in known_users.items():
-            if cid == chat_id:
-                username = u
-                break
-                display_name = username or "работник"
-        try:
-            profile = next((p for p in user_profiles.values() if int(p.get("chat_id") or p.get("user_id") or 0) == int(chat_id)), {})
-        except Exception:
-            profile = {}
-        custom_name = str(profile.get("custom_name") or "").strip()
-        if custom_name:
-            display_name = custom_name
+        display_name = _display_name_for_chat_id(chat_id)
         say_text = f"Привет Руслан, твой рабочий {display_name} говорит: {text}"
         bot.send_message(chat_id, "📞 Звоню Руслану...")
         ok, info = make_call(owner_phone, say_text)
@@ -4560,7 +4575,7 @@ def process_worker(chat_id: int, text: str):
             bot.send_message(chat_id, "✅ Позвонил! Руслан услышит твоё сообщение.", reply_markup=worker_menu())
             # Уведомление Руслану в Telegram
             bot.send_message(OWNER_ID,
-                                                          f"📞 *Рабочий {_md_escape(display_name)} звонит тебе!*\n\nСообщение: _{_md_escape(text)}_",
+                             f"📞 *Рабочий {_md_escape(display_name)} звонит тебе!*\n\nСообщение: _{_md_escape(text)}_",
                              parse_mode="Markdown")
         else:
             bot.send_message(chat_id, f"❌ Не удалось позвонить: {info}", reply_markup=worker_menu())
