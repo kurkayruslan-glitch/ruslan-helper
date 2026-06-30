@@ -1834,13 +1834,23 @@ def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
     if chat_id in silence_mode:
         memory_block += "\n[ТИШИНА]: Только факт или ответ. Максимум 2 предложения."
     bot.send_chat_action(chat_id, "typing")
-    if _get_chat_ai_backend(chat_id) == "kryven":
-        if ask_kryven is None:
-            reply = "❌ Kryven backend не загрузился. Переключись обратно командой /openai."
+    try:
+        if _get_chat_ai_backend(chat_id) == "kryven":
+            if ask_kryven is None:
+                reply = "❌ Kryven backend не загрузился. Переключись обратно командой /openai."
+            else:
+                reply = ask_kryven(text, history, memory_block=memory_block)
         else:
-            reply = ask_kryven(text, history, memory_block=memory_block)
-    else:
-        reply = ask_grok(text, history, memory_block=memory_block)
+            reply = ask_grok(text, history, memory_block=memory_block)
+    except Exception as e:
+        logger.exception("AI reply failed: %s", e)
+        safe_send(
+            chat_id,
+            "⚠️ Я получил сообщение, но ИИ-ответ сейчас не собрался. "
+            "Попробуй ещё раз или переключи режим командой /openai.",
+            _reply_markup_for_chat(chat_id),
+        )
+        return
 
     # Извлекаем оба формата тегов памяти: [REMEMBER:] и [ACTION:remember:] (только для владельца)
     new_facts, reply_without_remember = _extract_remember_tags(reply)
@@ -3853,6 +3863,22 @@ def handle_voice(message):
     try:
         file_info = bot.get_file(message.voice.file_id)
         downloaded = bot.download_file(file_info.file_path)
+        voice_duration = int(getattr(message.voice, "duration", 0) or 0)
+
+        if chat_id != OWNER_ID:
+            filename = f"voice_{getattr(message, 'message_id', int(time.time()))}.ogg"
+            if _chat_is_group(message):
+                if voice_duration < 25 and not should_answer_in_group(message, BOT_USERNAME):
+                    # Короткие голосовые в группе считаем обычной рабочей репликой.
+                    pass
+                else:
+                    remember_audio_report(chat_id, _chat_title(message), message.from_user, filename, _fmt_audio_time(voice_duration))
+                    _analyze_dialog_audio(chat_id, downloaded, filename, msg.message_id)
+                    return
+            else:
+                _analyze_dialog_audio(chat_id, downloaded, filename, msg.message_id)
+                return
+
         audio_file = io.BytesIO(downloaded)
         audio_file.name = "voice.ogg"
 
