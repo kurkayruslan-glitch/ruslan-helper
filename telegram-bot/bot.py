@@ -1,4 +1,4 @@
-﻿# Загружаем переменные из .env (если есть python-dotenv и .env-файл)
+# Загружаем переменные из .env (если есть python-dotenv и .env-файл)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -12,7 +12,6 @@ import os
 import time
 import io
 import hashlib
-import html
 from urllib.parse import quote
 from config import CONFIG, env_bool, local_now, ukraine_tz_hours
 from logging_setup import setup_logging
@@ -32,6 +31,19 @@ from dialog_reports import (
     is_llm_error,
     markdown_to_report_html,
     split_dialog_transcript,
+)
+from work_groups import (
+    add_report_recipient,
+    group_enabled,
+    is_group_chat,
+    recent_context,
+    remember_audio_report,
+    remember_message,
+    report_recipients,
+    set_group_enabled,
+    should_answer_in_group,
+    strip_bot_mention,
+    tasks_report,
 )
 
 logger = setup_logging("ruslan-helper.bot")
@@ -153,6 +165,26 @@ _DIALOG_AUDIO_MAX_BYTES = CONFIG.dialog_audio_max_bytes
 _DIALOG_AUDIO_EXTS = DIALOG_AUDIO_EXTS
 
 bot = telebot.TeleBot(TOKEN)
+BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "Ruslan_pomohnik_bot").strip().lstrip("@")
+
+
+def _chat_is_group(message_or_chat_id) -> bool:
+    chat = getattr(message_or_chat_id, "chat", None)
+    if chat is not None:
+        return is_group_chat(getattr(chat, "type", ""))
+    try:
+        return int(message_or_chat_id) < 0
+    except Exception:
+        return False
+
+
+def _chat_title(message) -> str:
+    chat = getattr(message, "chat", None)
+    return (getattr(chat, "title", None) or getattr(chat, "username", None) or "").strip()
+
+
+def _reply_markup_for_chat(chat_id: int):
+    return None if _chat_is_group(chat_id) else main_menu()
 
 # ──────────────────────────────────────────────
 # ДОСТУП — бот открыт для всех пользователей
@@ -196,21 +228,22 @@ def safe_send(chat_id: int, text: str, reply_markup=None):
                 bot.send_message(chat_id, f"⚠️ Не удалось отправить ответ: {str(e2)[:100]}")
 
 
-def _dialog_progress_text(filename: str, percent: int, stage: str, detail: str = "") -> str:
-    percent = max(0, min(100, int(percent)))
-    filled = round(percent / 10)
-    bar = "█" * filled + "░" * (10 - filled)
-    clean_name = (filename or "audio").replace("\n", " ").strip()
-    if len(clean_name) > 70:
-        clean_name = clean_name[:67] + "..."
-    lines = [
-        f"⏳ Обработка аудио: {clean_name}",
-        f"[{bar}] {percent}%",
-        stage,
-    ]
-    if detail:
-        lines.append(detail)
-    return "\n".join(lines)
+# ──────────────────────────────────────────────
+# Разбор аудио и HTML-отчёты
+# Основная логика живёт в dialog_reports.py. Здесь остаются только
+# тонкие обёртки, которым нужен Telegram-bot или локальное время.
+# ──────────────────────────────────────────────
+_dialog_progress_text = dialog_progress_text
+_clean_dialog_analysis_markdown = clean_dialog_analysis_markdown
+_markdown_to_report_html = markdown_to_report_html
+_dialog_analysis_is_meaningful = dialog_analysis_is_meaningful
+_build_local_dialog_fallback_report = build_local_dialog_fallback_report
+_is_audio_doc = is_audio_doc
+_fmt_audio_time = fmt_audio_time
+_format_whisper_transcript = format_whisper_transcript
+_is_llm_error = is_llm_error
+_compact_dialog_transcript = compact_dialog_transcript
+_split_dialog_transcript = split_dialog_transcript
 
 
 def _set_dialog_progress(chat_id: int, message_id: int | None, filename: str, percent: int, stage: str, detail: str = "") -> int:
@@ -226,518 +259,42 @@ def _set_dialog_progress(chat_id: int, message_id: int | None, filename: str, pe
 
 
 def _dialog_report_filename(original_filename: str) -> str:
-    base = os.path.splitext(os.path.basename(original_filename or "audio"))[0]
-    base = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_-]+", "_", base).strip("_")
-    if len(base) > 40:
-        base = base[:40].strip("_")
-    if not base:
-        base = "audio"
-    ts = _now_local().strftime("%Y%m%d_%H%M")
-    return f"dialog_analysis_{base}_{ts}.html"
-
-
-def _clean_dialog_analysis_markdown(analysis: str) -> str:
-    lines = (analysis or "").replace("\r\n", "\n").split("\n")
-    cleaned = []
-    at_top = True
-    for line in lines:
-        stripped = line.strip()
-        if at_top:
-            if not stripped:
-                continue
-            if re.match(r"^#\s*Анализ аудиозаписи разговора\s*$", stripped, re.IGNORECASE):
-                continue
-            if re.match(r"^(Файл|Длительность по распознаванию)\s*:", stripped, re.IGNORECASE):
-                continue
-            at_top = False
-        cleaned.append(line)
-    return "\n".join(cleaned).strip()
-
-
-def _inline_markdown_to_html(text: str) -> str:
-    out = html.escape(text or "")
-    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
-    out = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", out)
-    out = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", out)
-    return out
-
-
-def _is_table_separator(line: str) -> bool:
-    cells = [c.strip() for c in line.strip().strip("|").split("|")]
-    if len(cells) < 2:
-        return False
-    return all(re.match(r"^:?-{3,}:?$", c or "") for c in cells)
-
-
-def _split_table_row(line: str) -> list[str]:
-    return [c.strip() for c in line.strip().strip("|").split("|")]
-
-
-def _markdown_table_to_html(table_lines: list[str]) -> str:
-    rows = [_split_table_row(line) for line in table_lines if not _is_table_separator(line)]
-    if not rows:
-        return ""
-    headers = rows[0]
-    body_rows = rows[1:]
-    html_parts = ["<div class=\"table-wrap\"><table><thead><tr>"]
-    for cell in headers:
-        html_parts.append(f"<th>{_inline_markdown_to_html(cell)}</th>")
-    html_parts.append("</tr></thead><tbody>")
-    for row in body_rows:
-        if len(row) < len(headers):
-            row = row + [""] * (len(headers) - len(row))
-        html_parts.append("<tr>")
-        for cell in row[:len(headers)]:
-            html_parts.append(f"<td>{_inline_markdown_to_html(cell)}</td>")
-        html_parts.append("</tr>")
-    html_parts.append("</tbody></table></div>")
-    return "".join(html_parts)
-
-
-def _markdown_to_report_html(markdown_text: str) -> str:
-    lines = (markdown_text or "").replace("\r\n", "\n").split("\n")
-    out = []
-    paragraph = []
-    in_ul = False
-    in_ol = False
-    in_code = False
-    code_lines = []
-
-    def flush_paragraph():
-        nonlocal paragraph
-        if paragraph:
-            text = " ".join(p.strip() for p in paragraph if p.strip())
-            out.append(f"<p>{_inline_markdown_to_html(text)}</p>")
-            paragraph = []
-
-    def close_lists():
-        nonlocal in_ul, in_ol
-        if in_ul:
-            out.append("</ul>")
-            in_ul = False
-        if in_ol:
-            out.append("</ol>")
-            in_ol = False
-
-    def flush_code():
-        nonlocal code_lines
-        if code_lines:
-            code_text = html.escape("\n".join(code_lines))
-            out.append(f"<pre><code>{code_text}</code></pre>")
-            code_lines = []
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        if in_code:
-            if stripped.startswith("```"):
-                in_code = False
-                flush_code()
-            else:
-                code_lines.append(line)
-            i += 1
-            continue
-
-        if stripped.startswith("```"):
-            flush_paragraph()
-            close_lists()
-            in_code = True
-            i += 1
-            continue
-
-        if not stripped:
-            flush_paragraph()
-            close_lists()
-            i += 1
-            continue
-
-        if "|" in stripped and i + 1 < len(lines) and _is_table_separator(lines[i + 1]):
-            flush_paragraph()
-            close_lists()
-            table_lines = [line, lines[i + 1]]
-            i += 2
-            while i < len(lines) and "|" in lines[i].strip():
-                table_lines.append(lines[i])
-                i += 1
-            out.append(_markdown_table_to_html(table_lines))
-            continue
-
-        heading = re.match(r"^(#{1,4})\s+(.+)$", stripped)
-        if heading:
-            flush_paragraph()
-            close_lists()
-            level = 2 if len(heading.group(1)) <= 2 else 3
-            out.append(f"<h{level}>{_inline_markdown_to_html(heading.group(2).strip())}</h{level}>")
-            i += 1
-            continue
-
-        bullet = re.match(r"^[-•]\s+(.+)$", stripped)
-        if bullet:
-            flush_paragraph()
-            if in_ol:
-                out.append("</ol>")
-                in_ol = False
-            if not in_ul:
-                out.append("<ul>")
-                in_ul = True
-            out.append(f"<li>{_inline_markdown_to_html(bullet.group(1))}</li>")
-            i += 1
-            continue
-
-        numbered = re.match(r"^\d+[\.\)]\s+(.+)$", stripped)
-        if numbered:
-            flush_paragraph()
-            if in_ul:
-                out.append("</ul>")
-                in_ul = False
-            if not in_ol:
-                out.append("<ol>")
-                in_ol = True
-            out.append(f"<li>{_inline_markdown_to_html(numbered.group(1))}</li>")
-            i += 1
-            continue
-
-        close_lists()
-        paragraph.append(line)
-        i += 1
-
-    flush_paragraph()
-    close_lists()
-    flush_code()
-    return "\n".join(part for part in out if part)
-
-
-def _dialog_analysis_is_meaningful(analysis: str) -> bool:
-    clean = _clean_dialog_analysis_markdown(analysis)
-    if len(clean.strip()) < 6000:
-        return False
-    lowered = clean.lower()
-    markers = (
-        "короткий вывод",
-        "диагноз менеджера",
-        "главные оценки",
-        "оценки",
-        "что найдено",
-        "общая оценка",
-        "оценка менеджера",
-        "оценка переговорщика",
-        "подробный разбор",
-        "разбор по репликам",
-        "таблица ошибок",
-        "топ-10",
-        "тренерские заметки",
-        "контроль разговора",
-        "доверие",
-        "рекоменда",
-        "ошибк",
-    )
-    return sum(1 for marker in markers if marker in lowered) >= 8
-
-
-def _build_local_dialog_fallback_report(
-    filename: str,
-    duration_text: str,
-    transcript_text: str,
-    reason: str = "",
-) -> str:
-    excerpt = _compact_dialog_transcript(transcript_text, 30000)
-    note = reason.strip() or "Kryven не вернул содержательный аналитический текст."
-    return (
-        "# Отчет CallInsight\n\n"
-        f"Файл: `{filename or 'audio'}`\n"
-        "Модель: `Whisper + Kryven`\n"
-        "Язык: `ru`\n"
-        f"Длительность по распознаванию: {duration_text or 'не определена'}\n"
-        "Фокус: `Разбор диалога`\n"
-        "Цель звонящего: `Понять суть диалога, ошибки, риски и итог разговора`\n"
-        "Контекст: это скрипт Днепровского офиса по РФ.\n"
-        f"Качество аналитики: автоматический резервный отчёт. Причина: {note}\n\n"
-        "## Короткий вывод\n\n"
-        "Kryven не вернул достаточно большой аналитический отчёт. Ниже сохранён расширенный резервный файл: "
-        "шаблон оценки, причина сбоя и расшифровка, чтобы материал не потерялся.\n\n"
-        "## Общая оценка\n\n"
-        "| Пункт | Вывод |\n"
-        "|---|---|\n"
-        "| Цель разговора | Нужно повторить LLM-анализ по сохранённой расшифровке |\n"
-        "| Достигнута ли цель | Полная аналитика не построена автоматически |\n"
-        "| Кто контролировал диалог | Нужен повторный разбор |\n"
-        "| Кто выглядел увереннее | Нужен повторный разбор |\n"
-        "| Кто выглядел слабее | Нужен повторный разбор |\n"
-        "| Эмоциональный фон | Нужен повторный разбор |\n"
-        "| Степень уверенности вывода | низкая: это резервный файл без полноценного LLM-разбора |\n\n"
-        "## Диагноз менеджера\n\n"
-        "**Уровень:** не определён автоматически.  \n"
-        "**Вердикт:** повтори обработку, чтобы получить полноценный CallInsight-отчёт.\n\n"
-        "## Оценки\n\n"
-        "| Критерий | Балл 1-10 | Что видно в диалоге | Почему такой балл | Как улучшить |\n"
-        "|---|---:|---|---|---|\n"
-        "| Контроль разговора | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
-        "| Доверие | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
-        "| Ясность инструкции | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
-        "| Движение к легитимной цели | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
-        "| Проверяемость и корректность | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n"
-        "| Потенциал конверсии | н/д | Нужен содержательный LLM-разбор | Kryven не вернул полный отчёт | Повторить обработку записи |\n\n"
-        "## Оценка переговорщика по критериям\n\n"
-        "Не выполнена автоматически: модель не вернула содержательный отчёт.\n\n"
-        "## Сильные стороны\n\n"
-        "Не определены автоматически.\n\n"
-        "## Риски\n\n"
-        "- Главный риск сейчас технический: аналитическая модель вернула короткий или пустой ответ.\n"
-        "- Содержательная оценка звонка сохранена для повторной обработки ниже в расшифровке.\n\n"
-        "## Что улучшить\n\n"
-        "- Повторить обработку этой записи.\n"
-        "- Если запись длинная, отправить её частями.\n"
-        "- Проверить, что Kryven отвечает большим текстом, а не короткой шапкой.\n\n"
-        "## Подробный разбор по репликам\n\n"
-        "Не выполнен автоматически. Используй расшифровку ниже для повторного анализа.\n\n"
-        "## Таблица ошибок\n\n"
-        "Не выполнена автоматически.\n\n"
-        "## Психология\n\n"
-        "Не выполнена автоматически.\n\n"
-        "## Итог\n\n"
-        "Резервный файл создан, чтобы вместо пустого отчёта сохранить материал для повторного анализа.\n\n"
-        "## Расшифровка\n\n"
-        "```text\n"
-        f"{excerpt}\n"
-        "```\n\n"
-        "## Важные моменты\n\n"
-        "Файл не пустой: расшифровка сохранена. Для полноценной оценки менеджера, контроля, доверия, ясности инструкции "
-        "и соответствия скрипту Днепровского офиса по РФ отправь запись повторно или раздели её на более короткие части."
-    )
+    return dialog_report_filename(original_filename, _now_local())
 
 
 def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) -> str:
-    clean_analysis = _clean_dialog_analysis_markdown(analysis)
-    body_html = _markdown_to_report_html(clean_analysis)
-    if not body_html.strip():
-        body_html = (
-            "<div class=\"notice\"><strong>Отчёт не содержит аналитического текста.</strong><br>"
-            "Модель вернула пустую шапку без разбора. Повтори обработку записи.</div>"
-        )
-    safe_filename = html.escape(filename or "audio")
-    safe_duration = html.escape(duration_text or "не определена")
-    generated_at = html.escape(_now_local().strftime("%d.%m.%Y %H:%M"))
-    return f"""<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Анализ диалога</title>
-  <style>
-    :root {{
-      --bg: #f3f5f7;
-      --paper: #ffffff;
-      --ink: #16202a;
-      --muted: #667085;
-      --line: #d9e0e7;
-      --accent: #176b87;
-      --accent-2: #102a43;
-      --soft: #eaf4f7;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-      line-height: 1.55;
-    }}
-    .page {{
-      max-width: 980px;
-      margin: 0 auto;
-      padding: 20px;
-    }}
-    .cover {{
-      background: linear-gradient(135deg, var(--accent-2), var(--accent));
-      color: #fff;
-      border-radius: 18px;
-      padding: 28px;
-      box-shadow: 0 16px 40px rgba(16, 42, 67, .18);
-    }}
-    .eyebrow {{
-      margin: 0 0 10px;
-      color: rgba(255,255,255,.78);
-      font-size: 13px;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      font-weight: 700;
-    }}
-    h1 {{
-      margin: 0;
-      font-size: clamp(28px, 7vw, 48px);
-      line-height: 1.05;
-      letter-spacing: 0;
-    }}
-    .subtitle {{
-      margin: 14px 0 0;
-      max-width: 760px;
-      color: rgba(255,255,255,.86);
-      font-size: 16px;
-    }}
-    .meta {{
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 22px;
-    }}
-    .meta-card {{
-      background: rgba(255,255,255,.12);
-      border: 1px solid rgba(255,255,255,.18);
-      border-radius: 12px;
-      padding: 12px;
-      min-width: 0;
-    }}
-    .meta-label {{
-      display: block;
-      color: rgba(255,255,255,.68);
-      font-size: 12px;
-      margin-bottom: 5px;
-    }}
-    .meta-value {{
-      display: block;
-      overflow-wrap: anywhere;
-      font-weight: 700;
-    }}
-    .content {{
-      margin-top: 18px;
-      background: var(--paper);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 28px;
-      box-shadow: 0 10px 26px rgba(16, 42, 67, .08);
-    }}
-    .notice {{
-      border: 1px solid #f0c36d;
-      background: #fff8e6;
-      color: #5f4200;
-      border-radius: 12px;
-      padding: 14px 16px;
-      margin: 0 0 18px;
-    }}
-    h2 {{
-      margin: 34px 0 14px;
-      padding-top: 18px;
-      border-top: 1px solid var(--line);
-      color: var(--accent-2);
-      font-size: 24px;
-      line-height: 1.2;
-      letter-spacing: 0;
-    }}
-    h2:first-child {{ margin-top: 0; padding-top: 0; border-top: 0; }}
-    h3 {{
-      margin: 24px 0 10px;
-      color: var(--accent);
-      font-size: 18px;
-      line-height: 1.3;
-      letter-spacing: 0;
-    }}
-    p {{ margin: 10px 0; }}
-    ul, ol {{ padding-left: 22px; }}
-    li {{ margin: 6px 0; }}
-    pre {{
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      background: #f7fafc;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 14px;
-      margin: 14px 0 22px;
-    }}
-    code {{
-      background: var(--soft);
-      border: 1px solid #d3e9ef;
-      border-radius: 6px;
-      padding: 1px 5px;
-      font-family: "SFMono-Regular", Consolas, monospace;
-      font-size: .95em;
-    }}
-    pre code {{
-      background: transparent;
-      border: 0;
-      padding: 0;
-      font-size: .9em;
-    }}
-    .table-wrap {{
-      width: 100%;
-      overflow-x: auto;
-      margin: 14px 0 22px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-    }}
-    table {{
-      width: 100%;
-      min-width: 680px;
-      border-collapse: collapse;
-      background: #fff;
-      font-size: 14px;
-    }}
-    th {{
-      background: var(--soft);
-      color: var(--accent-2);
-      font-weight: 800;
-      text-align: left;
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--line);
-    }}
-    td {{
-      vertical-align: top;
-      padding: 10px 12px;
-      border-bottom: 1px solid #edf1f5;
-    }}
-    tr:last-child td {{ border-bottom: 0; }}
-    .footer {{
-      margin: 18px 4px 0;
-      color: var(--muted);
-      font-size: 12px;
-      text-align: center;
-    }}
-    @media (max-width: 720px) {{
-      .page {{ padding: 10px; }}
-      .cover {{ border-radius: 14px; padding: 20px; }}
-      .meta {{ grid-template-columns: 1fr; }}
-      .content {{ border-radius: 14px; padding: 18px; }}
-      h2 {{ font-size: 21px; }}
-    }}
-  </style>
-</head>
-<body>
-  <main class="page">
-    <section class="cover">
-      <p class="eyebrow">Ruslan Helper</p>
-      <h1>Анализ диалога</h1>
-      <p class="subtitle">Профессиональный разбор аудиозаписи: роли участников, важные реплики, ошибки, психология разговора и рекомендации.</p>
-      <div class="meta">
-        <div class="meta-card"><span class="meta-label">Файл</span><span class="meta-value">{safe_filename}</span></div>
-        <div class="meta-card"><span class="meta-label">Длительность</span><span class="meta-value">{safe_duration}</span></div>
-        <div class="meta-card"><span class="meta-label">Создано</span><span class="meta-value">{generated_at}</span></div>
-      </div>
-    </section>
-    <section class="content">
-      {body_html}
-    </section>
-    <p class="footer">Отчет подготовлен автоматически. Сомнительные места проверяй по исходной аудиозаписи.</p>
-  </main>
-</body>
-</html>"""
+    return build_dialog_report_html(filename, duration_text, analysis, generated_at=_now_local())
 
 
 def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, analysis: str, reply_markup=None):
     report = _build_dialog_report_html(filename, duration_text, analysis)
-    report_file = io.BytesIO(b"\xef\xbb\xbf" + report.encode("utf-8"))
-    report_file.name = _dialog_report_filename(filename)
+    report_name = _dialog_report_filename(filename)
     caption_name = filename or "audio"
     if len(caption_name) > 80:
         caption_name = caption_name[:77] + "..."
-    bot.send_document(
-        chat_id,
-        report_file,
-        caption=f"📊 Готово — красивый HTML-отчёт\n{caption_name}",
-        reply_markup=reply_markup,
-    )
 
+    def send_to(target_chat_id: int):
+        report_file = io.BytesIO(b"\xef\xbb\xbf" + report.encode("utf-8"))
+        report_file.name = report_name
+        bot.send_document(
+            target_chat_id,
+            report_file,
+            caption=f"📊 Готово — красивый HTML-отчёт\n{caption_name}",
+            reply_markup=None if _chat_is_group(target_chat_id) else reply_markup,
+        )
 
+    if _chat_is_group(chat_id):
+        sent = 0
+        for target_chat_id in report_recipients(chat_id, OWNER_ID):
+            try:
+                send_to(target_chat_id)
+                sent += 1
+            except Exception as e:
+                logger.warning("Cannot send group audio report to %s: %s", target_chat_id, e)
+        bot.send_message(chat_id, f"📊 Отчёт готов. Отправил ответственным: {sent}.")
+        return
+
+    send_to(chat_id)
 def _tts_send_voice(chat_id: int, text: str):
     """Конвертирует текст в голос через OpenAI TTS (прямой ключ) и отправляет голосовым."""
     if not voice_openai_client:
@@ -762,97 +319,6 @@ def _tts_send_voice(chat_id: int, text: str):
     except Exception as e:
         logger.exception("TTS failed: %s", e)
         # Graceful fallback — текстовый ответ уже отправлен выше
-
-
-def _is_audio_doc(filename: str, mime_type) -> bool:
-    """Возвращает True если файл является аудио по расширению или MIME-типу."""
-    ext = os.path.splitext(filename)[1].lower()
-    if ext in _DIALOG_AUDIO_EXTS:
-        return True
-    if mime_type and str(mime_type).startswith("audio/"):
-        return True
-    return False
-
-
-def _fmt_audio_time(seconds) -> str:
-    """Форматирует секунды Whisper в mm:ss или hh:mm:ss."""
-    try:
-        total = int(float(seconds))
-    except Exception:
-        return "??:??"
-    h = total // 3600
-    m = (total % 3600) // 60
-    s = total % 60
-    if h:
-        return f"{h:02d}:{m:02d}:{s:02d}"
-    return f"{m:02d}:{s:02d}"
-
-
-def _obj_get(obj, key, default=None):
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _format_whisper_transcript(transcript_obj) -> tuple[str, str, str]:
-    """Возвращает plain text, текст с таймкодами и длительность для анализа."""
-    if isinstance(transcript_obj, str):
-        text = transcript_obj.strip()
-        return text, text, ""
-
-    text = (_obj_get(transcript_obj, "text", "") or "").strip()
-    duration = _obj_get(transcript_obj, "duration", "")
-    segments = _obj_get(transcript_obj, "segments", None) or []
-
-    timed_lines = []
-    for seg in segments:
-        seg_text = (_obj_get(seg, "text", "") or "").strip()
-        if not seg_text:
-            continue
-        start = _fmt_audio_time(_obj_get(seg, "start", ""))
-        timed_lines.append(f"[{start}] {seg_text}")
-
-    timed_text = "\n".join(timed_lines).strip() or text
-    duration_text = _fmt_audio_time(duration) if duration not in ("", None) else ""
-    return text, timed_text, duration_text
-
-
-# Новая реализация отчётов и форматирования вынесена в dialog_reports.py.
-# Старые функции выше оставлены как страховка на время мягкой миграции.
-_dialog_progress_text = dialog_progress_text
-_clean_dialog_analysis_markdown = clean_dialog_analysis_markdown
-_markdown_to_report_html = markdown_to_report_html
-_dialog_analysis_is_meaningful = dialog_analysis_is_meaningful
-_build_local_dialog_fallback_report = build_local_dialog_fallback_report
-_is_audio_doc = is_audio_doc
-_fmt_audio_time = fmt_audio_time
-_format_whisper_transcript = format_whisper_transcript
-_is_llm_error = is_llm_error
-_compact_dialog_transcript = compact_dialog_transcript
-_split_dialog_transcript = split_dialog_transcript
-
-
-def _dialog_report_filename(original_filename: str) -> str:
-    return dialog_report_filename(original_filename, _now_local())
-
-
-def _build_dialog_report_html(filename: str, duration_text: str, analysis: str) -> str:
-    return build_dialog_report_html(filename, duration_text, analysis, generated_at=_now_local())
-
-
-def _send_dialog_analysis_file(chat_id: int, filename: str, duration_text: str, analysis: str, reply_markup=None):
-    report = _build_dialog_report_html(filename, duration_text, analysis)
-    report_file = io.BytesIO(b"\xef\xbb\xbf" + report.encode("utf-8"))
-    report_file.name = _dialog_report_filename(filename)
-    caption_name = filename or "audio"
-    if len(caption_name) > 80:
-        caption_name = caption_name[:77] + "..."
-    bot.send_document(
-        chat_id,
-        report_file,
-        caption=f"📊 Готово — красивый HTML-отчёт\n{caption_name}",
-        reply_markup=reply_markup,
-    )
 
 
 _DIALOG_ANALYSIS_SYSTEM = (
@@ -1076,58 +542,6 @@ _DIALOG_CHUNK_SYSTEM = (
     "минимум 1200–2500 знаков на часть, 8–15 ключевых цитат, список ошибок и сильных ходов, чтобы финальный отчёт "
     "получился похожим на большой CallInsight-разбор."
 )
-
-
-def _is_llm_error(text: str) -> bool:
-    value = str(text or "").lstrip()
-    return value.startswith(("❌", "⏳"))
-
-
-def _compact_dialog_transcript(text: str, limit: int = 12000) -> str:
-    text = str(text or "").strip()
-    if len(text) <= limit:
-        return text
-    head_len = max(1000, int(limit * 0.55))
-    tail_len = max(1000, limit - head_len)
-    return (
-        text[:head_len].rstrip()
-        + "\n\n[СЕРЕДИНА ТРАНСКРИПТА СОКРАЩЕНА: Kryven не принял полный объём за один запрос]\n\n"
-        + text[-tail_len:].lstrip()
-    )
-
-
-def _split_dialog_transcript(text: str, max_chars: int = 8500, max_chunks: int = 8) -> list[str]:
-    lines = str(text or "").splitlines()
-    if not lines:
-        return []
-
-    chunks = []
-    current = []
-    current_len = 0
-    for line in lines:
-        line_len = len(line) + 1
-        if current and current_len + line_len > max_chars:
-            chunks.append("\n".join(current).strip())
-            current = [line]
-            current_len = line_len
-        else:
-            current.append(line)
-            current_len += line_len
-
-    if current:
-        chunks.append("\n".join(current).strip())
-
-    chunks = [chunk for chunk in chunks if chunk]
-    if len(chunks) <= max_chunks:
-        return chunks
-
-    keep_start = max_chunks // 2
-    keep_end = max_chunks - keep_start
-    middle_note = (
-        "[Часть средних фрагментов не отправлена отдельным запросом, потому что запись слишком длинная. "
-        "В финальном отчёте учитывай, что выводы ограничены доступным объёмом.]"
-    )
-    return chunks[:keep_start] + [middle_note] + chunks[-keep_end:]
 
 
 def _ask_kryven_for_dialog(prompt: str, system_prompt: str) -> str:
@@ -1614,7 +1028,8 @@ def _track_user(message, event: str = "message", from_user=None):
 
         profile.update({
             "user_id": user_id,
-            "chat_id": chat_id,
+            "chat_id": user_id,
+            "last_chat_id": chat_id,
             "username": username,
             "first_name": first_name,
             "last_name": last_name,
@@ -1636,9 +1051,9 @@ def _track_user(message, event: str = "message", from_user=None):
         if username:
             uname = username.lower()
             for old_name, old_chat_id in list(known_users.items()):
-                if old_chat_id == chat_id and old_name != uname:
+                if old_chat_id == user_id and old_name != uname:
                     known_users.pop(old_name, None)
-            known_users[uname] = chat_id
+            known_users[uname] = user_id
             _save_known_users()
             pending = _load_pending_user_messages()
             messages = pending.pop(uname, [])
@@ -2369,10 +1784,12 @@ def _schedule_chat_memory_update(chat_id: int, user_text: str, assistant_text: s
         logger.exception("Chat memory worker start failed: %s", e)
 
 
-def _ask_grok_and_route(chat_id: int, text: str):
+def _ask_grok_and_route(chat_id: int, text: str, extra_memory: str = ""):
     """Отправляет сообщение в Grok, разбирает ACTION-теги и REMEMBER-теги, показывает ответ."""
     history = grok_history.get(chat_id, [])
     memory_block = format_for_prompt() + format_chat_summary_for_prompt(chat_id)
+    if extra_memory:
+        memory_block += "\n\nКонтекст рабочей группы:\n" + extra_memory.strip() + "\n"
     profile = _profile_for_chat_id(chat_id)
     custom_name = str(profile.get("custom_name") or "").strip()
     display_rule = str(profile.get("display_rule") or "").strip()
@@ -2466,7 +1883,7 @@ def _ask_grok_and_route(chat_id: int, text: str):
     if clean_reply and clean_reply.strip():
         if is_voice:
             _tts_send_voice(chat_id, clean_reply)
-        safe_send(chat_id, clean_reply, main_menu())
+        safe_send(chat_id, clean_reply, _reply_markup_for_chat(chat_id))
 
     # Тихо уведомляем если что-то запомнено
     if saved_count > 0:
@@ -4229,7 +3646,59 @@ def cmd_call(message):
 def cmd_tasks(message):
     chat_id = message.chat.id
     _track_user(message, "command:/tasks")
+    if _chat_is_group(message):
+        safe_send(chat_id, tasks_report(chat_id))
+        return
     _btn_tasks(chat_id)
+
+
+@bot.message_handler(commands=['group_on', 'group_off', 'group_tasks', 'group_access', 'group_status'])
+def cmd_work_group(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/work_group")
+    if not _chat_is_group(message):
+        bot.send_message(chat_id, "Эти команды работают внутри рабочей группы.")
+        return
+
+    text = message.text or ""
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    args = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+
+    if command == "/group_tasks":
+        safe_send(chat_id, tasks_report(chat_id))
+        return
+
+    user_id = int(getattr(message.from_user, "id", 0) or 0)
+    if user_id != OWNER_ID:
+        bot.send_message(chat_id, "Эту настройку может менять только Руслан.")
+        return
+
+    if command == "/group_on":
+        set_group_enabled(chat_id, True)
+        bot.send_message(chat_id, "✅ Память рабочей группы включена.")
+        return
+    if command == "/group_off":
+        set_group_enabled(chat_id, False)
+        bot.send_message(chat_id, "✅ Память рабочей группы выключена.")
+        return
+    if command == "/group_status":
+        enabled = "включена" if group_enabled(chat_id) else "выключена"
+        recipients = report_recipients(chat_id, OWNER_ID)
+        bot.send_message(chat_id, f"Память группы: {enabled}\nПолучателей аудиоотчётов: {len(recipients)}")
+        return
+    if command == "/group_access":
+        if not args:
+            add_report_recipient(chat_id, user_id)
+            bot.send_message(chat_id, "✅ Добавил тебя в получатели аудиоотчётов этой группы.")
+            return
+        username = args.strip().lstrip("@").split()[0].lower()
+        target_chat_id = known_users.get(username)
+        if not target_chat_id:
+            bot.send_message(chat_id, f"Не знаю @{username}. Пусть он напишет боту /start в личку, потом повтори команду.")
+            return
+        add_report_recipient(chat_id, target_chat_id)
+        bot.send_message(chat_id, f"✅ @{username} добавлен в получатели аудиоотчётов этой группы.")
+        return
 
 
 @bot.message_handler(commands=['sauron'])
@@ -4405,6 +3874,21 @@ def handle_voice(message):
 
         bot.edit_message_text(f"🗣️ «{text}»", chat_id, msg.message_id)
 
+        if _chat_is_group(message):
+            remember_message(
+                chat_id,
+                _chat_title(message),
+                message.from_user,
+                f"Голосовое сообщение: {text}",
+                kind="voice",
+                message_id=getattr(message, "message_id", 0),
+            )
+            if not should_answer_in_group(message, BOT_USERNAME):
+                bot.edit_message_text("🎙️ Голосовое расшифровано и добавлено в память группы.", chat_id, msg.message_id)
+                return
+            _ask_grok_and_route(chat_id, text, extra_memory=recent_context(chat_id))
+            return
+
         voice_request_chats.add(chat_id)
         try:
             process_text(chat_id, text)
@@ -4438,6 +3922,8 @@ def handle_audio(message):
 
     audio = message.audio
     filename = (audio.file_name or f"audio.mp3").strip()
+    if _chat_is_group(message):
+        remember_audio_report(chat_id, _chat_title(message), message.from_user, filename, "")
 
     msg_dl = bot.send_message(chat_id, _dialog_progress_text(filename, 5, "📥 Получаю файл из Telegram..."))
     try:
@@ -4701,6 +4187,25 @@ def handle_message(message):
     chat_id = message.chat.id
     _track_user(message, "text")
     text = message.text or ""
+
+    if _chat_is_group(message):
+        if group_enabled(chat_id):
+            remember_message(
+                chat_id,
+                _chat_title(message),
+                message.from_user,
+                text,
+                kind="text",
+                message_id=getattr(message, "message_id", 0),
+            )
+        if not should_answer_in_group(message, BOT_USERNAME):
+            return
+        group_question = strip_bot_mention(text, BOT_USERNAME)
+        if not group_question:
+            group_question = "Ответь по контексту этой рабочей группы."
+        _ask_grok_and_route(chat_id, group_question, extra_memory=recent_context(chat_id))
+        return
+
     # Проверка секретного кода для незарегистрированных
     if not is_allowed(chat_id):
         if text.strip() == SECRET_CODE:
@@ -4755,6 +4260,8 @@ def handle_document(message):
 
     # ── Роутинг: аудиофайлы → анализ диалога ─────────────────────────────
     if _is_audio_doc(filename, getattr(doc, 'mime_type', None)):
+        if _chat_is_group(message):
+            remember_audio_report(chat_id, _chat_title(message), message.from_user, filename, "")
         msg_dl = bot.send_message(chat_id, _dialog_progress_text(filename, 5, "📥 Получаю файл из Telegram..."))
         try:
             _set_dialog_progress(chat_id, msg_dl.message_id, filename, 10, "📥 Скачиваю файл...")
