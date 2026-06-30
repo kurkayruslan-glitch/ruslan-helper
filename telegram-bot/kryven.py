@@ -19,7 +19,7 @@ KRYVEN_API_KEY = os.environ.get("KRYVEN_API_KEY", "").strip()
 KRYVEN_BASE_URL = os.environ.get("KRYVEN_BASE_URL", "https://kryven.cc/v1").rstrip("/")
 KRYVEN_MODEL = os.environ.get("KRYVEN_MODEL", "kryven-extended").strip()
 DEFAULT_MAX_TOKENS = int(os.environ.get("KRYVEN_MAX_TOKENS", "2200"))
-DIALOG_ANALYSIS_MAX_TOKENS = int(os.environ.get("KRYVEN_DIALOG_ANALYSIS_MAX_TOKENS", "5200"))
+DIALOG_ANALYSIS_MAX_TOKENS = int(os.environ.get("KRYVEN_DIALOG_ANALYSIS_MAX_TOKENS", "12000"))
 DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("KRYVEN_TIMEOUT_SECONDS", "90"))
 DIALOG_ANALYSIS_TIMEOUT_SECONDS = int(os.environ.get("KRYVEN_DIALOG_ANALYSIS_TIMEOUT_SECONDS", "240"))
 HISTORY_WINDOW = 20
@@ -120,6 +120,16 @@ def _call_api(
                 last_error = "⏳ Лимит запросов Kryven. Подожди минуту и повтори."
             else:
                 code, message = _extract_api_error(resp)
+                if (
+                    resp.status_code == 400
+                    and payload.get("max_tokens", 0) > 7000
+                    and ("token" in message.lower() or "context" in message.lower() or "max" in message.lower())
+                    and attempt < retries
+                ):
+                    payload["max_tokens"] = 7000
+                    last_error = "⏳ Kryven не принял большой объём ответа, повторяю короче."
+                    time.sleep(min(2 + attempt * 2, 8))
+                    continue
                 if resp.status_code == 503 and (code == "empty_response" or "did not return a response" in message.lower()):
                     last_error = "⏳ Kryven временно вернул пустой ответ. Запрос будет повторён или упрощён."
                 else:
