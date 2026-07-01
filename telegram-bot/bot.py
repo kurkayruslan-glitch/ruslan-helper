@@ -1066,6 +1066,21 @@ PENDING_DEVELOPER_USERNAMES = {
     "nesss31",
     "skyyylit",
 }
+DIRECT_MESSAGE_ALIASES = {
+    "skyyylit": "skyyylit",
+    "инопланетянин": "skyyylit",
+    "инопланетянину": "skyyylit",
+    "инопланетяну": "skyyylit",
+    "nesss31": "nesss31",
+    "гуцульский комерс": "nesss31",
+    "гуцульскому комерсу": "nesss31",
+    "гуцульский коммерс": "nesss31",
+    "гуцульскому коммерсу": "nesss31",
+    "комерс": "nesss31",
+    "комерсу": "nesss31",
+    "коммерс": "nesss31",
+    "коммерсу": "nesss31",
+}
 PINNED_PROFILE_RULES = {
     "nesss31": (
         "Обращайся к этому пользователю как к Гуцульскому комерсу. "
@@ -1272,6 +1287,19 @@ def _send_owner_message_to_user(owner_chat_id: int, username: str, text: str) ->
     return True
 
 
+def _normalize_direct_message_target(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower().lstrip("@"))
+
+
+def _resolve_direct_message_alias(value: str) -> str | None:
+    return DIRECT_MESSAGE_ALIASES.get(_normalize_direct_message_target(value))
+
+
+def _direct_message_alias_pattern() -> str:
+    aliases = sorted(DIRECT_MESSAGE_ALIASES, key=len, reverse=True)
+    return "|".join(re.escape(alias).replace(r"\ ", r"\s+") for alias in aliases)
+
+
 def _handle_owner_direct_message_command(chat_id: int, text: str) -> bool:
     raw = str(text or "").strip()
     match = re.match(
@@ -1279,10 +1307,32 @@ def _handle_owner_direct_message_command(chat_id: int, text: str) -> bool:
         raw,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    if match:
+        username, message_text = match.group(1), match.group(2)
+        return _send_owner_message_to_user(chat_id, username, message_text)
+
+    match = re.match(
+        r"^(?:напиши|передай|отправь)\s+@([A-Za-z0-9_]{3,32})\s+(.+)$",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        username, message_text = match.group(1), match.group(2)
+        return _send_owner_message_to_user(chat_id, username, message_text)
+
+    alias_pattern = _direct_message_alias_pattern()
+    match = re.match(
+        rf"^(?:(?:напиши|передай|отправь)\s+)?({alias_pattern})\s*[:：,-]?\s+(.+)$",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if not match:
         return False
-    username, message_text = match.group(1), match.group(2)
-    return _send_owner_message_to_user(chat_id, username, message_text)
+
+    username = _resolve_direct_message_alias(match.group(1))
+    if not username:
+        return False
+    return _send_owner_message_to_user(chat_id, username, match.group(2))
 
 
 user_profiles: dict = _load_user_profiles()
