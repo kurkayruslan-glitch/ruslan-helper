@@ -1058,6 +1058,7 @@ USER_PROFILES_FILE = CONFIG.user_profiles_file
 PENDING_USER_MESSAGES_FILE = CONFIG.pending_user_messages_file
 PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
+    "nesss31": "Гуцульский комерс",
     "skyyylit": "инопланетянин",
 }
 PENDING_DEVELOPER_USERNAMES = {
@@ -1065,6 +1066,10 @@ PENDING_DEVELOPER_USERNAMES = {
     "skyyylit",
 }
 PINNED_PROFILE_RULES = {
+    "nesss31": (
+        "Обращайся к этому пользователю как к Гуцульскому комерсу. "
+        "Можно с дружеским стёбом и рабочим вайбом, но без злой травли."
+    ),
     "skyyylit": (
         "Обращайся к этому пользователю как к инопланетянину, человеку из другой Вселенной, "
         "гостю нашей планеты или похожими дружескими вариантами. Варьируй формулировки, "
