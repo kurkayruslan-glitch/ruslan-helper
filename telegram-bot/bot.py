@@ -295,8 +295,8 @@ def _extract_direct_sauron_query(text: str) -> str | None:
     return None
 
 
-def _run_sauron_search(chat_id: int, query: str, reply_markup=None):
-    """Запускает Sauron и отправляет результат, не светя запрос в логах."""
+def _run_sauron_search_worker(chat_id: int, query: str, reply_markup=None):
+    """Выполняет Sauron-поиск и отправляет результат, не светя запрос в логах."""
     query = (query or "").strip()
     if not query:
         _btn_sauron_search(chat_id)
@@ -324,6 +324,22 @@ def _run_sauron_search(chat_id: int, query: str, reply_markup=None):
     if reply_markup is None and chat_id > 0:
         reply_markup = jarvis_menu() if chat_id in jarvis_mode else main_menu(chat_id)
     safe_send(chat_id, result, reply_markup)
+
+
+def _run_sauron_search(chat_id: int, query: str, reply_markup=None):
+    """Запускает Sauron в фоне, чтобы Telegram webhook не ждал долгий поиск."""
+    query = (query or "").strip()
+    if not query:
+        _btn_sauron_search(chat_id)
+        return
+
+    thread = threading.Thread(
+        target=_run_sauron_search_worker,
+        args=(chat_id, query, reply_markup),
+        daemon=True,
+        name=f"sauron-search-{chat_id}",
+    )
+    thread.start()
 
 
 # ──────────────────────────────────────────────
@@ -4634,7 +4650,7 @@ def handle_photo(message):
             bot.send_message(chat_id, f"❌ Не смог отредактировать фото: {hint[:500]}")
 
 
-def _run_file_sauron(chat_id: int, doc, filename: str):
+def _run_file_sauron_worker(chat_id: int, doc, filename: str):
     """Скачивает файл и запускает полный Sauron-поиск через sauron_file_search."""
     markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
     msg = bot.send_message(
@@ -4737,6 +4753,17 @@ def _run_file_sauron(chat_id: int, doc, filename: str):
             )
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
+
+
+def _run_file_sauron(chat_id: int, doc, filename: str):
+    """Запускает файловый Sauron в фоне, чтобы webhook не обрывался на долгом поиске."""
+    thread = threading.Thread(
+        target=_run_file_sauron_worker,
+        args=(chat_id, doc, filename),
+        daemon=True,
+        name=f"file-sauron-{chat_id}",
+    )
+    thread.start()
 
 
 def make_sms_link(phone: str, text: str) -> str:
