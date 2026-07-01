@@ -313,6 +313,7 @@ def _run_sauron_search_worker(chat_id: int, query: str, reply_markup=None):
         result = sauron.search(query)
     except Exception as e:
         logger.exception("Sauron search failed for chat_id=%s", chat_id)
+        _record_bot_error("sauron search", e, extra=f"chat_id={chat_id}")
         result = f"❌ Ошибка Sauron: {str(e)[:200]}"
 
     if progress_msg is not None:
@@ -1073,6 +1074,17 @@ KNOWN_USERS_FILE = CONFIG.known_users_file
 USER_PROFILES_FILE = CONFIG.user_profiles_file
 PENDING_USER_MESSAGES_FILE = CONFIG.pending_user_messages_file
 START_EVENTS_FILE = os.environ.get("START_EVENTS_FILE", "start_events.json")
+ERROR_LOG_FILE = os.environ.get("ERROR_LOG_FILE", "bot_errors.json")
+ERROR_NOTIFY_THROTTLE_SEC = int(os.environ.get("ERROR_NOTIFY_THROTTLE_SEC", "600"))
+ROLE_LABELS = {
+    "owner": "Владелец",
+    "developer": "Разработчик",
+    "worker": "Работник",
+    "driver": "Водитель",
+    "guest": "Гость",
+}
+ROLE_BUTTONS = ("developer", "worker", "driver", "guest")
+_error_notify_cache: dict[str, float] = {}
 PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
     "nesss31": "Гуцульский комерс",
@@ -1085,12 +1097,15 @@ PENDING_DEVELOPER_USERNAMES = {
 DIRECT_MESSAGE_ALIASES = {
     "skyyylit": "skyyylit",
     "инопланетянин": "skyyylit",
+    "инопланетянина": "skyyylit",
     "инопланетянину": "skyyylit",
     "инопланетяну": "skyyylit",
     "nesss31": "nesss31",
     "гуцульский комерс": "nesss31",
+    "гуцульского комерса": "nesss31",
     "гуцульскому комерсу": "nesss31",
     "гуцульский коммерс": "nesss31",
+    "гуцульского коммерса": "nesss31",
     "гуцульскому коммерсу": "nesss31",
     "комерс": "nesss31",
     "комерсу": "nesss31",
@@ -1189,6 +1204,65 @@ def _save_start_events(events: list):
     write_json_file(START_EVENTS_FILE, events[-1000:], logger=logger)
 
 
+def _load_error_log() -> list:
+    data = read_json_file(ERROR_LOG_FILE, [], logger=logger)
+    return data if isinstance(data, list) else []
+
+
+def _save_error_log(items: list):
+    write_json_file(ERROR_LOG_FILE, items[-200:], logger=logger)
+
+
+def _record_bot_error(area: str, error, notify_owner: bool = True, extra: str = ""):
+    """Пишет ошибку в короткий журнал и, если можно, уведомляет Руслана."""
+    try:
+        now = _now_local().strftime("%Y-%m-%d %H:%M")
+        entry = {
+            "time": now,
+            "area": str(area or "bot")[:80],
+            "error": str(error or "")[:500],
+            "extra": str(extra or "")[:500],
+        }
+        errors = _load_error_log()
+        errors.append(entry)
+        _save_error_log(errors)
+
+        if notify_owner:
+            cache_key = f"{entry['area']}:{entry['error'][:120]}"
+            last_notify = float(_error_notify_cache.get(cache_key, 0) or 0)
+            if time.time() - last_notify < ERROR_NOTIFY_THROTTLE_SEC:
+                return
+            _error_notify_cache[cache_key] = time.time()
+            text = (
+                "⚠️ *Ошибка бота*\n\n"
+                f"Где: `{_md_escape(entry['area'])}`\n"
+                f"Что: `{_md_escape(entry['error'][:300])}`\n"
+                f"Время: `{entry['time']}`"
+            )
+            if extra:
+                text += f"\nДетали: `{_md_escape(str(extra)[:200])}`"
+            try:
+                bot.send_message(OWNER_ID, text, parse_mode="Markdown")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _recent_errors(hours: int = 24) -> list:
+    items = _load_error_log()
+    cutoff = _now_local().timestamp() - hours * 3600
+    out = []
+    for item in items:
+        try:
+            ts = datetime.strptime(str(item.get("time", "")), "%Y-%m-%d %H:%M").timestamp()
+        except Exception:
+            ts = 0
+        if ts >= cutoff:
+            out.append(item)
+    return out
+
+
 def _record_start_event(message, role: str):
     """Persist and notify Ruslan about every private /start."""
     try:
@@ -1255,6 +1329,7 @@ def _record_start_event(message, role: str):
         safe_send(OWNER_ID, text, main_menu(OWNER_ID))
     except Exception as e:
         logger.exception("Start event tracking failed: %s", e)
+        _record_bot_error("start tracking", e)
 
 
 def _queue_pending_user_message(username: str, text: str):
@@ -1395,6 +1470,15 @@ def _track_user(message, event: str = "message", from_user=None):
 
         if username:
             uname = username.lower()
+            saved_by_username = user_profiles.pop(f"username:{uname}", None)
+            if isinstance(saved_by_username, dict):
+                for note in saved_by_username.get("notes", []) or []:
+                    notes = profile.setdefault("notes", [])
+                    if note and note not in notes:
+                        notes.append(note)
+                for field in ("custom_name", "display_rule"):
+                    if saved_by_username.get(field) and not profile.get(field):
+                        profile[field] = saved_by_username[field]
             for old_name, old_chat_id in list(known_users.items()):
                 if old_chat_id == user_id and old_name != uname:
                     known_users.pop(old_name, None)
@@ -1409,9 +1493,11 @@ def _track_user(message, event: str = "message", from_user=None):
                         bot.send_message(chat_id, pending_text)
                     except Exception as send_error:
                         logger.warning("Cannot send pending message to @%s: %s", uname, send_error)
+                        _record_bot_error("pending message delivery", send_error, extra=f"@{uname}")
         _save_user_profiles()
     except Exception as e:
         logger.exception("User tracking failed: %s", e)
+        _record_bot_error("user tracking", e)
 
 
 def _md_escape(value) -> str:
@@ -1544,6 +1630,11 @@ def _actor_identity_block(chat_id: int, from_user=None) -> str:
     display_rule = str(profile.get("display_rule") or "").strip()
     if display_rule:
         lines.append(f"- Особое правило обращения: {display_rule}")
+    notes = [str(item).strip() for item in (profile.get("notes") or []) if str(item).strip()]
+    if notes:
+        lines.append("- Память о пользователе:")
+        for note in notes[-6:]:
+            lines.append(f"  • {note}")
 
     return "\n".join(lines) + "\n"
 
@@ -1708,6 +1799,378 @@ def _format_users_report(limit: int = 50) -> str:
     return "\n".join(lines).strip()
 
 
+def _format_start_events_report(limit: int = 30) -> str:
+    events = _load_start_events()
+    if not events:
+        return "🆕 Пока никто не нажимал /start."
+
+    shown = list(reversed(events[-limit:]))
+    unique_users = {
+        str(item.get("user_id") or item.get("username") or "")
+        for item in events
+        if item.get("user_id") or item.get("username")
+    }
+    lines = [
+        "🆕 */start — кто заходил*",
+        "",
+        f"Всего стартов: *{len(events)}*",
+        f"Уникальных людей: *{len(unique_users)}*",
+        f"Последние: *{len(shown)}*",
+        "",
+    ]
+    for i, item in enumerate(shown, 1):
+        username = str(item.get("username") or "").strip()
+        label = f"@{username}" if username else "без username"
+        full_name = str(item.get("full_name") or "").strip() or str(item.get("first_name") or "").strip()
+        role = ROLE_LABELS.get(str(item.get("role") or "guest"), str(item.get("role") or "guest"))
+        lines.append(
+            f"{i}. *{_md_escape(full_name or label)}* · `{_md_escape(label)}`\n"
+            f"   ID: `{item.get('user_id') or '?'}` · роль: *{_md_escape(role)}* · стартов: `{item.get('start_count_for_user') or 1}`\n"
+            f"   Время: `{_md_escape(item.get('time') or '?')}`"
+        )
+    return "\n\n".join(lines).strip()
+
+
+def _format_pending_messages_report() -> str:
+    pending = _load_pending_user_messages()
+    if not pending:
+        return "📨 Очередь сообщений пустая."
+
+    total = sum(len(v) for v in pending.values() if isinstance(v, list))
+    lines = [
+        "📨 *Очередь сообщений людям*",
+        "",
+        f"Людей в очереди: *{len(pending)}*",
+        f"Сообщений всего: *{total}*",
+        "",
+    ]
+    for username, messages in sorted(pending.items()):
+        messages = list(messages or [])
+        lines.append(f"@{_md_escape(username)} — *{len(messages)}*")
+        for msg in messages[-3:]:
+            clean = str(msg).replace("\n", " ").strip()
+            if len(clean) > 120:
+                clean = clean[:117] + "..."
+            lines.append(f"  · {_md_escape(clean)}")
+    return "\n".join(lines).strip()
+
+
+def _format_error_log_report(limit: int = 25) -> str:
+    errors = _load_error_log()
+    if not errors:
+        return "✅ Журнал ошибок пустой."
+
+    shown = list(reversed(errors[-limit:]))
+    fresh = _recent_errors(24)
+    lines = [
+        "⚠️ *Журнал ошибок бота*",
+        "",
+        f"Всего записей: *{len(errors)}*",
+        f"За 24 часа: *{len(fresh)}*",
+        "",
+    ]
+    for i, item in enumerate(shown, 1):
+        area = _md_escape(item.get("area") or "bot")
+        err = _md_escape(item.get("error") or "")
+        extra = _md_escape(item.get("extra") or "")
+        lines.append(f"{i}. `{_md_escape(item.get('time') or '?')}` · *{area}*")
+        lines.append(f"   `{err[:300]}`")
+        if extra:
+            lines.append(f"   Детали: `{extra[:200]}`")
+    return "\n".join(lines).strip()
+
+
+def _profile_key_for_username(username: str) -> str:
+    uname = str(username or "").strip().lstrip("@").lower()
+    if uname in known_users:
+        return str(known_users[uname])
+    for key, profile in user_profiles.items():
+        if str(profile.get("username") or "").strip().lstrip("@").lower() == uname:
+            return str(key)
+    return f"username:{uname}"
+
+
+def _handle_owner_profile_memory_command(chat_id: int, text: str) -> bool:
+    if chat_id != OWNER_ID:
+        return False
+    raw = str(text or "").strip()
+    match = re.match(
+        r"^(?:запомни|запиши)\s+про\s+(.+?)\s*[:：,-]\s*(.+)$",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return False
+
+    target_raw, note = match.group(1).strip(), match.group(2).strip()
+    username = _resolve_direct_message_alias(target_raw) or target_raw.strip().lstrip("@").lower()
+    if not re.match(r"^[a-zA-Z0-9_]{3,32}$", username):
+        bot.send_message(chat_id, "⚠️ Не понял человека. Формат: `запомни про @username: текст`", parse_mode="Markdown")
+        return True
+    if not note:
+        bot.send_message(chat_id, "⚠️ Пустая заметка. Напиши после двоеточия, что запомнить.")
+        return True
+
+    key = _profile_key_for_username(username)
+    profile = dict(user_profiles.get(key, {}))
+    profile.setdefault("username", username)
+    profile.setdefault("user_id", known_users.get(username, 0))
+    profile.setdefault("chat_id", known_users.get(username, 0))
+    _apply_pinned_profile_rule(profile, username)
+    notes = [str(item).strip() for item in profile.get("notes", []) if str(item).strip()]
+    if note not in notes:
+        notes.append(note)
+    profile["notes"] = notes[-20:]
+    user_profiles[key] = profile
+    _save_user_profiles()
+    bot.send_message(chat_id, f"🧠 Запомнил про @{username}: {note}", reply_markup=main_menu(chat_id))
+    return True
+
+
+def _format_people_memory_report(limit: int = 40) -> str:
+    profiles = {str(k): dict(v) for k, v in user_profiles.items() if isinstance(v, dict)}
+    for username, custom_name in PINNED_PROFILE_NAMES.items():
+        key = _profile_key_for_username(username)
+        profile = profiles.setdefault(key, {
+            "username": username,
+            "custom_name": custom_name,
+            "notes": [],
+        })
+        _apply_pinned_profile_rule(profile, username)
+
+    if not profiles:
+        return "🧠 Память по людям пока пустая."
+
+    items = list(profiles.values())
+    items.sort(key=lambda p: (p.get("last_seen") or p.get("first_seen") or ""), reverse=True)
+    lines = [
+        "🧠 *Память по людям*",
+        "",
+        "Добавить заметку: `запомни про @username: текст`",
+        "",
+    ]
+    for profile in items[:limit]:
+        username = str(profile.get("username") or "").strip()
+        name = _profile_display_name(profile, f"@{username}" if username else "Без имени")
+        notes = [str(item).strip() for item in profile.get("notes", []) if str(item).strip()]
+        rule = str(profile.get("display_rule") or "").strip()
+        last_seen = profile.get("last_seen") or profile.get("first_seen") or "не заходил"
+        lines.append(f"*{_md_escape(name)}* · `{_md_escape('@' + username if username else 'без username')}`")
+        lines.append(f"Последний раз: `{_md_escape(last_seen)}`")
+        if rule:
+            lines.append(f"Правило: {_md_escape(rule[:180])}")
+        if notes:
+            for note in notes[-3:]:
+                lines.append(f"  · {_md_escape(note)}")
+        else:
+            lines.append("  · заметок нет")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _admin_menu_keyboard() -> types.InlineKeyboardMarkup:
+    inline = types.InlineKeyboardMarkup(row_width=2)
+    inline.add(
+        types.InlineKeyboardButton("🆕 Старты", callback_data="admin_starts"),
+        types.InlineKeyboardButton("📨 Очередь", callback_data="admin_queue"),
+    )
+    inline.add(
+        types.InlineKeyboardButton("⚠️ Ошибки", callback_data="admin_errors"),
+        types.InlineKeyboardButton("🔍 Sauron чек", callback_data="admin_sauron"),
+    )
+    inline.add(
+        types.InlineKeyboardButton("🎚 Роли", callback_data="admin_roles"),
+        types.InlineKeyboardButton("🧠 Люди", callback_data="admin_people"),
+    )
+    return inline
+
+
+def _btn_admin_panel(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Админка только для Руслана.", reply_markup=main_menu(chat_id))
+        return
+    starts = len(_load_start_events())
+    pending = _load_pending_user_messages()
+    pending_count = sum(len(v) for v in pending.values() if isinstance(v, list))
+    fresh_errors = len(_recent_errors(24))
+    roles_count = len(list_roles())
+    text = (
+        "🛠 *Админка бота*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🆕 Стартов записано: *{starts}*\n"
+        f"📨 Сообщений в очереди: *{pending_count}*\n"
+        f"⚠️ Ошибок за 24ч: *{fresh_errors}*\n"
+        f"🎚 Ролей назначено: *{roles_count}*\n\n"
+        "Выбирай, что смотреть."
+    )
+    safe_send(chat_id, text, _admin_menu_keyboard())
+
+
+def _btn_start_events(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Старты видит только Руслан.", reply_markup=main_menu(chat_id))
+        return
+    safe_send(chat_id, _format_start_events_report(), _admin_menu_keyboard())
+
+
+def _btn_pending_messages(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Очередь сообщений видит только Руслан.", reply_markup=main_menu(chat_id))
+        return
+    safe_send(chat_id, _format_pending_messages_report(), _admin_menu_keyboard())
+
+
+def _btn_error_log(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Журнал ошибок видит только Руслан.", reply_markup=main_menu(chat_id))
+        return
+    inline = _admin_menu_keyboard()
+    inline.add(types.InlineKeyboardButton("🧹 Очистить ошибки", callback_data="admin_errors_clear"))
+    safe_send(chat_id, _format_error_log_report(), inline)
+
+
+def _btn_people_memory(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Память по людям видит только Руслан.", reply_markup=main_menu(chat_id))
+        return
+    safe_send(chat_id, _format_people_memory_report(), _admin_menu_keyboard())
+
+
+def _btn_sauron_diagnostics(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Диагностика Sauron только для Руслана.", reply_markup=main_menu(chat_id))
+        return
+    lines = ["🔍 *Sauron диагностика*", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+    try:
+        lines.append("*Статус:*")
+        lines.append(sauron.status())
+    except Exception as e:
+        lines.append(f"⚠️ Модуль Sauron упал: `{_md_escape(e)}`")
+        _record_bot_error("sauron.status", e, notify_owner=False)
+
+    if os.environ.get("SAURON_API_KEY"):
+        try:
+            lines.append("")
+            lines.append(f"*Баланс:* {sauron.get_balance()}")
+        except Exception as e:
+            lines.append(f"*Баланс:* ⚠️ ошибка `{_md_escape(e)}`")
+            _record_bot_error("sauron.balance", e, notify_owner=False)
+    else:
+        lines.append("")
+        lines.append("*Баланс:* ⚠️ нет `SAURON_API_KEY`")
+
+    libs = [
+        ("xlsx", getattr(sauron_file_search, "_HAS_OPENPYXL", False)),
+        ("xls", getattr(sauron_file_search, "_HAS_XLRD", False)),
+        ("docx", getattr(sauron_file_search, "_HAS_DOCX", False)),
+        ("pdf", getattr(sauron_file_search, "_HAS_PDF", False)),
+    ]
+    lines.append("")
+    lines.append("*Файловый поиск:*")
+    lines.extend(f"• {name}: {'✅' if ok else '⚠️ нет библиотеки'}" for name, ok in libs)
+
+    sauron_errors = [
+        item for item in _load_error_log()
+        if "sauron" in str(item.get("area", "")).lower()
+        or "sauron" in str(item.get("error", "")).lower()
+    ][-5:]
+    lines.append("")
+    if sauron_errors:
+        lines.append("*Последние ошибки Sauron:*")
+        for item in reversed(sauron_errors):
+            lines.append(f"• `{_md_escape(item.get('time') or '?')}` — `{_md_escape(item.get('error') or '')[:180]}`")
+    else:
+        lines.append("Последних ошибок Sauron в журнале нет.")
+    safe_send(chat_id, "\n".join(lines), _admin_menu_keyboard())
+
+
+def _role_target_profiles(limit: int = 20) -> list[dict]:
+    profiles = {str(k): dict(v) for k, v in user_profiles.items() if isinstance(v, dict)}
+    for username, chat_id in known_users.items():
+        key = str(chat_id)
+        profile = profiles.setdefault(key, {"username": username, "chat_id": chat_id, "user_id": chat_id})
+        profile.setdefault("username", username)
+        profile.setdefault("chat_id", chat_id)
+        profile.setdefault("user_id", chat_id)
+        _apply_pinned_profile_rule(profile, username)
+    out = []
+    for profile in profiles.values():
+        try:
+            target_id = int(profile.get("chat_id") or profile.get("user_id") or 0)
+        except Exception:
+            target_id = 0
+        if not target_id or target_id == OWNER_ID:
+            continue
+        profile["chat_id"] = target_id
+        out.append(profile)
+    out.sort(key=lambda p: (p.get("last_seen") or p.get("first_seen") or ""), reverse=True)
+    return out[:limit]
+
+
+def _btn_roles_panel(chat_id: int):
+    if chat_id != OWNER_ID:
+        bot.send_message(chat_id, "🔒 Ролями управляет только Руслан.", reply_markup=main_menu(chat_id))
+        return
+    targets = _role_target_profiles()
+    inline = types.InlineKeyboardMarkup(row_width=1)
+    for profile in targets:
+        target_id = int(profile.get("chat_id") or profile.get("user_id") or 0)
+        username = str(profile.get("username") or "").strip()
+        name = _profile_display_name(profile, f"@{username}" if username else str(target_id))
+        role = ROLE_LABELS.get(get_role(target_id), get_role(target_id))
+        label = f"{name} · @{username} · {role}" if username else f"{name} · {target_id} · {role}"
+        if len(label) > 58:
+            label = label[:55] + "..."
+        inline.add(types.InlineKeyboardButton(label, callback_data=f"admin_role_user:{target_id}"))
+    inline.add(types.InlineKeyboardButton("⬅️ Админка", callback_data="admin_main"))
+    text = (
+        "🎚 *Роли пользователей*\n\n"
+        "Выбери человека, потом роль. Через кнопки намеренно нельзя назначить владельца — чтобы случайно не раздать полный доступ."
+    )
+    if not targets:
+        text += "\n\nПока нет людей для назначения ролей."
+    safe_send(chat_id, text, inline)
+
+
+def _btn_role_user(chat_id: int, target_id: int):
+    if chat_id != OWNER_ID:
+        return
+    profile = _profile_for_chat_id(target_id)
+    username = str(profile.get("username") or "").strip()
+    name = _profile_display_name(profile, f"id {target_id}")
+    current = get_role(target_id)
+    inline = types.InlineKeyboardMarkup(row_width=2)
+    for role in ROLE_BUTTONS:
+        prefix = "✅ " if current == role else ""
+        inline.add(types.InlineKeyboardButton(
+            prefix + ROLE_LABELS.get(role, role),
+            callback_data=f"admin_set_role:{target_id}:{role}",
+        ))
+    inline.add(types.InlineKeyboardButton("⬅️ К списку ролей", callback_data="admin_roles"))
+    safe_send(
+        chat_id,
+        f"🎚 *Роль пользователя*\n\n"
+        f"Кто: *{_md_escape(name)}* `{_md_escape('@' + username if username else str(target_id))}`\n"
+        f"Сейчас: *{ROLE_LABELS.get(current, current)}*",
+        inline,
+    )
+
+
+def _set_user_role_from_admin(chat_id: int, target_id: int, role: str):
+    if chat_id != OWNER_ID:
+        return
+    if role not in ROLE_BUTTONS:
+        bot.send_message(chat_id, "⚠️ Эту роль через кнопки не назначаю.")
+        return
+    grant_access(target_id)
+    set_role(target_id, role)
+    profile = _profile_for_chat_id(target_id)
+    username = str(profile.get("username") or "").strip()
+    label = f"@{username}" if username else str(target_id)
+    bot.send_message(chat_id, f"✅ {_md_escape(label)} теперь: *{ROLE_LABELS.get(role, role)}*.", parse_mode="Markdown")
+    _btn_role_user(chat_id, target_id)
+
+
 def main_menu(chat_id: int | None = None):
     """Главное меню — только нужные рабочие команды."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -1719,7 +2182,7 @@ def main_menu(chat_id: int | None = None):
     if chat_id is not None and _can_access_code(chat_id):
         markup.add("📂 Код")
     if chat_id == OWNER_ID:
-        markup.add("👥 Пользователи")
+        markup.add("👥 Пользователи", "🛠 Админка")
     return markup
 
 
@@ -1740,6 +2203,13 @@ BOT_COMMANDS = (
     ("memory", "память бота"),
     ("forget", "очистить историю диалога"),
     ("users", "кто пользуется ботом"),
+    ("admin", "админка бота"),
+    ("starts", "кто нажимал start"),
+    ("errors", "журнал ошибок"),
+    ("queue", "очередь сообщений"),
+    ("roles", "роли пользователей"),
+    ("people_memory", "память по людям"),
+    ("sauron_status", "диагностика Sauron"),
 )
 
 
@@ -2441,6 +2911,9 @@ def process_text(chat_id, text, from_user=None):
     if _handle_owner_direct_message_command(chat_id, t):
         return
 
+    if _handle_owner_profile_memory_command(chat_id, t):
+        return
+
     # ══════════════════════════════════════════════════════════════════
     # 1. СОСТОЯНИЯ ОЖИДАНИЯ — всегда первые (мультишаговые диалоги)
     # ══════════════════════════════════════════════════════════════════
@@ -2753,6 +3226,15 @@ def process_text(chat_id, text, from_user=None):
             "👥 пользователи": lambda: _btn_users(chat_id),
             "пользователи": lambda: _btn_users(chat_id),
             "кто пользуется ботом": lambda: _btn_users(chat_id),
+            "🛠 админка": lambda: _btn_admin_panel(chat_id),
+            "админка": lambda: _btn_admin_panel(chat_id),
+            "ошибки": lambda: _btn_error_log(chat_id),
+            "старты": lambda: _btn_start_events(chat_id),
+            "очередь": lambda: _btn_pending_messages(chat_id),
+            "роли": lambda: _btn_roles_panel(chat_id),
+            "память людей": lambda: _btn_people_memory(chat_id),
+            "sauron чек": lambda: _btn_sauron_diagnostics(chat_id),
+            "саурон чек": lambda: _btn_sauron_diagnostics(chat_id),
             "🧠 что ты умеешь?": lambda: _btn_skills(chat_id),
             "что ты умеешь?": lambda: _btn_skills(chat_id),
             "что ты умеешь": lambda: _btn_skills(chat_id),
@@ -2787,6 +3269,19 @@ def process_text(chat_id, text, from_user=None):
         "пользователи":          lambda: _btn_users(chat_id),
         "кто пользуется ботом":  lambda: _btn_users(chat_id),
         "кто пользуется":        lambda: _btn_users(chat_id),
+        "🛠 админка":            lambda: _btn_admin_panel(chat_id),
+        "админка":               lambda: _btn_admin_panel(chat_id),
+        "ошибки":                lambda: _btn_error_log(chat_id),
+        "журнал ошибок":         lambda: _btn_error_log(chat_id),
+        "старты":                lambda: _btn_start_events(chat_id),
+        "кто нажал старт":       lambda: _btn_start_events(chat_id),
+        "очередь":               lambda: _btn_pending_messages(chat_id),
+        "очередь сообщений":     lambda: _btn_pending_messages(chat_id),
+        "роли":                  lambda: _btn_roles_panel(chat_id),
+        "память людей":          lambda: _btn_people_memory(chat_id),
+        "память по людям":       lambda: _btn_people_memory(chat_id),
+        "sauron чек":            lambda: _btn_sauron_diagnostics(chat_id),
+        "саурон чек":            lambda: _btn_sauron_diagnostics(chat_id),
         "🔍 саурон":             lambda: _btn_sauron_search(chat_id),
         "саурон":                lambda: _btn_sauron_search(chat_id),
         "📁 файл → саурон":     lambda: _btn_file_sauron(chat_id),
@@ -3163,6 +3658,23 @@ def _btn_morning_brief(chat_id):
     except Exception:
         pass
 
+    admin_lines = []
+    if chat_id == OWNER_ID:
+        try:
+            admin_lines.append(f"  · Ошибки за 24ч: {len(_recent_errors(24))}")
+        except Exception:
+            pass
+        try:
+            pending_messages = _load_pending_user_messages()
+            queue_count = sum(len(v) for v in pending_messages.values() if isinstance(v, list))
+            admin_lines.append(f"  · Очередь сообщений: {queue_count}")
+        except Exception:
+            pass
+        try:
+            admin_lines.append(f"  · Sauron: {sauron.status().splitlines()[0]}")
+        except Exception:
+            admin_lines.append("  · Sauron: ⚠️ ошибка")
+
     day_names = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
     date_str = f"{day_names[now.weekday()]}, {now.strftime('%d.%m.%Y')}"
 
@@ -3183,6 +3695,10 @@ def _btn_morning_brief(chat_id):
         lines.append("")
     else:
         lines.append("🔔 Напоминаний нет.")
+        lines.append("")
+    if admin_lines:
+        lines.append("🛠 *Штаб бота:*")
+        lines.extend(admin_lines)
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━")
@@ -4071,6 +4587,7 @@ CODE_DENYLIST = {
     "user_profiles.json",
     "pending_user_messages.json",
     "start_events.json",
+    "bot_errors.json",
     "memory.json",
 }  # содержат приватные данные
 
@@ -4391,6 +4908,55 @@ def cmd_users(message):
     _btn_users(chat_id)
 
 
+@bot.message_handler(commands=['admin'])
+def cmd_admin(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/admin")
+    _btn_admin_panel(chat_id)
+
+
+@bot.message_handler(commands=['starts'])
+def cmd_starts(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/starts")
+    _btn_start_events(chat_id)
+
+
+@bot.message_handler(commands=['errors'])
+def cmd_errors(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/errors")
+    _btn_error_log(chat_id)
+
+
+@bot.message_handler(commands=['queue'])
+def cmd_queue(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/queue")
+    _btn_pending_messages(chat_id)
+
+
+@bot.message_handler(commands=['roles'])
+def cmd_roles(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/roles")
+    _btn_roles_panel(chat_id)
+
+
+@bot.message_handler(commands=['people_memory'])
+def cmd_people_memory(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/people_memory")
+    _btn_people_memory(chat_id)
+
+
+@bot.message_handler(commands=['sauron_status'])
+def cmd_sauron_status(message):
+    chat_id = message.chat.id
+    _track_user(message, "command:/sauron_status")
+    _btn_sauron_diagnostics(chat_id)
+
+
 @bot.message_handler(commands=['start'])
 def start(message):
     chat_id = message.chat.id
@@ -4652,7 +5218,7 @@ def handle_photo(message):
 
 def _run_file_sauron_worker(chat_id: int, doc, filename: str):
     """Скачивает файл и запускает полный Sauron-поиск через sauron_file_search."""
-    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
+    markup = jarvis_menu() if chat_id in jarvis_mode else main_menu(chat_id)
     msg = bot.send_message(
         chat_id,
         f"📄 Получил *{filename}* — читаю файл…",
@@ -4664,6 +5230,7 @@ def _run_file_sauron_worker(chat_id: int, doc, filename: str):
         file_info = bot.get_file(doc.file_id)
         data = bot.download_file(file_info.file_path)
     except Exception as e:
+        _record_bot_error("file sauron download", e, extra=filename)
         bot.edit_message_text(f"❌ Не удалось скачать файл: {str(e)[:100]}", chat_id, msg.message_id)
         return
 
@@ -4671,6 +5238,7 @@ def _run_file_sauron_worker(chat_id: int, doc, filename: str):
     try:
         inp_records, parse_err = sauron_file_search.parse_input_file(data, filename)
     except Exception as e:
+        _record_bot_error("file sauron parse", e, extra=filename)
         bot.edit_message_text(f"❌ Ошибка чтения файла: {str(e)[:150]}", chat_id, msg.message_id)
         return
 
@@ -4703,6 +5271,7 @@ def _run_file_sauron_worker(chat_id: int, doc, filename: str):
             data, filename, chat_id, bot, msg.message_id,
         )
     except Exception as e:
+        _record_bot_error("file sauron search", e, extra=filename)
         try:
             bot.edit_message_text(f"❌ Ошибка поиска: {str(e)[:200]}", chat_id, msg.message_id)
         except Exception:
@@ -4752,6 +5321,7 @@ def _run_file_sauron_worker(chat_id: int, doc, filename: str):
                 reply_markup=markup,
             )
     except Exception as e:
+        _record_bot_error("file sauron report", e, extra=filename)
         bot.send_message(chat_id, f"⚠️ Отчёт не отправлен: {str(e)[:100]}", reply_markup=markup)
 
 
@@ -5143,6 +5713,60 @@ def handle_callback(call):
         file_sauron_pending.pop(chat_id, None)
         markup = jarvis_menu() if chat_id in jarvis_mode else main_menu()
         bot.send_message(chat_id, "📁 Поиск отменён.", reply_markup=markup)
+        return
+
+    if call.data == "admin_main":
+        _btn_admin_panel(chat_id)
+        return
+
+    if call.data == "admin_starts":
+        _btn_start_events(chat_id)
+        return
+
+    if call.data == "admin_queue":
+        _btn_pending_messages(chat_id)
+        return
+
+    if call.data == "admin_errors":
+        _btn_error_log(chat_id)
+        return
+
+    if call.data == "admin_errors_clear":
+        if chat_id != OWNER_ID:
+            bot.send_message(chat_id, "🔒 Только Руслан.")
+            return
+        _save_error_log([])
+        bot.send_message(chat_id, "🧹 Журнал ошибок очищен.")
+        _btn_admin_panel(chat_id)
+        return
+
+    if call.data == "admin_sauron":
+        _btn_sauron_diagnostics(chat_id)
+        return
+
+    if call.data == "admin_people":
+        _btn_people_memory(chat_id)
+        return
+
+    if call.data == "admin_roles":
+        _btn_roles_panel(chat_id)
+        return
+
+    if call.data.startswith("admin_role_user:"):
+        try:
+            target_id = int(call.data.split(":", 1)[1])
+        except Exception:
+            bot.send_message(chat_id, "⚠️ Не понял ID пользователя.")
+            return
+        _btn_role_user(chat_id, target_id)
+        return
+
+    if call.data.startswith("admin_set_role:"):
+        try:
+            _, target_id, role = call.data.split(":", 2)
+            _set_user_role_from_admin(chat_id, int(target_id), role)
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Не смог назначить роль: {e}")
         return
 
     if call.data == "add_sheet":
@@ -5557,32 +6181,43 @@ def _send_morning_briefing():
             "",
         ]
 
-        # Краткая аналитика до 2 зарегистрированных таблиц
-        saved = list_sheets()
-        if saved:
-            sheet_names = list(saved.keys())
-            lines.append("📊 *Аналитика таблиц:*")
-            lines.append("")
-            for name in sheet_names[:2]:
-                sheet_id = saved[name]
-                try:
-                    analysis = analyze_sheet_with_ai(sheet_id)
-                    # Обрезаем до ~600 символов, чтобы сводка оставалась краткой
-                    if len(analysis) > 600:
-                        analysis = analysis[:600].rsplit("\n", 1)[0] + "\n..."
-                    lines.append(f"*{name.title()}:*")
-                    lines.append(analysis)
-                    lines.append("")
-                except Exception as e:
-                    lines.append(f"*{name.title()}:* ⚠️ Не удалось получить аналитику ({e})")
-                    lines.append("")
-            if len(sheet_names) > 2:
-                remaining = sheet_names[2:]
-                lines.append(f"📋 Ещё таблиц: {', '.join(remaining)}")
+        # Утренний штаб без таблиц: только здоровье бота и важные сигналы.
+        lines.append("🛠 *Штаб бота:*")
+        try:
+            lines.append(f"  · Sauron: {sauron.status().splitlines()[0]}")
+        except Exception as e:
+            lines.append("  · Sauron: ⚠️ ошибка модуля")
+            _record_bot_error("morning sauron status", e)
+        fresh_errors = _recent_errors(24)
+        lines.append(f"  · Ошибки за 24ч: {len(fresh_errors)}")
+        try:
+            starts_today = [
+                item for item in _load_start_events()
+                if str(item.get("time", "")).startswith(today)
+            ]
+            lines.append(f"  · Новых /start сегодня: {len(starts_today)}")
+        except Exception:
+            lines.append("  · Новых /start сегодня: ─")
+        try:
+            pending_messages = _load_pending_user_messages()
+            queue_count = sum(len(v) for v in pending_messages.values() if isinstance(v, list))
+            lines.append(f"  · Очередь сообщений: {queue_count}")
+        except Exception:
+            lines.append("  · Очередь сообщений: ─")
+        lines.append("")
+
+        # ФОП
+        try:
+            deadlines = tax_calendar.upcoming_deadlines(now, months_ahead=2)
+            if deadlines:
+                lines.append("📋 *ФОП дедлайны:*")
+                for d in deadlines[:2]:
+                    days = (d["deadline"].date() - now.date()).days
+                    warn = " ⚠️" if days <= 14 else ""
+                    lines.append(f"  · {d['kind']} {d['quarter']}: через {days} дн.{warn}")
                 lines.append("")
-        else:
-            lines.append("📊 Таблиц пока нет. Добавь через меню 📗 Таблицы.")
-            lines.append("")
+        except Exception as e:
+            _record_bot_error("morning fop deadlines", e, notify_owner=False)
 
         # Предстоящие напоминания на сегодня
         pending = list_pending(OWNER_ID)
@@ -5602,7 +6237,7 @@ def _send_morning_briefing():
 
         lines.append("Хорошего дня! 💪")
 
-        safe_send(OWNER_ID, "\n".join(lines), main_menu())
+        safe_send(OWNER_ID, "\n".join(lines), main_menu(OWNER_ID))
 
         # Помечаем как отправленное только после успешной отправки
         with _morning_lock:
@@ -5610,6 +6245,7 @@ def _send_morning_briefing():
 
     except Exception as e:
         logger.exception("Morning briefing failed: %s", e)
+        _record_bot_error("morning briefing", e)
 
 
 _last_sheet_monitor_run: datetime | None = None
@@ -5632,6 +6268,7 @@ def _maybe_run_sheet_monitor(now_local: datetime):
         alerts = sheet_monitor.check_all(now_local)
     except Exception as e:
         logger.exception("Sheet monitoring failed: %s", e)
+        _record_bot_error("sheet monitoring", e)
         return
     # Помечаем как успешный запуск только после завершения, чтобы при сбое
     # повторить раньше, а не ждать целый интервал.
@@ -5667,6 +6304,7 @@ def _maybe_run_sheet_monitor(now_local: datetime):
             safe_send(OWNER_ID, alert["text"], inline)
         except Exception as e:
             logger.exception("Cannot send sheet monitoring alert: %s", e)
+            _record_bot_error("sheet monitoring alert", e)
         return
 
     lines = [f"🔔 *Изменения сразу в {len(alerts)} таблицах:*", ""]
@@ -5698,6 +6336,7 @@ def _maybe_run_sheet_monitor(now_local: datetime):
         safe_send(OWNER_ID, "\n".join(lines), inline)
     except Exception as e:
         logger.exception("Cannot send grouped sheet monitoring alert: %s", e)
+        _record_bot_error("sheet monitoring grouped alert", e)
 
 
 def _scheduler_loop():
@@ -5728,11 +6367,13 @@ def _scheduler_loop():
                     mark_fired(reminder_id)
                 except Exception as e:
                     logger.exception("Reminder send failed: %s (%s)", reminder_id, e)
+                    _record_bot_error("reminder send", e, extra=str(reminder_id))
                     # Увеличиваем счётчик ошибок; после MAX_FAILURES — деактивируем
                     mark_failed(reminder_id)
 
         except Exception as e:
             logger.exception("Scheduler loop failed: %s", e)
+            _record_bot_error("scheduler loop", e)
 
         time.sleep(60)
 
