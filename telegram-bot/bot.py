@@ -1196,7 +1196,11 @@ def _send_owner_message_to_user(owner_chat_id: int, username: str, text: str) ->
 
 def _handle_owner_direct_message_command(chat_id: int, text: str) -> bool:
     raw = str(text or "").strip()
-    match = re.match(r"^(?:напиши|передай|отправь)\s+@([A-Za-z0-9_]{3,32})\s*[:：,-]\s*(.+)$", raw, flags=re.IGNORECASE | re.DOTALL)
+    match = re.match(
+        r"^(?:(?:напиши|передай|отправь)\s+)?@([A-Za-z0-9_]{3,32})\s*[:：,-]\s*(.+)$",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if not match:
         return False
     username, message_text = match.group(1), match.group(2)
