@@ -1148,6 +1148,61 @@ def _save_pending_user_messages(data: dict):
     write_json_file(PENDING_USER_MESSAGES_FILE, data, logger=logger)
 
 
+def _queue_pending_user_message(username: str, text: str):
+    username = str(username or "").strip().lstrip("@").lower()
+    text = str(text or "").strip()
+    if not username or not text:
+        return
+    pending = _load_pending_user_messages()
+    messages = pending.setdefault(username, [])
+    messages.append(text)
+    pending[username] = messages[-10:]
+    _save_pending_user_messages(pending)
+
+
+def _send_owner_message_to_user(owner_chat_id: int, username: str, text: str) -> bool:
+    username = str(username or "").strip().lstrip("@").lower()
+    text = str(text or "").strip()
+    if owner_chat_id != OWNER_ID:
+        bot.send_message(owner_chat_id, "🔒 Писать пользователям через бота может только Руслан.")
+        return True
+    if not username or not text:
+        bot.send_message(owner_chat_id, "⚠️ Формат: напиши @username: текст")
+        return True
+
+    outgoing = f"Сообщение от Руслана:\n{text}"
+    target_chat_id = known_users.get(username)
+    if target_chat_id:
+        try:
+            bot.send_message(int(target_chat_id), outgoing)
+            bot.send_message(owner_chat_id, f"✅ Отправил @{username}.")
+            return True
+        except Exception as e:
+            logger.warning("Cannot send direct message to @%s: %s", username, e)
+            _queue_pending_user_message(username, outgoing)
+            bot.send_message(
+                owner_chat_id,
+                f"⚠️ Сейчас не смог отправить @{username}. Сохранил в очередь — доставлю после его /start.",
+            )
+            return True
+
+    _queue_pending_user_message(username, outgoing)
+    bot.send_message(
+        owner_chat_id,
+        f"🕓 @{username} ещё не найден в users. Сохранил сообщение — доставлю, когда он нажмёт /start.",
+    )
+    return True
+
+
+def _handle_owner_direct_message_command(chat_id: int, text: str) -> bool:
+    raw = str(text or "").strip()
+    match = re.match(r"^(?:напиши|передай|отправь)\s+@([A-Za-z0-9_]{3,32})\s*[:：,-]\s*(.+)$", raw, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return False
+    username, message_text = match.group(1), match.group(2)
+    return _send_owner_message_to_user(chat_id, username, message_text)
+
+
 user_profiles: dict = _load_user_profiles()
 
 
@@ -2234,6 +2289,9 @@ def process_text(chat_id, text, from_user=None):
     import re
     t = text.strip()
     tl = t.lower()
+
+    if _handle_owner_direct_message_command(chat_id, t):
+        return
 
     # ══════════════════════════════════════════════════════════════════
     # 1. СОСТОЯНИЯ ОЖИДАНИЯ — всегда первые (мультишаговые диалоги)
