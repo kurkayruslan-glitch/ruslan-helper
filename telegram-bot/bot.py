@@ -1056,6 +1056,7 @@ _chat_memory_lock = threading.Lock()
 KNOWN_USERS_FILE = CONFIG.known_users_file
 USER_PROFILES_FILE = CONFIG.user_profiles_file
 PENDING_USER_MESSAGES_FILE = CONFIG.pending_user_messages_file
+START_EVENTS_FILE = os.environ.get("START_EVENTS_FILE", "start_events.json")
 PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
     "nesss31": "Гуцульский комерс",
@@ -1146,6 +1147,83 @@ def _load_pending_user_messages() -> dict:
 
 def _save_pending_user_messages(data: dict):
     write_json_file(PENDING_USER_MESSAGES_FILE, data, logger=logger)
+
+
+def _load_start_events() -> list:
+    data = read_json_file(START_EVENTS_FILE, [], logger=logger)
+    return data if isinstance(data, list) else []
+
+
+def _save_start_events(events: list):
+    write_json_file(START_EVENTS_FILE, events[-1000:], logger=logger)
+
+
+def _record_start_event(message, role: str):
+    """Persist and notify Ruslan about every private /start."""
+    try:
+        user = getattr(message, "from_user", None)
+        chat = getattr(message, "chat", None)
+        if not user or not chat:
+            return
+        user_id = int(getattr(user, "id", 0) or getattr(chat, "id", 0) or 0)
+        chat_id = int(getattr(chat, "id", user_id) or user_id)
+        if not user_id:
+            return
+
+        username = (getattr(user, "username", None) or "").strip()
+        first_name = (getattr(user, "first_name", None) or "").strip()
+        last_name = (getattr(user, "last_name", None) or "").strip()
+        full_name = " ".join(p for p in (first_name, last_name) if p).strip()
+        now = _now_local().strftime("%Y-%m-%d %H:%M")
+
+        events = _load_start_events()
+        previous_count = sum(
+            1 for item in events
+            if str(item.get("user_id", "")) == str(user_id)
+            or (username and str(item.get("username", "")).lower() == username.lower())
+        )
+        entry = {
+            "time": now,
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "username": username,
+            "first_name": first_name,
+            "last_name": last_name,
+            "full_name": full_name,
+            "language_code": getattr(user, "language_code", "") or "",
+            "role": role,
+            "start_count_for_user": previous_count + 1,
+        }
+        events.append(entry)
+        _save_start_events(events)
+
+        if user_id == OWNER_ID:
+            return
+
+        profile = {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "username": username,
+            "full_name": full_name,
+            "first_name": first_name,
+            "last_name": last_name,
+        }
+        if username:
+            _apply_pinned_profile_rule(profile, username)
+        display_name = _profile_display_name(profile, f"id {user_id}")
+        username_label = f"@{username}" if username else "без username"
+        text = (
+            "🆕 */start в боте*\n\n"
+            f"Кто: *{_md_escape(display_name)}*\n"
+            f"Username: `{_md_escape(username_label)}`\n"
+            f"ID: `{user_id}`\n"
+            f"Роль: `{_md_escape(role or 'guest')}`\n"
+            f"Стартов от него: `{previous_count + 1}`\n"
+            f"Время: `{now}`"
+        )
+        safe_send(OWNER_ID, text, main_menu(OWNER_ID))
+    except Exception as e:
+        logger.exception("Start event tracking failed: %s", e)
 
 
 def _queue_pending_user_message(username: str, text: str):
@@ -3926,6 +4004,7 @@ CODE_DENYLIST = {
     "known_users.json",
     "user_profiles.json",
     "pending_user_messages.json",
+    "start_events.json",
     "memory.json",
 }  # содержат приватные данные
 
@@ -4264,6 +4343,7 @@ def start(message):
                          reply_markup=types.ReplyKeyboardRemove())
         return
     role = auto_role or get_role(chat_id)
+    _record_start_event(message, role)
     if chat_id == OWNER_ID:
         set_role(chat_id, "owner")
         history = grok_history.get(chat_id, [])
