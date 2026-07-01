@@ -190,7 +190,7 @@ def _chat_title(message) -> str:
 
 
 def _reply_markup_for_chat(chat_id: int):
-    return None if _chat_is_group(chat_id) else main_menu()
+    return None if _chat_is_group(chat_id) else main_menu(chat_id)
 
 # ──────────────────────────────────────────────
 # ДОСТУП — бот открыт для всех пользователей
@@ -1060,6 +1060,10 @@ PINNED_PROFILE_NAMES = {
     "korablikkkkkkk": "мото моточка",
     "skyyylit": "инопланетянин",
 }
+PENDING_DEVELOPER_USERNAMES = {
+    "nesss31",
+    "skyyylit",
+}
 PINNED_PROFILE_RULES = {
     "skyyylit": (
         "Обращайся к этому пользователю как к инопланетянину, человеку из другой Вселенной, "
@@ -1079,6 +1083,19 @@ def _apply_pinned_profile_rule(profile: dict, username: str) -> dict:
             f'Обращаться к пользователю только как "{pinned_name}".',
         )
     return profile
+
+
+def _apply_pending_username_access(username: str, chat_id: int) -> str | None:
+    """Grant pre-approved roles when a known username first presses /start."""
+    uname = str(username or "").lower().strip().lstrip("@")
+    if not uname:
+        return None
+    if uname in PENDING_DEVELOPER_USERNAMES and chat_id != OWNER_ID:
+        grant_access(chat_id)
+        set_role(chat_id, "developer")
+        logger.info("Pending developer access granted: @%s -> %s", uname, chat_id)
+        return "developer"
+    return None
 
 def _load_known_users() -> dict:
     data = read_json_file(KNOWN_USERS_FILE, {}, logger=logger)
@@ -1281,6 +1298,7 @@ def _actor_identity_block(chat_id: int, from_user=None) -> str:
     role = "owner" if actor_id == OWNER_ID else get_role(actor_id)
     role_label = {
         "owner": "владелец",
+        "developer": "разработчик",
         "worker": "работник",
         "driver": "водитель",
         "guest": "гость",
@@ -1300,7 +1318,11 @@ def _actor_identity_block(chat_id: int, from_user=None) -> str:
         lines.append(f"- Роль пользователя: {role_label}.")
         lines.append("- Руслан — владелец бота и отдельный человек. Говори о Руслане в третьем лице.")
         lines.append("- Не называй текущего пользователя Русланом и не применяй к нему факты Руслана: жена, дочь, бизнес, водитель, ФОП, кошельки, ПК.")
-        lines.append("- Не выполняй действия от имени Руслана для этого пользователя: SMS, звонки, CRM, ПК, код, роли, память владельца.")
+        if role == "developer":
+            lines.append("- Ему разрешён технический доступ к коду бота: просмотр разрешённых файлов и загрузка правок.")
+            lines.append("- Не выполняй личные действия от имени Руслана: SMS, звонки, CRM, ПК, роли и память владельца.")
+        else:
+            lines.append("- Не выполняй действия от имени Руслана для этого пользователя: SMS, звонки, CRM, ПК, код, роли, память владельца.")
         lines.append("- Если пользователь хочет связаться с Русланом, помоги ему написать/позвонить Руслану доступным способом.")
 
     try:
@@ -1405,7 +1427,7 @@ def _display_name_for_chat_id(chat_id: int, fallback: str = "работник") 
 
 def _format_users_report(limit: int = 50) -> str:
     """Формирует отчёт владельцу: кто пользовался ботом и когда."""
-    role_names = {"owner": "Владелец", "driver": "Водитель", "worker": "Работник", "guest": "Гость"}
+    role_names = {"owner": "Владелец", "developer": "Разработчик", "driver": "Водитель", "worker": "Работник", "guest": "Гость"}
     roles_data = list_roles()
 
     profiles = {str(k): dict(v) for k, v in user_profiles.items()}
@@ -1484,6 +1506,8 @@ def main_menu(chat_id: int | None = None):
     markup.add("🔍 Саурон", "📁 Файл → Саурон")
     if chat_id is not None and _photo_editor_allowed(chat_id):
         markup.add("🖼 Фоторедактор")
+    if chat_id is not None and _can_access_code(chat_id):
+        markup.add("📂 Код")
     if chat_id == OWNER_ID:
         markup.add("👥 Пользователи")
     return markup
@@ -1498,6 +1522,8 @@ BOT_COMMANDS = (
     ("sauron", "поиск через Sauron"),
     ("file_sauron", "поиск по файлу через Sauron"),
     ("photo", "фоторедактор"),
+    ("files", "файлы кода"),
+    ("code", "показать файл кода"),
     ("ai_mode", "текущий режим ИИ"),
     ("kryven", "включить Kryven"),
     ("openai", "вернуть обычный ИИ"),
@@ -1582,7 +1608,17 @@ def worker_menu():
     return markup
 
 
+def developer_menu():
+    """Меню для разработчика — код бота без личных owner-действий."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("📂 Код", "🩺 Статус")
+    markup.add("🔍 Саурон", "📁 Файл → Саурон")
+    return markup
+
+
 def get_menu_for_role(role: str):
+    if role == "developer":
+        return developer_menu()
     if role == "worker":
         return worker_menu()
     return main_menu()
@@ -1639,7 +1675,7 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
     owner_only_actions = {
         "send_sms", "call_wife", "call_toha", "sms_toha",
         "assign_role", "remember", "recall", "forget_fact", "forget_all_facts",
-        "show_code", "list_code", "open_url", "search_files", "search_content",
+        "open_url", "search_files", "search_content",
         "screenshot", "screenshot_site", "open_folder", "launch_app", "close_app",
         "list_apps", "crm_expense", "call_restaurant", "sheet_analytics", "sheets_list",
     }
@@ -1741,9 +1777,9 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         username_raw, role = action_param.split(":", 1)
         username = username_raw.lstrip("@").lower().strip()
         role = role.strip()
-        valid_roles = {"driver", "worker", "guest", "owner"}
+        valid_roles = {"driver", "worker", "guest", "developer", "owner"}
         if role not in valid_roles:
-            bot.send_message(chat_id, f"⚠️ Неверная роль «{role}». Допустимые: driver, worker, guest.")
+            bot.send_message(chat_id, f"⚠️ Неверная роль «{role}». Допустимые: developer, driver, worker, guest.")
             return
         if username not in known_users:
             bot.send_message(chat_id, f"⚠️ @{username} ещё не запускал бота. Попроси его написать /start.")
@@ -1751,7 +1787,7 @@ def _handle_grok_action(chat_id: int, action_type: str, action_param: str | None
         target_id = known_users[username]
         grant_access(target_id)
         set_role(target_id, role)
-        role_labels = {"driver": "Водитель", "worker": "Работник", "guest": "Гость", "owner": "Владелец"}
+        role_labels = {"driver": "Водитель", "worker": "Работник", "guest": "Гость", "developer": "Разработчик", "owner": "Владелец"}
         bot.send_message(chat_id, f"✅ @{username} назначен как *{role_labels.get(role, role)}*.",
                          parse_mode="Markdown")
 
@@ -2528,6 +2564,10 @@ def process_text(chat_id, text, from_user=None):
         "📞 звонок":             lambda: _btn_call(chat_id),
         "📞 позвонить":          lambda: _btn_call(chat_id),
         "позвонить":             lambda: _btn_call(chat_id),
+        "📂 код":                lambda: _send_code_list(chat_id),
+        "код":                   lambda: _send_code_list(chat_id),
+        "файлы кода":            lambda: _send_code_list(chat_id),
+        "покажи файлы кода":     lambda: _send_code_list(chat_id),
         "📋 задачи":             lambda: _btn_tasks(chat_id),
         "задачи":                lambda: _btn_tasks(chat_id),
         "👥 пользователи":       lambda: _btn_users(chat_id),
@@ -2561,6 +2601,12 @@ def process_text(chat_id, text, from_user=None):
     if any(trigger in tl for trigger in user_report_triggers):
         _btn_users(chat_id)
         return
+
+    code_show_prefixes = ("покажи код ", "открой код ", "/code ")
+    for prefix in code_show_prefixes:
+        if tl.startswith(prefix):
+            _send_code_file(chat_id, t[len(prefix):].strip())
+            return
 
     photo_prompt = _extract_photo_edit_prompt(t)
     if photo_prompt is not None:
@@ -3814,6 +3860,13 @@ CODE_DENYLIST = {
     "memory.json",
 }  # содержат приватные данные
 
+def _can_access_code(chat_id: int | None) -> bool:
+    try:
+        actor_id = int(chat_id or 0)
+    except Exception:
+        return False
+    return actor_id == OWNER_ID or get_role(actor_id) == "developer"
+
 def _list_code_files() -> list[str]:
     files = []
     for name in sorted(os.listdir(CODE_DIR)):
@@ -3844,7 +3897,8 @@ def _resolve_code_file(name: str) -> str | None:
     return full
 
 def _send_code_list(chat_id: int):
-    if chat_id != OWNER_ID:
+    if not _can_access_code(chat_id):
+        bot.send_message(chat_id, "🔒 Доступ к коду есть только у Руслана и роли developer.")
         return
     files = _list_code_files()
     if not files:
@@ -3857,7 +3911,8 @@ def _send_code_list(chat_id: int):
         parse_mode="Markdown")
 
 def _send_code_file(chat_id: int, name: str):
-    if chat_id != OWNER_ID:
+    if not _can_access_code(chat_id):
+        bot.send_message(chat_id, "🔒 Доступ к коду есть только у Руслана и роли developer.")
         return
     if not name:
         _send_code_list(chat_id)
@@ -3894,7 +3949,8 @@ def cmd_files(message):
 @bot.message_handler(commands=['code'])
 def cmd_code(message):
     chat_id = message.chat.id
-    if chat_id != OWNER_ID:
+    if not _can_access_code(chat_id):
+        bot.send_message(chat_id, "🔒 Доступ к коду есть только у Руслана и роли developer.")
         return
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
@@ -4127,15 +4183,18 @@ def start(message):
     _track_user(message, "command:/start")
     if _chat_is_group(message):
         return
+    auto_role = None
     if message.from_user and message.from_user.username:
-        known_users[message.from_user.username.lower()] = chat_id
+        username = message.from_user.username.lower()
+        known_users[username] = chat_id
         _save_known_users()
         logger.info("Known user saved: @%s -> %s", message.from_user.username, chat_id)
+        auto_role = _apply_pending_username_access(username, chat_id)
     if not is_allowed(chat_id):
         bot.send_message(chat_id, "🔒 Нет доступа. Попроси Руслана добавить твой Telegram ID в whitelist.",
                          reply_markup=types.ReplyKeyboardRemove())
         return
-    role = get_role(chat_id)
+    role = auto_role or get_role(chat_id)
     if chat_id == OWNER_ID:
         set_role(chat_id, "owner")
         history = grok_history.get(chat_id, [])
@@ -4161,6 +4220,12 @@ def start(message):
             f"или просто пиши/говори — пойму сам.",
             parse_mode="Markdown",
             reply_markup=main_menu(chat_id)
+        )
+    elif role == "developer":
+        bot.send_message(
+            chat_id,
+            "👋 Привет. У тебя роль разработчика: можешь смотреть файлы через /files и присылать правки файлом.",
+            reply_markup=developer_menu(),
         )
     elif role == "worker":
         bot.send_message(chat_id, "👋 Привет! Можешь написать Руслану или просто задать вопрос.", reply_markup=worker_menu())
@@ -4711,7 +4776,7 @@ def handle_document(message):
     Роутинг:
     • csv / xlsx / xls / docx / pdf → всегда Sauron-поиск (автоматически)
     • txt → Sauron если пользователь в режиме ожидания файла, иначе — код
-    • py / json / md  → загрузка кода (только владелец)
+    • py / json / md  → загрузка кода (Руслан или developer)
     """
     chat_id = message.chat.id
     _track_user(message, "document")
@@ -4749,9 +4814,9 @@ def handle_document(message):
         _run_file_sauron(chat_id, doc, filename)
         return
 
-    # ── Роутинг: загрузка кода (только владелец) ─────────────────────────
-    if chat_id != OWNER_ID:
-        # Не владелец, не Sauron-файл — молча игнорируем
+    # ── Роутинг: загрузка кода (Руслан или developer) ────────────────────
+    if not _can_access_code(chat_id):
+        # Нет технического доступа, не Sauron-файл — молча игнорируем
         return
 
     caption     = (message.caption or "").strip()

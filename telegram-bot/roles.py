@@ -3,9 +3,11 @@ import os
 
 ROLES_FILE = "roles.json"
 
-# Роли: owner — полный доступ, driver — видит гео владельца, guest — базовый доступ
+# Роли: owner — полный доступ, developer — код бота, driver — гео владельца, worker — связь с Русланом, guest — базовый доступ
 ROLES = {
     "owner": "owner",
+    "developer": "developer",
+    "worker": "worker",
     "driver": "driver",
     "guest": "guest",
 }
